@@ -17,6 +17,8 @@ static class AstroBotLauncher
     static readonly string[] FpsValues = { "30", "35", "45", "50", "55", "60", "unlimited" };
     static readonly string[] SpeedLabels = { "100% - real time", "95%", "90%", "85%", "80%", "75% (recommended)" };
     static readonly string[] SpeedValues = { "100", "95", "90", "85", "80", "75" };
+    static readonly string[] OverlayLabels = { "Off (F2 shows it)", "FPS only", "FPS + CPU, GPU, VRAM, RAM", "Everything (all stats)" };
+    static readonly string[] OverlayValues = { "", "fps", "compact", "full" };
     static readonly string[] SizeLabels = { "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440" };
     static readonly int[,] SizeValues = { { 1280, 720 }, { 1600, 900 }, { 1920, 1080 }, { 2560, 1440 } };
 
@@ -64,7 +66,7 @@ static class AstroBotLauncher
         {
             Text = "Astro Bot",
             AutoScaleMode = AutoScaleMode.Dpi,
-            ClientSize = new Size(460, 470),
+            ClientSize = new Size(460, 500),
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterScreen,
             MaximizeBox = false,
@@ -85,6 +87,7 @@ static class AstroBotLauncher
         var lighting = AddRow(form, "Lighting", LightingLabels, ReadInt(json, "lighting", 0, LightingLabels.Length), ref y);
         var fps = AddRow(form, "Frame rate", FpsLabels, json.Contains("\"fpsv\"") ? ReadInt(json, "fps", 0, FpsLabels.Length) : 0, ref y);
         var speed = AddRow(form, "Game speed", SpeedLabels, ReadInt(json, "speed", 5, SpeedLabels.Length), ref y);
+        var overlay = AddRow(form, "Show stats", OverlayLabels, ReadInt(json, "overlay", 0, OverlayLabels.Length), ref y);
         var size = AddRow(form, "Window size", SizeLabels, ReadInt(json, "size", 2, SizeLabels.Length), ref y);
         var fullscreen = new CheckBox { Text = "Start in fullscreen", AutoSize = true, Checked = ReadBool(json, "fullscreen", true), Location = new Point(150, y) };
         form.Controls.Add(fullscreen);
@@ -108,9 +111,9 @@ static class AstroBotLauncher
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
                 File.WriteAllText(settingsPath, string.Format(
-                    "{{\r\n    \"lighting\":  {0},\r\n    \"fps\":  {1},\r\n    \"size\":  {2},\r\n    \"fullscreen\":  {3},\r\n    \"realspeed\":  {4},\r\n    \"speed\":  {5},\r\n    \"fpsv\":  2\r\n}}",
+                    "{{\r\n    \"lighting\":  {0},\r\n    \"fps\":  {1},\r\n    \"size\":  {2},\r\n    \"fullscreen\":  {3},\r\n    \"realspeed\":  {4},\r\n    \"speed\":  {5},\r\n    \"overlay\":  {6},\r\n    \"fpsv\":  2\r\n}}",
                     lighting.SelectedIndex, fps.SelectedIndex, size.SelectedIndex,
-                    fullscreen.Checked ? "true" : "false", realspeed.Checked ? "true" : "false", speed.SelectedIndex));
+                    fullscreen.Checked ? "true" : "false", realspeed.Checked ? "true" : "false", speed.SelectedIndex, overlay.SelectedIndex));
             }
             catch { }
             form.DialogResult = DialogResult.OK;
@@ -134,6 +137,8 @@ static class AstroBotLauncher
         psi.EnvironmentVariables["KYTY_GPU_FULLSCREEN"] = fullscreen.Checked ? "1" : "0";
         psi.EnvironmentVariables["ASTROHYBRID_GAME_SPEED"] = realspeed.Checked ? "1" : "0";
         psi.EnvironmentVariables["ASTROHYBRID_GAME_SPEED_PERCENT"] = SpeedValues[speed.SelectedIndex];
+        psi.EnvironmentVariables["ASTROHYBRID_OVERLAY"] = OverlayValues[overlay.SelectedIndex];
+        psi.EnvironmentVariables["ASTROHYBRID_WINDOW_TITLE"] = "Astro Bot";
         try
         {
             using (var p = Process.Start(psi)) { p.WaitForExit(); return p.ExitCode; }

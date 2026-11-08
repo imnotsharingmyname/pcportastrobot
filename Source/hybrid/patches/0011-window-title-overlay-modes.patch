@@ -1,0 +1,108 @@
+From a4c0be3ff16139071ced1d1e33f511a4b689c76d Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Sun, 8 Nov 2026 21:13:08 +0000
+Subject: [PATCH] feat(hybrid): ASTROHYBRID_WINDOW_TITLE and
+ ASTROHYBRID_OVERLAY start modes (fps/compact/full)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../presentation/performanceOverlay.cpp       | 38 ++++++++++++++++++-
+ src/graphics/presentation/window/window.cpp   |  5 +++
+ 2 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/presentation/performanceOverlay.cpp b/src/graphics/presentation/performanceOverlay.cpp
+index 6f4f395d..622df922 100644
+--- a/src/graphics/presentation/performanceOverlay.cpp
++++ b/src/graphics/presentation/performanceOverlay.cpp
+@@ -15,6 +15,8 @@
+ #include <condition_variable>
+ #include <cstdarg>
+ #include <cstdio>
++#include <cstdlib>
++#include <cstring>
+ #include <mutex>
+ #include <optional>
+ #include <stop_token>
+@@ -85,6 +87,7 @@ std::mutex            g_frame_mutex;
+ FrameWindow           g_frames;
+ std::atomic<uint64_t> g_generation {0};
+ std::atomic<bool>     g_details {false};
++std::atomic<bool>     g_fps_only {false};
+ std::atomic<uint64_t> g_revision {0};
+ 
+ std::mutex                  g_host_mutex;
+@@ -617,6 +620,24 @@ void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) n
+ }
+ 
+ bool PerformanceOverlayEnabled() noexcept {
++	// ASTROHYBRID_OVERLAY (default unset): fps = FPS line only, compact = the F2 panel, full = the
++	// Shift+F2 panel, shown from the start. F2 and Shift+F2 keep working.
++	static const bool start_mode = [] {
++		const char* mode = std::getenv("ASTROHYBRID_OVERLAY");
++		if (mode == nullptr) {
++			return false;
++		}
++		const bool fps  = std::strcmp(mode, "fps") == 0;
++		const bool full = std::strcmp(mode, "full") == 0;
++		if (fps || full || std::strcmp(mode, "compact") == 0) {
++			g_fps_only.store(fps, std::memory_order_release);
++			g_details.store(full, std::memory_order_release);
++			SetOverlayEnabled(true);
++			g_revision.fetch_add(1, std::memory_order_acq_rel);
++		}
++		return true;
++	}();
++	(void)start_mode;
+ 	return Common::DebugCounters::Enabled();
+ }
+ 
+@@ -626,7 +647,9 @@ void TogglePerformanceOverlay() noexcept {
+ }
+ 
+ void TogglePerformanceOverlayDetails() noexcept {
+-	if (Common::DebugCounters::Enabled()) {
++	if (g_fps_only.exchange(false, std::memory_order_acq_rel) && Common::DebugCounters::Enabled()) {
++		g_details.store(false, std::memory_order_release);
++	} else if (Common::DebugCounters::Enabled()) {
+ 		g_details.store(!g_details.load(std::memory_order_acquire), std::memory_order_release);
+ 	} else {
+ 		g_details.store(true, std::memory_order_release);
+@@ -709,7 +732,18 @@ float DrawPerformanceOverlay(const GraphicContext& graphics, vk::Extent2D extent
+ 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {10.0f * scale, 8.0f * scale});
+ 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {8.0f * scale, 2.0f * scale});
+ 	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, {4.0f * scale, 1.0f * scale});
+-	if (ImGui::Begin("##kyty_performance_overlay", nullptr, FLAGS)) {
++	const bool fps_only = g_fps_only.load(std::memory_order_acquire);
++	if (fps_only) {
++		ImGui::SetNextWindowBgAlpha(0.55f);
++	}
++	const bool open = ImGui::Begin("##kyty_performance_overlay", nullptr, FLAGS);
++	if (open && fps_only) {
++		if (shown.fps > 0.0) {
++			ImGui::TextColored(Color(FrameTimeColor(shown.frame_ms)), "%.0f FPS", shown.fps);
++		} else {
++			ImGui::TextDisabled("-- FPS");
++		}
++	} else if (open) {
+ 		if (shown.fps > 0.0) {
+ 			ImGui::TextColored(Color(FrameTimeColor(shown.frame_ms)), "%.1f FPS   %.1f ms",
+ 			                   shown.fps, shown.frame_ms);
+diff --git a/src/graphics/presentation/window/window.cpp b/src/graphics/presentation/window/window.cpp
+index 00c56f76..38ed15b3 100644
+--- a/src/graphics/presentation/window/window.cpp
++++ b/src/graphics/presentation/window/window.cpp
+@@ -1035,6 +1035,11 @@ void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
+ 	if (const auto* limit = VideoOut::FrameLimitLabel()) {
+ 		text += fmt::format(" | FPS limit: {}", limit);
+ 	}
++	// ASTROHYBRID_WINDOW_TITLE (default unset): a fixed window title instead of the diagnostic one.
++	static const char* fixed_title = std::getenv("ASTROHYBRID_WINDOW_TITLE");
++	if (fixed_title != nullptr && fixed_title[0] != '\0') {
++		text = fixed_title;
++	}
+ 
+ 	SDL_SetWindowTitle(window, text.c_str());
+ }
+-- 
+2.55.0.windows.5
+
