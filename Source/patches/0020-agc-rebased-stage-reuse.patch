@@ -1,0 +1,429 @@
+From 26465923103080c986e536011d8a3d5ff71173f4 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 19:24:01 +0000
+Subject: [PATCH] perf(agc): reuse a data-only draw stage rebased to moved
+ user-data pointers (APS5_REBASED_STAGE_REUSE)
+
+A data-only draw candidate required every used user word to be bit-identical,
+so stages whose per-frame ring pointers moved were captured and materialized
+again. With the switch on, a candidate whose differing used words are pure
+base pointers (asBase and not asValue, with runs read through them) is copied
+with those runs shifted by the pointer delta and its forwarded shader-data
+words patched, then validated against the memory at the new addresses; data
+words at known positions are refreshed with patchDataWords. Any other change
+(value words, vertex fetch words, image tables, BDA writes, differing
+contents) falls back to the full path. Off by default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ core/libs/prx/libSceAgcDriver/CMakeLists.txt  |  6 +-
+ .../include/Driver/Dispatch/DispatchCache.hpp |  2 +
+ .../include/Driver/Draw/DrawCache.hpp         |  4 +
+ .../Execution/include/Driver/Driver.hpp       |  4 +-
+ .../Execution/src/Driver/Draw/Draw.cpp        | 14 ++-
+ .../src/Driver/Draw/DrawCacheStatistics.cpp   |  5 ++
+ .../Execution/src/Driver/Draw/DrawCapture.cpp |  9 +-
+ .../Execution/src/Driver/Draw/DrawLookup.cpp  | 44 +++++++++-
+ .../src/Driver/Draw/DrawRelocate.cpp          | 86 ++++++++++++++++++-
+ .../tests/execution/DrawDataHitUserWords.cpp  | 52 +++++++++++
+ 10 files changed, 217 insertions(+), 9 deletions(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/CMakeLists.txt b/core/libs/prx/libSceAgcDriver/CMakeLists.txt
+index 9e9dd05b0..ddfbc4930 100644
+--- a/core/libs/prx/libSceAgcDriver/CMakeLists.txt
++++ b/core/libs/prx/libSceAgcDriver/CMakeLists.txt
+@@ -3334,8 +3334,12 @@ if(BUILD_TESTING)
+     set_tests_properties(agc_driver_draw_data_hit_user_words_verify PROPERTIES ENVIRONMENT "APS5_VERIFY_DRAW_DATA_HITS=1" SKIP_RETURN_CODE 77)
+     add_test(NAME agc_driver_draw_data_hit_user_words_refresh COMMAND agc_driver_draw_data_hit_user_words_tests)
+     set_tests_properties(agc_driver_draw_data_hit_user_words_refresh PROPERTIES ENVIRONMENT "APS5_DRAW_PIPELINE=1" SKIP_RETURN_CODE 77)
++    add_test(NAME agc_driver_draw_data_hit_user_words_rebased COMMAND agc_driver_draw_data_hit_user_words_tests)
++    set_tests_properties(agc_driver_draw_data_hit_user_words_rebased PROPERTIES ENVIRONMENT "APS5_REBASED_STAGE_REUSE=1" SKIP_RETURN_CODE 77)
++    add_test(NAME agc_driver_draw_data_hit_user_words_rebased_verify COMMAND agc_driver_draw_data_hit_user_words_tests)
++    set_tests_properties(agc_driver_draw_data_hit_user_words_rebased_verify PROPERTIES ENVIRONMENT "APS5_REBASED_STAGE_REUSE=1;APS5_VERIFY_DRAW_DATA_HITS=1" SKIP_RETURN_CODE 77)
+     if(WIN32)
+-        set_tests_properties(agc_driver_draw_cache_reuse_off agc_driver_draw_cache_reuse_verify agc_driver_draw_cache_reuse_inline agc_driver_draw_data_hit_user_words_verify agc_driver_draw_data_hit_user_words_refresh PROPERTIES ENVIRONMENT_MODIFICATION
++        set_tests_properties(agc_driver_draw_cache_reuse_off agc_driver_draw_cache_reuse_verify agc_driver_draw_cache_reuse_inline agc_driver_draw_data_hit_user_words_verify agc_driver_draw_data_hit_user_words_refresh agc_driver_draw_data_hit_user_words_rebased agc_driver_draw_data_hit_user_words_rebased_verify PROPERTIES ENVIRONMENT_MODIFICATION
+             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+     endif()
+ 
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchCache.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchCache.hpp
+index 5f3df6c53..f34b321b4 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchCache.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchCache.hpp
+@@ -44,6 +44,8 @@ struct DispatchVariant {
+     std::uint32_t pushOffset = 0;
+     std::vector<std::int8_t> runBases;
+     std::uint64_t relocatableWords = 0;
++    std::uint64_t rebasableWords = 0;
++    std::vector<std::uint32_t> userWords;
+     std::vector<std::pair<std::uint32_t, std::uint32_t>> shaderDataPatches;
+     std::uint64_t userDataMask = ~std::uint64_t{0};
+     std::shared_ptr<const ShaderRecompiler::ShaderVertexStageInfo> vertexInfo;
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp
+index 7ae26d17b..1909ddf29 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp
+@@ -88,6 +88,8 @@ struct StageDataHit {
+     std::shared_ptr<const ShaderRecompiler::RecompileResult> compiled;
+ };
+ 
++enum class StageRebase : std::size_t { Rebased, NoUserWords, NotPointer, FetchWord, UnsafeResult, Count };
++
+ enum class DrawMiss : std::size_t { FrontDiffering, FragmentDiffering, OtherDiffering, Layout, Gate, Stages, Count };
+ 
+ struct DrawEntryCounters {
+@@ -103,6 +105,8 @@ struct DrawEntryCounters {
+     std::uint64_t differingSameRuns = 0, differingWords = 0, differingRunsChanged = 0;
+     std::uint64_t dataHits = 0, dataStagesReused = 0, dataStagesCompiled = 0, dataVerified = 0;
+     std::uint64_t stageDataHits = 0, stageDataWords = 0, stageDataVerified = 0, stageDataInserts = 0, stageDataPositions = 0;
++    std::array<std::uint64_t, static_cast<std::size_t>(StageRebase::Count)> rebase{};
++    std::uint64_t rebaseEqual = 0, rebaseData = 0, rebaseDiffering = 0;
+     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
+ };
+ 
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
+index ac1bcbf63..787b892ba 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
+@@ -97,7 +97,7 @@ public:
+     [[nodiscard]] std::array<std::uint64_t, 4> PrebuiltLibraries();
+     static void FoldDrawOffsets(const ShaderRecompiler::RecompileResult& result, const DrawProgram& program, Pm4::DrawParameters& parameters);
+     static std::optional<Graphics::IndirectDrawPath> ClassifyIndirectDraw(const ShaderRecompiler::RecompileResult& result, const Graphics::State& graphics, const DrawProgram& frontProgram, const std::shared_ptr<VulkanDevice>& localDevice, Pm4::DrawParameters& drawParameters, bool traceIndirect);
+-    static void tagVariantRuns(DispatchVariant& variant, std::span<const ShaderRecompiler::MemoryRegion> regions, const ShaderRecompiler::SrtUserDataUse& use, bool eligible, std::uint32_t hiddenWords, std::span<const std::shared_ptr<const ShaderRecompiler::SrtGuestWords>> supplied = {});
++    static void tagVariantRuns(DispatchVariant& variant, std::span<const ShaderRecompiler::MemoryRegion> regions, const ShaderRecompiler::SrtUserDataUse& use, bool eligible, std::uint32_t hiddenWords, std::span<const std::shared_ptr<const ShaderRecompiler::SrtGuestWords>> supplied = {}, bool rebasable = false);
+     static std::string dumpRequest(std::uint64_t address, const ShaderRecompiler::RecompileRequest& request, std::string_view suffix = {});
+     static void reportSkip(const char* kind, const std::string& what);
+     DrawEntryCounters DrawCacheCounters();
+@@ -189,6 +189,8 @@ private:
+     void traceDrawKeyLookup(const std::array<std::uint64_t, 5>& components, bool cacheMiss);
+     static std::uint64_t drawIdentityKey(const QueueState& queue, const ShaderRegistry& registry);
+     static bool drawRelocationEnabled();
++    static bool rebasedStageReuse();
++    static std::shared_ptr<DispatchVariant> rebasedVariant(const DispatchVariant& variant, std::span<const std::uint32_t> userData, std::uint64_t changed, StageRebase& outcome);
+     static std::uint64_t relocatedContentKey(const RelocatableUserWord& word, std::uint32_t value, bool& readable);
+     static void applyShaderDataPatches(DispatchVariant& variant);
+     void learnPendingRelocation();
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp
+index 0069a51f0..b4438c4ad 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp
+@@ -882,7 +882,19 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
+         std::vector<std::uint32_t> words;
+         freshRuns(i, runs, words);
+         const auto& compiled = *stageCaptures[i].compiled;
+-        const char* what = runs != kept.runs ? "runs" : words != kept.words ? "words" : vertexInfos[i].has_value() != (kept.vertexInfo != nullptr) || (vertexInfos[i] && !sameVertexInfo(*vertexInfos[i], *kept.vertexInfo)) ? "vertex stage info" : compiled.variantId != kept.compiled->variantId ? "variant" : compiled.pushConstants != kept.compiled->pushConstants ? "push constants" : nullptr;
++        const auto flatten = [](const std::vector<std::pair<std::uint64_t, std::uint64_t>>& spans, const std::vector<std::uint32_t>& values) {
++            std::vector<std::pair<std::uint64_t, std::uint32_t>> flat;
++            std::size_t word = 0;
++            for (const auto& [begin, end] : spans) {
++                for (auto address = begin; address < end && word < values.size(); address += sizeof(std::uint32_t)) flat.emplace_back(address, values[word++]);
++            }
++            std::sort(flat.begin(), flat.end());
++            flat.erase(std::unique(flat.begin(), flat.end()), flat.end());
++            return flat;
++        };
++        const bool sameReads = runs == kept.runs ? words == kept.words : flatten(runs, words) == flatten(kept.runs, kept.words);
++        const bool sameBindings = compiled.bindings.size() == kept.compiled->bindings.size() && std::equal(compiled.bindings.begin(), compiled.bindings.end(), kept.compiled->bindings.begin(), [](const auto& a, const auto& b) { return a.kind == b.kind && a.role == b.role && a.binding == b.binding && a.count == b.count && a.guestDescriptor == b.guestDescriptor; });
++        const char* what = !sameReads ? "reads" : vertexInfos[i].has_value() != (kept.vertexInfo != nullptr) || (vertexInfos[i] && !sameVertexInfo(*vertexInfos[i], *kept.vertexInfo)) ? "vertex stage info" : compiled.variantId != kept.compiled->variantId ? "variant" : compiled.pushConstants != kept.compiled->pushConstants ? "push constants" : !sameBindings ? "bindings" : nullptr;
+         ++dataVerified;
+         if (what == nullptr) return;
+         char message[320];
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCacheStatistics.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCacheStatistics.cpp
+index 8e47f5371..09c7cda5e 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCacheStatistics.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCacheStatistics.cpp
+@@ -36,6 +36,11 @@ void Driver::reportDrawCache(DrawEntryCounters& counters, bool profile) {
+         text += line;
+         std::snprintf(line, sizeof(line), "[draw-cache] register-key miss component changes (10 s): stable registers %llu, user data %llu, auxiliary registers %llu, device %llu, first shader set %llu, unchanged components %llu\n", count(counters.registerKeyMissChanges[0]), count(counters.registerKeyMissChanges[1]), count(counters.registerKeyMissChanges[2]), count(counters.registerKeyMissChanges[3]), count(counters.registerKeyMissChanges[4]), count(counters.registerKeyMissChanges[5]));
+         text += line;
++        if (rebasedStageReuse()) {
++            const auto rebase = [&](StageRebase reason) { return count(counters.rebase[static_cast<std::size_t>(reason)]); };
++            std::snprintf(line, sizeof(line), "[draw-cache] rebased stages (10 s): %llu rebased (%llu equal, %llu with refreshed data words, %llu differing), refused: no user words %llu, not a pointer %llu, vertex fetch word %llu, unsafe result %llu\n", rebase(StageRebase::Rebased), count(counters.rebaseEqual), count(counters.rebaseData), count(counters.rebaseDiffering), rebase(StageRebase::NoUserWords), rebase(StageRebase::NotPointer), rebase(StageRebase::FetchWord), rebase(StageRebase::UnsafeResult));
++            text += line;
++        }
+     }
+     if (profile) text += profileDrawCacheLines(counters);
+     AgcDriver::ProfilePrint_nid_no_patch("%s", text.c_str());
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp
+index 6697f87de..6f3a5c4ee 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp
+@@ -237,7 +237,14 @@ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawP
+             std::vector<ShaderRecompiler::MemoryRegion> regions(stageCapture.regions.begin(), stageCapture.regions.end());
+             for (const auto& read : decodeReads[i]) regions.push_back({read.address, read.Bytes()});
+             std::stable_sort(regions.begin(), regions.end(), [](const ShaderRecompiler::MemoryRegion& a, const ShaderRecompiler::MemoryRegion& b) { return a.guestAddress < b.guestAddress; });
+-            tagVariantRuns(*variant, regions, stageCapture.userDataUse, decodeReads[i].empty() && (!vertexInfos[i] || vertexInfos[i]->resourcesNum == 0), programs[i].hiddenUserWords, stageCapture.supplied);
++            const bool rebase = rebasedStageReuse();
++            if (rebase) variant->userWords = programs[i].userData;
++            tagVariantRuns(*variant, regions, stageCapture.userDataUse, decodeReads[i].empty() && (!vertexInfos[i] || vertexInfos[i]->resourcesNum == 0), programs[i].hiddenUserWords, stageCapture.supplied, rebase);
++            for (std::size_t run = 0; variant->rebasableWords != 0 && run < variant->runs.size() && run < variant->runBases.size(); ++run) {
++                if (variant->runBases[run] < 0) continue;
++                const auto& [begin, end] = variant->runs[run];
++                if (std::any_of(decodeReads[i].begin(), decodeReads[i].end(), [&](const Graphics::DecodeRead& read) { return read.address < end && begin < read.address + read.size; })) variant->rebasableWords &= ~(std::uint64_t {1} << variant->runBases[run]);
++            }
+             if (drawStageDataHits() && stageCapture.capture != nullptr && !stageCapture.capture->readTrace.leaves.empty()) recordStageDataPositions(*variant, *stageCapture.capture, decodeReads[i]);
+             if (traceDrawCache() && entry != nullptr && matched[i] == nullptr && i < entry->stages.size()) {
+                 const auto& variants = entry->stages[i];
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawLookup.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawLookup.cpp
+index 2f3a32e60..90c87574a 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawLookup.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawLookup.cpp
+@@ -2,6 +2,7 @@
+ #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+ #include <algorithm>
++#include <array>
+ #include <bit>
+ 
+ namespace AgcDriver::DriverDetail {
+@@ -229,25 +230,64 @@ void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<Vulk
+             std::uint64_t imagesFlushed = 0, runsSynced = 0;
+             const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::DrawCache);
+             std::optional<SampledReadScope> sampling;
++            const bool rebase = rebasedStageReuse();
++            std::array<std::uint64_t, static_cast<std::size_t>(StageRebase::Count)> rebaseOutcomes{};
++            std::uint64_t rebaseEqual = 0, rebaseData = 0, rebaseDiffering = 0;
++            std::vector<std::pair<std::uint32_t, std::uint32_t>> rebaseLive;
+             for (std::size_t i = 0; i < programs.size(); ++i) {
+                 if (roles[i] == Role::GeometryBack || programs[i].userData.size() != dataEntry->decode->programs[i].userData.size()) continue;
+                 const auto& now = programs[i].userData;
+-                const auto& was = dataEntry->decode->programs[i].userData;
+                 auto& candidates = dataCandidates[i];
+                 for (const auto& variant : dataEntry->stages[i]) {
++                    const auto& was = rebase && variant->userWords.size() == now.size() ? variant->userWords : dataEntry->decode->programs[i].userData;
+                     bool usedEqual = true;
++                    std::uint64_t changed = 0;
+                     for (std::size_t w = 0; w < now.size() && usedEqual; ++w) {
+-                        if (now[w] != was[w] && (w >= 64u || ((variant->userDataMask >> w) & 1u) != 0)) usedEqual = false;
++                        if (now[w] == was[w] || (w < 64u && ((variant->userDataMask >> w) & 1u) == 0)) continue;
++                        if (rebase && w < 64u) changed |= std::uint64_t {1} << w;
++                        else usedEqual = false;
+                     }
+                     if (!usedEqual) continue;
+                     if ((i == 0 && variant->pushOffset != 0) || std::any_of(candidates.begin(), candidates.end(), [&](const auto& candidate) { return candidate.first->pushOffset == variant->pushOffset; })) continue;
+                     std::vector<ShaderRecompiler::MemoryRegion> regions;
++                    if (changed != 0) {
++                        auto outcome = StageRebase::NotPointer;
++                        auto rebased = rebasedVariant(*variant, now, changed, outcome);
++                        ++rebaseOutcomes[static_cast<std::size_t>(outcome)];
++                        if (rebased == nullptr) continue;
++                        appendEntryRegions(*rebased, regions);
++                        auto* live = drawStageDataHits() ? &rebaseLive : nullptr;
++                        auto result = validateVariant(programs[i].binary.codeAddress, submission.queue, *rebased, regions, imagesFlushed, runsSynced, sampling, live);
++                        if (gateRetry() && (result == EntryOutcome::PublishMoved || result == EntryOutcome::PendingMoved)) result = validateVariant(programs[i].binary.codeAddress, submission.queue, *rebased, regions, imagesFlushed, runsSynced, sampling, live);
++                        if (result == EntryOutcome::EqualData) {
++                            for (const auto& [position, value] : rebaseLive) rebased->words[position] = value;
++                            rebased->compiled = patchDataWords(*rebased, rebased->words);
++                            regions.clear();
++                            appendEntryRegions(*rebased, regions);
++                            ++rebaseData;
++                        } else if (result == EntryOutcome::Equal) {
++                            ++rebaseEqual;
++                        } else {
++                            ++rebaseDiffering;
++                            continue;
++                        }
++                        candidates.emplace_back(std::move(rebased), std::move(regions));
++                        continue;
++                    }
+                     appendEntryRegions(*variant, regions);
+                     auto result = validateVariant(programs[i].binary.codeAddress, submission.queue, *variant, regions, imagesFlushed, runsSynced, sampling);
+                     if (gateRetry() && (result == EntryOutcome::PublishMoved || result == EntryOutcome::PendingMoved)) result = validateVariant(programs[i].binary.codeAddress, submission.queue, *variant, regions, imagesFlushed, runsSynced, sampling);
+                     if (result == EntryOutcome::Equal) candidates.emplace_back(variant, std::move(regions));
+                 }
+             }
++            if (rebase) {
++                std::lock_guard cacheLock(drawCacheMutex);
++                auto& counters = drawEntryCounters;
++                for (std::size_t k = 0; k < rebaseOutcomes.size(); ++k) counters.rebase[k] += rebaseOutcomes[k];
++                counters.rebaseEqual += rebaseEqual;
++                counters.rebaseData += rebaseData;
++                counters.rebaseDiffering += rebaseDiffering;
++            }
+         }
+         phaseTiming.Phase(DrawRowKeyLookupValidate);
+     }
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRelocate.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRelocate.cpp
+index c03e05bae..2a2dcd79c 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRelocate.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRelocate.cpp
+@@ -56,8 +56,9 @@ std::uint64_t Driver::relocatedContentKey(const RelocatableUserWord& word, std::
+     return hash;
+ }
+ 
+-void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderRecompiler::MemoryRegion> regions, const ShaderRecompiler::SrtUserDataUse& use, bool eligible, std::uint32_t hiddenWords, std::span<const std::shared_ptr<const ShaderRecompiler::SrtGuestWords>> supplied) {
+-    std::uint64_t relocatable = eligible && drawRelocationEnabled() ? use.asBase & ~use.asValue : 0;
++void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderRecompiler::MemoryRegion> regions, const ShaderRecompiler::SrtUserDataUse& use, bool eligible, std::uint32_t hiddenWords, std::span<const std::shared_ptr<const ShaderRecompiler::SrtGuestWords>> supplied, bool rebasable) {
++    const bool relocating = eligible && drawRelocationEnabled();
++    std::uint64_t relocatable = relocating || rebasable ? use.asBase & ~use.asValue : 0;
+     if (hiddenWords != 0) relocatable &= hiddenWords >= 64 ? 0 : ~((std::uint64_t {1} << hiddenWords) - 1);
+     std::vector<std::pair<std::uint64_t, std::int32_t>> reads;
+     const auto covered = [&](std::uint64_t address) {
+@@ -83,7 +84,8 @@ void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderReco
+         if (found == reads.end() || found->first != address || found->second < 0) return -1;
+         return (relocatable >> found->second & 1u) != 0 ? static_cast<std::int8_t>(found->second) : std::int8_t {-1};
+     };
+-    variant.relocatableWords = relocatable;
++    variant.relocatableWords = relocating ? relocatable : 0;
++    variant.rebasableWords = rebasable ? relocatable : 0;
+     for (std::size_t index = 0; index < regions.size(); ++index) {
+         const auto& region = regions[index];
+         const auto count = region.bytes.size() / sizeof(std::uint32_t);
+@@ -109,6 +111,84 @@ void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderReco
+     }
+ }
+ 
++bool Driver::rebasedStageReuse() {
++    static const bool enabled = [] {
++        const char* text = std::getenv("APS5_REBASED_STAGE_REUSE");
++        return text != nullptr && text[0] != 0 && text[0] != '0';
++    }();
++    return enabled;
++}
++
++std::shared_ptr<DispatchVariant> Driver::rebasedVariant(const DispatchVariant& variant, std::span<const std::uint32_t> userData, std::uint64_t changed, StageRebase& outcome) {
++    if (variant.compiled == nullptr || variant.userWords.size() != userData.size()) {
++        outcome = StageRebase::NoUserWords;
++        return nullptr;
++    }
++    if (changed == 0 || (changed & ~variant.rebasableWords) != 0 || variant.runBases.size() != variant.runs.size()) {
++        outcome = StageRebase::NotPointer;
++        return nullptr;
++    }
++    if (variant.vertexInfo != nullptr) {
++        for (const auto reg : {static_cast<std::uint32_t>(variant.vertexInfo->fetchAttribReg), static_cast<std::uint32_t>(variant.vertexInfo->fetchBufferReg)}) {
++            const auto fetch = reg + 1u < 64u ? std::uint64_t {3} << reg : ~std::uint64_t {0};
++            if ((changed & fetch) != 0) {
++                outcome = StageRebase::FetchWord;
++                return nullptr;
++            }
++        }
++    }
++    const auto& compiled = *variant.compiled;
++    if (compiled.bdaWrites || !compiled.imageTableRanges.empty() || !compiled.imageTableReadRanges.empty() || !variant.shaderDataPatches.empty()) {
++        outcome = StageRebase::UnsafeResult;
++        return nullptr;
++    }
++    auto copy = std::make_shared<DispatchVariant>();
++    copy->runs = variant.runs;
++    copy->runBases = variant.runBases;
++    copy->relocatableWords = variant.relocatableWords;
++    copy->rebasableWords = variant.rebasableWords;
++    copy->words = variant.words;
++    copy->forgetSerial = variant.forgetSerial;
++    copy->compiled = variant.compiled;
++    copy->meshIndexDescriptor = variant.meshIndexDescriptor;
++    copy->shader = variant.shader;
++    copy->dataPositions = variant.dataPositions;
++    copy->dataSlots = variant.dataSlots;
++    copy->flatBinding = variant.flatBinding;
++    copy->pushOffset = variant.pushOffset;
++    copy->userDataMask = variant.userDataMask;
++    copy->vertexInfo = variant.vertexInfo;
++    copy->userWords.assign(userData.begin(), userData.end());
++    for (auto rest = changed; rest != 0; rest &= rest - 1) {
++        const auto index = static_cast<std::uint32_t>(std::countr_zero(rest));
++        const auto from = variant.userWords[index];
++        const auto to = userData[index];
++        if (from == 0 || to == 0 || ((from ^ to) & 3u) != 0) {
++            outcome = StageRebase::NotPointer;
++            return nullptr;
++        }
++        const auto delta = AlignedWord(to) - AlignedWord(from);
++        bool moved = false;
++        for (std::size_t run = 0; run < copy->runs.size(); ++run) {
++            if (copy->runBases[run] != static_cast<std::int8_t>(index)) continue;
++            copy->runs[run].first += delta;
++            copy->runs[run].second += delta;
++            moved = true;
++        }
++        if (!moved) {
++            outcome = StageRebase::NotPointer;
++            return nullptr;
++        }
++        const auto& forwarded = compiled.shaderDataUserWords;
++        for (std::uint32_t slot = 0; slot < forwarded.size(); ++slot) {
++            if (forwarded[slot] == index) copy->shaderDataPatches.emplace_back(slot, to);
++        }
++    }
++    applyShaderDataPatches(*copy);
++    outcome = StageRebase::Rebased;
++    return copy;
++}
++
+ namespace {
+ 
+ template <typename TMap>
+diff --git a/core/libs/prx/libSceAgcDriver/tests/execution/DrawDataHitUserWords.cpp b/core/libs/prx/libSceAgcDriver/tests/execution/DrawDataHitUserWords.cpp
+index ed4b5280c..5338fe090 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/execution/DrawDataHitUserWords.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/execution/DrawDataHitUserWords.cpp
+@@ -258,6 +258,57 @@ void DirectBufferBaseMovesWithItsPayload() {
+     Require(after.dataStagesCompiled - before.dataStagesCompiled >= 1, "a draw whose descriptor base moved reused the pixel stage built for the old base: the rebuild this test documents is gone, flip it to a reuse check (" + Counts(after) + ", before: " + Counts(before) + ")");
+ }
+ 
++void MovedTableReusesTheStage(bool verify, bool rebased) {
++    Registered(VertexHeader, TriangleVertexCode.data(), sizeof(TriangleVertexCode), 2);
++    Registered(PixelHeader, PixelCode.data(), sizeof(PixelCode), 1);
++    auto* data = GuestBlock();
++    std::array<std::uint32_t*, 4> tables{GuestBlock(), GuestBlock(), GuestBlock(), GuestBlock()};
++    const auto describe = [](std::uint32_t* table, const std::uint32_t* payload) {
++        const auto address = reinterpret_cast<std::uintptr_t>(payload);
++        table[0] = static_cast<std::uint32_t>(address);
++        table[1] = static_cast<std::uint32_t>(address >> 32u) & 0xffffu;
++        table[2] = 16;
++        table[3] = 0x3004bfacu;
++    };
++    data[0] = std::bit_cast<std::uint32_t>(1.0f);
++    data[64] = std::bit_cast<std::uint32_t>(0.5f);
++    describe(tables[0], data);
++    describe(tables[1], data);
++    describe(tables[2], data + 64);
++    describe(tables[3], data);
++    const auto draw = [&](const std::uint32_t* table, bool setup) {
++        ColorMemory.fill(std::byte{0});
++        auto commands = setup ? Setup(true, PixelCode.data()) : std::vector<std::uint32_t>{};
++        PixelUserData(commands, table, 0x11);
++        Append(commands, 0x2d, {3, 2});
++        Submit(std::move(commands));
++        return BrightestColorByte();
++    };
++    const auto closeTo = [](unsigned value, unsigned expected) { return value + 2 >= expected && value <= expected + 2; };
++    draw(tables[0], true);
++    const auto taught = draw(tables[0], false);
++    Require(closeTo(taught, 255), "a pixel stage loading 1.0 through its table wrote " + std::to_string(taught));
++    const auto before = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
++    const auto moved = draw(tables[1], false);
++    const auto after = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
++    const auto reused = after.dataStagesReused - before.dataStagesReused;
++    const auto compiled = after.dataStagesCompiled - before.dataStagesCompiled;
++    const auto rebases = after.rebase[static_cast<std::size_t>(AgcDriver::DriverDetail::StageRebase::Rebased)] - before.rebase[static_cast<std::size_t>(AgcDriver::DriverDetail::StageRebase::Rebased)];
++    Require(after.dataHits == before.dataHits + 1, "a draw whose table pointer moved to identical contents was not a data-only hit: " + Counts(after));
++    Require(closeTo(moved, 255), "a draw whose table pointer moved to identical contents wrote " + std::to_string(moved) + ", expected 255 (" + Counts(after) + ")");
++    if (verify) Require(compiled == 2 && after.dataVerified - before.dataVerified == (rebased ? 2u : 1u), "verify mode: a draw whose table moved did not build and compare its candidate stages: " + Counts(after));
++    else if (rebased) Require(reused == 2 && compiled == 0 && rebases == 1 && after.rebaseEqual - before.rebaseEqual == 1, "a draw whose table pointer moved to identical contents did not reuse the rebased pixel stage: " + Counts(after) + ", " + std::to_string(rebases) + " rebased");
++    else Require(compiled == 1 && rebases == 0, "without rebased reuse, a draw whose table pointer moved did not compile its pixel stage: " + Counts(after));
++    const auto other = draw(tables[2], false);
++    const auto last = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
++    Require(closeTo(other, 128), "a draw whose moved table names other data wrote " + std::to_string(other) + ", expected 128 (" + Counts(last) + ")");
++    Require(last.dataStagesCompiled - after.dataStagesCompiled >= 1, "a draw whose moved table names other data reused the pixel stage: " + Counts(last));
++    if (rebased && !verify) Require(last.rebaseDiffering != after.rebaseDiffering, "a rebased stage whose table names other data was not refused by its contents: " + Counts(last));
++    data[0] = std::bit_cast<std::uint32_t>(0.25f);
++    const auto changed = draw(tables[3], false);
++    Require(closeTo(changed, 64), "a draw through a moved table whose payload changed in place wrote " + std::to_string(changed) + ", expected 64");
++}
++
+ }
+ 
+ int main() {
+@@ -273,6 +324,7 @@ int main() {
+         UnreadUserWordsKeepTheStage(verify);
+         ReadUserWordsChangeTheOutput();
+         DirectBufferBaseMovesWithItsPayload();
++        MovedTableReusesTheStage(verify, std::getenv("APS5_REBASED_STAGE_REUSE") != nullptr);
+         AgcDriverShutdown_nid_postfix();
+         std::cout << "Data-only hits " << (verify ? "verified" : "reused") << " the stages whose read user words did not change\n";
+         return 0;
+-- 
+2.55.0.windows.5
+

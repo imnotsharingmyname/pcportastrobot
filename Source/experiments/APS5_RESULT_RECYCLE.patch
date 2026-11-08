@@ -1,0 +1,75 @@
+diff --git a/core/libs/prx/libSceAgcDriver/CMakeLists.txt b/core/libs/prx/libSceAgcDriver/CMakeLists.txt
+index ddfbc4930..996955d5b 100644
+--- a/core/libs/prx/libSceAgcDriver/CMakeLists.txt
++++ b/core/libs/prx/libSceAgcDriver/CMakeLists.txt
+@@ -2704,6 +2704,8 @@ if(BUILD_TESTING)
+     set_tests_properties(agc_shader_result_memo_budget_threads PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_MASKED_RESULT_MEMO=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+     add_test(NAME agc_shader_result_memo_budget_masked COMMAND agc_shader_memory_tests --result-memo-budget-masked)
+     set_tests_properties(agc_shader_result_memo_budget_masked PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
++    add_test(NAME agc_shader_result_memo_budget_masked_recycled COMMAND agc_shader_memory_tests --result-memo-budget-masked)
++    set_tests_properties(agc_shader_result_memo_budget_masked_recycled PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_RESULT_RECYCLE=1;APS5_VERIFY_MASKED_RESULT_MEMO=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+     add_test(NAME agc_shader_layout_pair COMMAND agc_shader_memory_tests --layout-pair)
+     add_test(NAME agc_shader_layout_pair_off COMMAND agc_shader_memory_tests --layout-pair)
+     set_tests_properties(agc_shader_layout_pair PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+@@ -2711,7 +2713,7 @@ if(BUILD_TESTING)
+     add_test(NAME agc_shader_entry_lane_proof_budget COMMAND agc_shader_memory_tests --entry-lane-proof-budget)
+     set_tests_properties(agc_shader_entry_lane_proof_budget PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+     if(WIN32)
+-        set_tests_properties(agc_shader_bindless agc_shader_selected_records_image_limit agc_shader_selected_records_pair_limit agc_shader_selected_records_direct_image_limit agc_shader_selected_records_direct_pair_limit agc_shader_srt_read_patching agc_shader_type_zero_image_materialization agc_shader_frontend_pair agc_shader_frontend_pair_off agc_shader_layout_pair agc_shader_layout_pair_off agc_shader_result_memo_budget agc_shader_result_memo_budget_threads agc_shader_result_memo_budget_masked agc_shader_entry_lane_proof_budget PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
++        set_tests_properties(agc_shader_bindless agc_shader_selected_records_image_limit agc_shader_selected_records_pair_limit agc_shader_selected_records_direct_image_limit agc_shader_selected_records_direct_pair_limit agc_shader_srt_read_patching agc_shader_type_zero_image_materialization agc_shader_frontend_pair agc_shader_frontend_pair_off agc_shader_layout_pair agc_shader_layout_pair_off agc_shader_result_memo_budget agc_shader_result_memo_budget_threads agc_shader_result_memo_budget_masked agc_shader_result_memo_budget_masked_recycled agc_shader_entry_lane_proof_budget PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+     endif()
+     foreach(agcTest IN ITEMS agc_vertex_input_tests agc_mesh_output_budget_tests agc_shared_write_tests agc_copy_guest_bytes_tests agc_locks_tests agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_spirv_module_tests agc_dpp_write_tests agc_masked_select_tests agc_ir_reclaim_tests agc_vector_window_tests agc_constant_bit_test_tests agc_integer_narrowing_tests agc_scalar_select_mask_tests agc_vertex_input_validation_tests agc_vop1_control_decode_tests agc_validate_program_tests agc_pass_hazards_tests agc_barrier_batch_tests agc_shader_disk_cache_tests agc_screenshot_tests agc_shader_device_profile_tests agc_placeholder_images_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_graphics_tests agc_driver_bda_device_tests agc_driver_mesh_tests agc_driver_cmask_fast_clear_tests agc_formatted_buffer_once_tests agc_formatted_buffer_byte_stores_tests ${agcExecutionTests} agc_fma_mix_once_tests agc_f16_single_convert_tests)
+         if(agcTest STREQUAL "agc_driver_constant_store_tests" OR agcTest STREQUAL "agc_driver_flat_apertures_tests" OR agcTest STREQUAL "agc_driver_pipeline_optimized_readback_tests" OR agcTest STREQUAL "agc_driver_rcp_hardware_tests")
+diff --git a/core/shader/recompiler/Recompiler.cpp b/core/shader/recompiler/Recompiler.cpp
+index 41218bb44..142bb3598 100644
+--- a/core/shader/recompiler/Recompiler.cpp
++++ b/core/shader/recompiler/Recompiler.cpp
+@@ -1479,6 +1479,39 @@ bool MaskedResultMemo() {
+     return masked;
+ }
+ 
++bool RecycledResults() {
++    static const bool enabled = [] {
++        const char* text = std::getenv("APS5_RESULT_RECYCLE");
++        return text != nullptr && text[0] != 0 && text[0] != '0';
++    }();
++    return enabled;
++}
++
++struct RecycledResultStorage {};
++
++struct RecycledResultPool {
++    static constexpr std::size_t Slots = 256;
++    static constexpr std::size_t Probes = 8;
++    std::array<std::shared_ptr<RecompileResult>, Slots> slots;
++    std::size_t cursor = 0;
++};
++
++std::shared_ptr<RecompileResult> recycledCopy(const RecompileResult& donor) {
++    auto& pool = HostThreadLocal<RecycledResultPool, RecycledResultStorage>();
++    for (std::size_t probe = 0; probe < RecycledResultPool::Probes; ++probe) {
++        auto& slot = pool.slots[(pool.cursor + probe) % RecycledResultPool::Slots];
++        if (slot == nullptr || slot.use_count() != 1) continue;
++        std::atomic_thread_fence(std::memory_order_acquire);
++        *slot = donor;
++        pool.cursor = (pool.cursor + probe + 1) % RecycledResultPool::Slots;
++        return slot;
++    }
++    auto& slot = pool.slots[pool.cursor];
++    pool.cursor = (pool.cursor + 1) % RecycledResultPool::Slots;
++    slot = std::make_shared<RecompileResult>(donor);
++    return slot;
++}
++
+ bool VerifyMaskedResultMemo() {
+     static const bool verify = std::getenv("APS5_VERIFY_MASKED_RESULT_MEMO") != nullptr;
+     return verify;
+@@ -1828,7 +1861,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry&
+     std::shared_ptr<RecompileResult> result;
+     std::shared_ptr<MemoPatch> patch;
+     if (donor != nullptr) {
+-        result = std::make_shared<RecompileResult>(*donor);
++        result = RecycledResults() ? recycledCopy(*donor) : std::make_shared<RecompileResult>(*donor);
+         applyMemoPatch(*result, *donorPatch, snapshot);
+         if (VerifyMaskedResultMemo()) verifyPatchedResult(*result, materializeResult(*variant, request, snapshot), variantId);
+         if (profile) counters.patchNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);

@@ -1,0 +1,126 @@
+From 62857bf65cb474bdbdca282aa3539817f13e0e41 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Sun, 8 Nov 2026 00:45:40 +0000
+Subject: [PATCH] perf(diagnostics): log descriptor offset reuse by bind point
+
+---
+ .../renderer/pipeline/descriptors.cpp         | 62 ++++++++++++++++---
+ 1 file changed, 54 insertions(+), 8 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+index 6fd217cc..af1556d4 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+@@ -51,6 +51,8 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <bit>
++#include <chrono>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <fmt/format.h>
+@@ -2487,7 +2489,7 @@ static void CountDescriptorPushMiss(int32_t result, std::span<const vk::WriteDes
+ // maxDescriptorSetStorageBuffersDynamic allows: their buffer offsets are left out of the digest,
+ // their buffers and ranges are not. Push layouts cannot hold dynamic descriptors, so their counts
+ // are the potential of splitting them (a pushed set and a dynamic one). Counted as
+-// DescriptorOffsetAudit* frame events (with a connected profiler).
++// DescriptorOffsetAudit* frame events and ten-second stdout summaries.
+ static bool DescriptorOffsetAuditEnabled() {
+ 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+ 	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
+@@ -2509,23 +2511,68 @@ public:
+ 
+ 	Result Note(uint64_t tick, vk::DescriptorSetLayout layout,
+ 	            std::span<const vk::WriteDescriptorSet> writes, uint32_t dynamic_limit,
+-	            bool push) {
++	            bool push, bool graphics) {
+ 		if (tick != m_tick) {
+ 			m_tick = tick;
+-			m_sets = {};
+-			m_pushes = {};
++			for (auto& point: m_tracks) {
++				for (auto& track: point) {
++					track = {};
++				}
++			}
+ 		}
+ 		Result result;
+ 		const auto digest = MaskedDigest(layout, writes, dynamic_limit, result.over_limit);
+-		auto&      track  = push ? m_pushes : m_sets;
++		auto&      track  = m_tracks[graphics ? 0 : 1][push ? 0 : 1];
+ 		result.previous   = track.has_previous && track.previous == digest;
+ 		result.any        = !track.seen.insert(digest).second;
+ 		track.previous     = digest;
+ 		track.has_previous = true;
++		Report(result, push, graphics, dynamic_limit);
+ 		return result;
+ 	}
+ 
+ private:
++	struct Counts {
++		uint64_t updates = 0;
++		uint64_t previous = 0;
++		uint64_t any = 0;
++		uint64_t over_limit = 0;
++	};
++
++	void Report(const Result& result, bool push, bool graphics, uint32_t dynamic_limit) {
++		using Clock = std::chrono::steady_clock;
++		auto& counts = m_counts[graphics ? 0 : 1][push ? 0 : 1];
++		++counts.updates;
++		counts.previous += result.previous;
++		counts.any += result.any;
++		counts.over_limit += result.over_limit;
++		if (++m_samples % 1024 != 0) {
++			return;
++		}
++		const auto now = Clock::now();
++		if (now - m_report_start < std::chrono::seconds(10)) {
++			return;
++		}
++		for (unsigned point = 0; point < 2; ++point) {
++			for (unsigned kind = 0; kind < 2; ++kind) {
++				auto& row = m_counts[point][kind];
++				if (row.updates != 0) {
++					fmt::print("DescriptorOffsetAudit: {} {} updates={} previous={} any={} "
++					           "over_limit={} dynamic_limit={}\n",
++					           point == 0 ? "graphics" : "compute", kind == 0 ? "push" : "set",
++					           row.updates, row.previous, row.any, row.over_limit, dynamic_limit);
++					row = {};
++				}
++			}
++		}
++		std::fflush(stdout);
++		m_report_start = now;
++	}
++
++	Counts m_counts[2][2] {};
++	uint64_t m_samples = 0;
++	std::chrono::steady_clock::time_point m_report_start = std::chrono::steady_clock::now();
++
+ 	struct Track {
+ 		uint64_t                     previous     = 0;
+ 		bool                         has_previous = false;
+@@ -2590,8 +2637,7 @@ private:
+ 	}
+ 
+ 	uint64_t m_tick = UINT64_MAX;
+-	Track    m_sets;
+-	Track    m_pushes;
++	Track    m_tracks[2][2];
+ };
+ 
+ } // namespace
+@@ -2915,7 +2961,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
+ 			    m_context.GetGraphics()
+ 			        .GetPhysicalDeviceProperties()
+ 			        .limits.maxDescriptorSetStorageBuffersDynamic,
+-			    push);
++			    push, pipeline_bind_point == vk::PipelineBindPoint::eGraphics);
+ 			Profiler::CountFrameEvent(push ? E::DescriptorOffsetAuditPushes
+ 			                               : E::DescriptorOffsetAuditSets);
+ 			if (result.previous) {
+-- 
+2.55.0.windows.5
+

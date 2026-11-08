@@ -1,0 +1,319 @@
+From 43f12167652e3ead126f212f030b78005fe286c7 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 29 Oct 2026 11:14:20 +0000
+Subject: [PATCH] perf(agc): resident staging switch, program-filtered dispatch
+ trace, block-collect switch
+
+- APS5_RESIDENT_STAGING=1 (off by default): skip copy-in of device-local regions whose host
+  content is unchanged since the last copy-back. World map: 102.9 vs 101.2 presents per 10 s,
+  GPU 63.8 vs 68.1 ms per frame. Adds residentKept counters to the [buffers] line.
+- APS5_TRACE_PROGRAM=<hex>[:n]: limit APS5_TRACE_DISPATCH_IO and the dispatch header trace to
+  every n-th dispatch of one guest program.
+- APS5_WINDOWS_BLOCK_COLLECT: block-granular GetWriteWatch collect (off by default, no gain).
+- docs: ENVIRONMENT.md row for APS5_TRACE_PROGRAM.
+
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+---
+ .../src/Driver/Dispatch/Dispatch.cpp          | 29 +++++++++-
+ .../Execution/src/GuestMemory.cpp             | 13 +++--
+ .../Execution/src/VulkanDevice.cpp            | 21 +++++++-
+ .../Graphics/include/GuestBufferMemory.hpp    |  6 +++
+ .../Graphics/src/GuestBufferMemory.cpp        | 53 ++++++++++++++++++-
+ docs/dev/ENVIRONMENT.md                       |  2 +
+ 6 files changed, 116 insertions(+), 8 deletions(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp
+index a08d54121..d322aeb6a 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp
+@@ -15,10 +15,14 @@
+ #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+ #include "Optimization/ResourceProgram.hpp"
+ #include <algorithm>
++#include <array>
++#include <atomic>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <optional>
+ #include <stdexcept>
++#include <string>
+ #include <utility>
+ 
+ namespace AgcDriver::DriverDetail {
+@@ -171,6 +175,29 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet,
+         }
+     }
+     if (partialLastGroup) compute.partialThreads = partialGroups;
++    // Debug aid: APS5_TRACE_PROGRAM=<hex code address>[:n] prints every n-th (default 100th) dispatch
++    // of that program: group counts (an indirect one's read from its arguments), initiator, user data.
++    static const std::pair<std::uint64_t, std::uint64_t> traceProgram = [] {
++        const char* text = std::getenv("APS5_TRACE_PROGRAM");
++        if (text == nullptr) return std::pair<std::uint64_t, std::uint64_t>{0, 0};
++        char* end = nullptr;
++        const auto program = std::strtoull(text, &end, 16);
++        const auto every = *end == ':' ? std::strtoull(end + 1, nullptr, 10) : 100ull;
++        return std::pair<std::uint64_t, std::uint64_t>{program, std::max<std::uint64_t>(every, 1)};
++    }();
++    if (traceProgram.first != 0 && !resolving && address == traceProgram.first) {
++        static std::atomic<std::uint64_t> seen{0};
++        if (const auto index = seen.fetch_add(1, std::memory_order_relaxed); index % traceProgram.second == 0) {
++            const auto groups = indirectArguments != 0 ? readDispatchArguments(submission.queue, indirectArguments, packet[4]) : std::array<std::uint32_t, 5>{packet[0], packet[1], packet[2], packet[3], packet[4]};
++            std::string words;
++            for (const auto word : userData) {
++                char item[16];
++                std::snprintf(item, sizeof(item), " %08x", word);
++                words += item;
++            }
++            std::fprintf(stderr, "[program] 0x%llx dispatch %llu: groups %u x %u x %u, initiator 0x%x, indirect 0x%llx, threads %u x %u x %u, user data%s\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(index), groups[1], groups[2], groups[3], packet[4], static_cast<unsigned long long>(indirectArguments), compute.numThreads[0], compute.numThreads[1], compute.numThreads[2], words.c_str());
++        }
++    }
+     std::array<std::uint32_t, 3> threadGroup{};
+     if (indirectArguments != 0 && (packet[4] & 0x20u) != 0) {
+         for (std::uint32_t axis = 0; axis < 3; ++axis) threadGroup[axis] = std::max(readRegister(queue.shader, 0x207 + axis) & 0xffffu, 1u);
+@@ -463,7 +490,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet,
+     }
+     const std::uint64_t dispatchThreads = indirectArguments != 0 ? 0 : std::uint64_t{groups[0]} * groups[1] * groups[2] * compute.numThreads[0] * compute.numThreads[1] * compute.numThreads[2];
+     static const bool traceIo = std::getenv("APS5_TRACE_DISPATCH_IO") != nullptr;
+-    if (traceIo) {
++    if (traceIo && traceProgram.first == 0) {
+ 
+         std::string words;
+         if (std::getenv("APS5_TRACE_DISPATCH_IO")[0] == '2') {
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+index 773584292..322f6d4d9 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+@@ -1450,6 +1450,15 @@ bool sharedCollectMemo() {
+     return shared;
+ }
+ 
++bool blockCollect() {
++#ifdef _WIN32
++    static const bool enabled = std::getenv("APS5_WINDOWS_BLOCK_COLLECT") != nullptr;
++    return enabled;
++#else
++    return true;
++#endif
++}
++
+ struct StampRuns {
+     WriteTracker& tracker;
+     StampKind kind;
+@@ -1606,8 +1615,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
+         }
+     }
+     const TimedAccess timed(CounterCollect, bytes);
+-#ifndef _WIN32
+-    if (useMemo && HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get() != 0 && bytes <= WriteBlockBytes) {
++    if (blockCollect() && useMemo && HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get() != 0 && bytes <= WriteBlockBytes) {
+         const auto begin = first & ~(WriteBlockBytes - 1);
+         const auto end = (stop + WriteBlockBytes - 1) & ~(WriteBlockBytes - 1);
+         if (end > begin && tracker.covers(begin, end - begin)) {
+@@ -1615,7 +1623,6 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
+             stop = end;
+         }
+     }
+-#endif
+     if (!walkWrites(tracker, first, stop, StampKind::Cpu)) return 0;
+     // Only a completed walk is remembered; a failed one (uncommitted pages) returned 0 above.
+     if (collectMemoEnabled()) {
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+index cbc5edec7..5391b5b56 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+@@ -4442,6 +4442,23 @@ bool TraceDispatchIo() {
+     return traceIo;
+ }
+ 
++// With APS5_TRACE_PROGRAM=<hex code address>[:n] set too, only every n-th dispatch of that program.
++bool TraceDispatchIo(std::uint64_t programAddress) {
++    if (!TraceDispatchIo()) return false;
++    static const std::pair<std::uint64_t, std::uint64_t> filter = [] {
++        const char* text = std::getenv("APS5_TRACE_PROGRAM");
++        if (text == nullptr) return std::pair<std::uint64_t, std::uint64_t>{0, 0};
++        char* end = nullptr;
++        const auto program = std::strtoull(text, &end, 16);
++        const auto every = *end == ':' ? std::strtoull(end + 1, nullptr, 10) : 100ull;
++        return std::pair<std::uint64_t, std::uint64_t>{program, std::max<std::uint64_t>(every, 1)};
++    }();
++    if (filter.first == 0) return true;
++    if (programAddress != filter.first) return false;
++    static std::atomic<std::uint64_t> seen{0};
++    return seen.fetch_add(1, std::memory_order_relaxed) % filter.second == 0;
++}
++
+ void WatchMemory(std::uint64_t programAddress) {
+     struct Range {
+         std::uint64_t address = 0;
+@@ -5802,7 +5819,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::recordCompletedDispatch(const Shader
+         // finishes the recorder up to that batch's serial. Prints the [address-sync] leases line.
+         Graphics::CountLeaseOutcome(false, recorder.Submissions() + 1);
+     }
+-    if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] %s:%s\n", groupsText, resources->Describe().c_str());
++    if (TraceDispatchIo(programAddress)) std::fprintf(stderr, "[dispatch-io] 0x%llx %s:%s\n", static_cast<unsigned long long>(programAddress), groupsText, resources->Describe().c_str());
+     WatchMemory(programAddress);
+     // The recipe for the caller's dispatch-cache variant (design_cpu_final M4, rule R3): only an
+     // object the resource cache serves under this content key (reusable: no lease, no copied
+@@ -5941,7 +5958,7 @@ RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResu
+         state->recorder->Sync();
+         timer.phase(PhaseSync);
+     }
+-    if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] %s:%s\n", groupsText, hit->resources->Describe().c_str());
++    if (TraceDispatchIo(programAddress)) std::fprintf(stderr, "[dispatch-io] 0x%llx %s:%s\n", static_cast<unsigned long long>(programAddress), groupsText, hit->resources->Describe().c_str());
+     WatchMemory(programAddress);
+     timer.finish(lookupsBefore, groupsText, indirect);
+     if (profile) reportRecipes();
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp
+index 72e07d866..1cc6a1212 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp
+@@ -457,6 +457,12 @@ private:
+         // path it would take without staging, in both upload stages.
+         bool unstaged = false;
+         bool overlay = false;
++        // APS5_RESIDENT_STAGING: the write generation taken before this use's copy-in, and the one
++        // the shadow matches the import at after its copy-back (0: not proven); a reused build's
++        // next use skips the copy-in while UnchangedSince(region, residentGeneration) holds.
++        std::uint64_t copyInGeneration = 0;
++        mutable std::uint64_t residentGeneration = 0;
++        mutable bool residentCandidate = false;
+     };
+ 
+     // How [begin, end) lies against the space's base regions.
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+index 64de3d8c8..7a5e88d6b 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+@@ -5062,6 +5062,19 @@ std::uint64_t writtenShadowMax(bool discreteGpu) {
+     return discreteGpu ? DiscreteWrittenShadowMax : std::uint64_t{2048} << 10u;
+ }
+ 
++// APS5_RESIDENT_STAGING=1: a staged shadow outlives its use. Its copy-back leaves the import equal to
++// it, so a reused build's next use needs no copy-in while nothing stored over the range since: no CPU
++// store (write watch) and no other GPU writer (they all stamp the range, MarkWritten), checked with
++// the write tracker as snapshots are. The copy-back stays (CPU readers and in-place users read the
++// import). A range anything stored over between the copy-in and the copy-back is not kept.
++bool residentStagingEnabled() {
++    static const bool enabled = [] {
++        const char* text = std::getenv("APS5_RESIDENT_STAGING");
++        return text != nullptr && text[0] != '\0' && text[0] != '0';
++    }();
++    return enabled;
++}
++
+ std::uint64_t atomicStageMax() {
+     static const std::uint64_t bytes = kibSetting("APS5_ATOMIC_STAGE_MAX_KIB", 1024);
+     return bytes;
+@@ -5096,6 +5109,9 @@ struct CopyStats {
+     std::atomic<std::uint64_t> stagedOutBytes{0};
+     std::atomic<std::uint64_t> stagedLost{0};
+     std::atomic<std::uint64_t> stagingRefused{0};
++    // APS5_RESIDENT_STAGING: copy-ins skipped (shadow still current) and their bytes.
++    std::atomic<std::uint64_t> residentKept{0};
++    std::atomic<std::uint64_t> residentKeptBytes{0};
+     std::atomic<std::int64_t> lastStagingReport{0};
+ };
+ 
+@@ -5136,14 +5152,16 @@ void reportStaging() {
+     auto last = stats.lastStagingReport.load();
+     if (nowMs - last < 10000 || !stats.lastStagingReport.compare_exchange_strong(last, nowMs)) return;
+     // One reporter per period (the exchange above), so the previous totals need no lock.
+-    static std::uint64_t lastStaged = 0, lastIn = 0, lastOut = 0;
++    static std::uint64_t lastStaged = 0, lastIn = 0, lastOut = 0, lastKept = 0, lastKeptBytes = 0;
+     const auto staged = stats.staged.load();
+     const auto in = stats.stagedInBytes.load();
+     const auto out = stats.stagedOutBytes.load();
+-    AgcDriver::ProfilePrint_nid_no_patch("[buffers] staging: %llu regions staged device-local (%llu with atomics, %llu of reused builds), %.0f KiB copied in, %.0f KiB copied back, %llu without copy-back, %llu shadows refused; last 10 s: %llu regions, %.0f KiB in, %.0f KiB back\n", static_cast<unsigned long long>(staged), static_cast<unsigned long long>(stats.stagedAtomic.load()), static_cast<unsigned long long>(stats.stagedReused.load()), in / 1024.0, out / 1024.0, static_cast<unsigned long long>(stats.stagedLost.load()), static_cast<unsigned long long>(stats.stagingRefused.load()), static_cast<unsigned long long>(staged - lastStaged), (in - lastIn) / 1024.0, (out - lastOut) / 1024.0);
++    AgcDriver::ProfilePrint_nid_no_patch("[buffers] staging: %llu regions staged device-local (%llu with atomics, %llu of reused builds), %.0f KiB copied in, %.0f KiB copied back, %llu without copy-back, %llu shadows refused; last 10 s: %llu regions, %.0f KiB in, %.0f KiB back, %llu copy-ins skipped (resident, %.0f KiB)\n", static_cast<unsigned long long>(staged), static_cast<unsigned long long>(stats.stagedAtomic.load()), static_cast<unsigned long long>(stats.stagedReused.load()), in / 1024.0, out / 1024.0, static_cast<unsigned long long>(stats.stagedLost.load()), static_cast<unsigned long long>(stats.stagingRefused.load()), static_cast<unsigned long long>(staged - lastStaged), (in - lastIn) / 1024.0, (out - lastOut) / 1024.0, static_cast<unsigned long long>(stats.residentKept.load() - lastKept), (stats.residentKeptBytes.load() - lastKeptBytes) / 1024.0);
+     lastStaged = staged;
+     lastIn = in;
+     lastOut = out;
++    lastKept = stats.residentKept.load();
++    lastKeptBytes = stats.residentKeptBytes.load();
+ }
+ 
+ }
+@@ -5760,6 +5778,7 @@ void GuestBufferMemory::recordGpuCopies(std::span<Region* const> copies, bool ad
+     for (auto* region : copies) {
+         const auto bytes = region->end - region->begin;
+         copiedBytes += bytes;
++        if (region->deviceLocal && residentStagingEnabled()) region->copyInGeneration = GuestMemory::CollectWrites(region->begin, static_cast<std::size_t>(bytes));
+         if (region->buffer == nullptr) {
+             // Not made by UploadPrepare (the registry was stale then): made here, under the lock.
+             const auto allocateStart = std::chrono::steady_clock::now();
+@@ -6167,6 +6186,18 @@ bool GuestBufferMemory::CopiedWritesOverlap(std::uint64_t address, std::size_t b
+ }
+ 
+ void GuestBufferMemory::MarkDirectWrites() const {
++    // APS5_RESIDENT_STAGING: a staged region is kept only when nothing stored over it since its
++    // copy-in was recorded; checked before this use's own marks stamp it.
++    if (residentStagingEnabled()) {
++        for (const auto& region : regions) {
++            region.residentGeneration = 0;
++            region.residentCandidate = false;
++            if (!region.gpuCopy || !region.deviceLocal || !region.copiedBack || region.atomic || region.copyInGeneration == 0) continue;
++            const auto bytes = static_cast<std::size_t>(region.end - region.begin);
++            GuestMemory::CollectWrites(region.begin, bytes);
++            region.residentCandidate = GuestMemory::UnchangedSince(region.begin, bytes, region.copyInGeneration);
++        }
++    }
+     for (const auto& [begin, end] : writes) {
+         const auto* found = owner(begin, end);
+         if (found == nullptr) continue;
+@@ -6174,6 +6205,7 @@ void GuestBufferMemory::MarkDirectWrites() const {
+         if (region.direct != nullptr || (region.gpuCopy && region.copiedBack)) {
+             const auto generation = GuestMemory::MarkPossiblyWritten(begin, static_cast<std::size_t>(end - begin));
+             if (generation != 0) directWritesGeneration = std::max(directWritesGeneration, generation);
++            if (region.residentCandidate && generation != 0) region.residentGeneration = std::max(region.residentGeneration, generation);
+         }
+     }
+ }
+@@ -6459,7 +6491,24 @@ void GuestBufferMemory::RecordStagingCopies(Recorder& recorder) {
+         // copy-in refills. The import is the one the region was taken from (the caller checked its
+         // serial), so the copy source still stands.
+         if (!region.copiedBack && profile) Copies().stagedLost.fetch_add(1, std::memory_order_relaxed);
++        const bool resident = residentStagingEnabled() && region.copiedBack && region.residentGeneration != 0 && !region.atomic && region.buffer != nullptr;
+         region.copiedBack = false;
++        if (resident) {
++            const auto bytes = static_cast<std::size_t>(region.end - region.begin);
++            GuestMemory::CollectWrites(region.begin, bytes);
++            if (GuestMemory::UnchangedSince(region.begin, bytes, region.residentGeneration) && !(recorder.HasQueuedStores() && recorder.QueuedStoreOverlaps(region.begin, bytes)) && !(recorder.HasQueuedKeyStores() && recorder.QueuedKeyStoreOverlaps(region.begin, bytes)) && !recorder.PendingLabelIn(region.begin, bytes)) {
++                // The shadow is the import's content: this use's dispatch reads and writes it as is,
++                // and the copy-back recorded after the work keeps the import in step.
++                region.copyInGeneration = region.residentGeneration;
++                recorder.Keep(region.buffer);
++                if (profile) {
++                    Copies().residentKept.fetch_add(1, std::memory_order_relaxed);
++                    Copies().residentKeptBytes.fetch_add(bytes, std::memory_order_relaxed);
++                }
++                continue;
++            }
++        }
++        region.residentGeneration = 0;
+         copies.push_back(&region);
+     }
+     if (copies.empty()) return;
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index 4ecd22d7d..f86204133 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -65,6 +65,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_VERIFY_MASKED_RESULT_MEMO` | presence | `core/shader/recompiler/Recompiler.cpp` |  | also materializes every patched result memo hit, prints the first twenty whose patched result differs and counts them in the result memo report of `APS5_PROFILE_DRAW` |
+ | `APS5_VERIFY_SRT_COMPACT` | presence | `core/shader/recompiler/Optimization/src/SrtWalker/SrtDescriptorEvaluation.cpp` |  | walks every SRT descriptor a second time through the IR evaluator and throws when the two walks differ |
+ | `APS5_VERIFY_SRT_TAPE` | presence | `core/shader/recompiler/Optimization/src/SrtWalker/SrtTape.cpp` |  | walks a plan's runtime sources a second time through the evaluator, adopts its answers where the two differ and prints the first twenty differences |
++| `APS5_WINDOWS_BLOCK_COLLECT` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` |  | on Windows, widens a memoized write collect of at most one write block to the whole watched block within the thread's collect epoch, as on Linux, so later collects of the block hit the memo instead of calling GetWriteWatch again |
+ | `APS5_WAVE_LDS_SUBGROUP` | presence | `core/shader/recompiler/SpirvBackend/src/SpirvEmitter.cpp` |  | restores subgroup-scope LDS barriers for single-wave workgroups instead of workgroup scope |
+ 
+ ### libSceAgc
+@@ -452,6 +453,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_TRACE_INDIRECT_DRAWS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawPrecheck.cpp` |  | prints indirect draw packets that reach the precheck |
+ | `APS5_TRACE_LATE_LABELS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Synchronization/WaitMemory.cpp` |  | prints how late labels were trusted or refused |
+ | `APS5_TRACE_PREPARATION_WAIT` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp` |  | prints where a demanded shader preparation sat in the queue |
++| `APS5_TRACE_PROGRAM` | string | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp` |  | `<hex code address>[:n]`; prints every n-th (default 100th) dispatch of that compute program with its group counts, initiator and user data |
+ | `APS5_TRACE_QUERY` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` |  | on Windows, prints every 16th page query with its cost |
+ | `APS5_TRACE_RESOURCE_KEY_MISSES` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | reports shader-resource cache key misses |
+ | `APS5_TRACE_SECONDS` | string | `core/libs/prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp` |  | records from the first present `<start>` seconds after the first present for `<length>` seconds (whole numbers, `start:length`) |
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,13 @@
+# ASTRO BOT PPSA21567 01.019.000: disable GI probes and their lighting shaders.
+# Ported from the community 01.018.000 GoldHEN mod (KytyPS5 issue #1011, mod 2). The 13-byte sequence
+# "0F B6 82 A0 07 00 00 | 88 87 E4 05 00 00" is identical and unique in 01.019.000 (va 0x70ce313):
+# movzx eax, byte [rdx+0x7a0] becomes mov eax, 0 (+2 NOPs), so the flag stored at [rdi+0x5e4] is 0.
+format = 1
+
+[[patch]]
+name        = "gi_probes_off"
+target      = "eboot.elf"
+va          = 0x70ce313
+expected    = "0fb682a0070000"
+value       = "b8000000009090"
+description = "store 0 instead of the GI probe flag"

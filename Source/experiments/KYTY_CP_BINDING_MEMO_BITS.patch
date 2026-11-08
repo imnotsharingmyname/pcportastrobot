@@ -1,0 +1,19 @@
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+index 07cee45e..9a5774b3 100644
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -1513,9 +1513,11 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
+ 	m_bda_epoch_verify = m_bda_epoch_skip && m_bda_incremental_sync ? BdaEpochVerifyMode() : 0;
+ 	if (SyncEpoch::Enabled() && BindingEpochMemoEnabled()) {
+ 		const bool large      = CpCommit::Enabled(CpCommit::Part::BindSlots);
+-		m_binding_memo_shift  = large ? 49u : 53u;
+-		m_binding_memo        = std::make_unique<BindingMemo[]>(large ? BindingMemoSlotsLarge
+-		                                                              : BindingMemoSlots);
++		const auto bits = static_cast<uint32_t>(
++		    std::clamp<uint64_t>(ParseEnvU64("KYTY_CP_BINDING_MEMO_BITS", large ? 15u : 11u),
++		                         11u, 20u));
++		m_binding_memo_shift  = 64u - bits;
++		m_binding_memo        = std::make_unique<BindingMemo[]>(size_t {1} << bits);
+ 		m_binding_memo_verify = BindingEpochMemoVerifyMode();
+ 		m_binding_memo_cross  = BindingMemoCrossEpochEnabled();
+ 	}

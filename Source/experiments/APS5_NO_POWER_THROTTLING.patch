@@ -1,0 +1,13 @@
+diff --git a/core/libs/prx/libkernel/Time/Time.cpp b/core/libs/prx/libkernel/Time/Time.cpp
+index d97b8b752..4ddd95fb4 100644
+--- a/core/libs/prx/libkernel/Time/Time.cpp
++++ b/core/libs/prx/libkernel/Time/Time.cpp
+@@ -137,7 +137,7 @@ static const bool g_timerResolutionRaised = [] {
+     const bool raised = setResolution != nullptr && setResolution(5000, TRUE, &previous) >= 0;
+     PROCESS_POWER_THROTTLING_STATE throttling{};
+     throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+-    throttling.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
++    throttling.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION | (std::getenv("APS5_NO_POWER_THROTTLING") != nullptr ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0u);
+     throttling.StateMask = 0;
+     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
+     using NtQueryTimerResolutionFn = LONG(WINAPI*)(PULONG, PULONG, PULONG);

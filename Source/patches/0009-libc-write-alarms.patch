@@ -1,0 +1,254 @@
+From e1182dc58521a7b29dba64c239e6c175d8659d24 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 29 Oct 2026 21:17:29 +0000
+Subject: [PATCH] perf(libc): write alarms on resident guest pages instead of
+ polling GetWriteWatch
+
+APS5_WRITE_ALARMS=1: when WindowsMappings::Collect walks a resident run, the writable pages in the
+range are made read-only first ("armed", per view and in a per-run bitmap), then GetWriteWatch resets
+as before. A later collect of a range whose pages are all still armed returns at once: nothing can
+have been written. The first CPU write to an armed page faults once; HandleWrite restores the page's
+protection, clears its bits and lets the write proceed, so the write watch reports it next time.
+BeginHostWrite (host writes and imports), Pin and SetProtection disarm the pages they touch.
+
+The game writes ~80 pages per frame while the driver collected ~1300 ranges per frame. Astro Bot world
+map: 3.9M collects skipped, ~19k alarm faults per 10 s; collect time 16.7 -> 9.8 s per run; committer
+cost 39.9 -> 31.6 us per commit; presents 111-114 (steady earlier runs) -> 118-119 per 10 s, GPU idle
+gaps -> ~21 ms per frame. Screenshots correct. Also counts the written pages collects find.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Execution/src/GuestMemory.cpp             | 10 +++
+ core/libs/prx/libc/include/GuestArena.hpp     |  1 +
+ .../libs/prx/libc/include/WindowsMappings.hpp | 88 +++++++++++++++++++
+ core/libs/prx/libc/src/GuestArena.cpp         |  4 +
+ docs/dev/ENVIRONMENT.md                       |  1 +
+ 5 files changed, 104 insertions(+)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+index 322f6d4d9..9fc2cd9aa 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+@@ -97,6 +97,7 @@ std::atomic<std::uint64_t> forgetCalls{0};
+ std::atomic<std::uint64_t> forgetSerial{0};
+ std::atomic<std::uint64_t> forgetBytes{0};
+ std::atomic<std::uint64_t> collectMemoHits{0};
++std::atomic<std::uint64_t> writtenPagesFound{0};
+ std::atomic<std::uint64_t> collectEpochBumps{0};
+ std::atomic<std::uint64_t> unwatchSerial{0};
+ // Walks that reported at least one written page (the ones the probe pass used to double), and the
+@@ -331,6 +332,14 @@ public:
+             AgcDriver::ProfilePrint_nid_no_patch(" %s %llu calls %.0f MiB %.1f s", MemoryCounterNames[i], static_cast<unsigned long long>(totals[i][0]), totals[i][1] / 1048576.0, totals[i][2] / 1e9);
+         }
+         AgcDriver::ProfilePrint_nid_no_patch(" collect-memo hits %llu, collect epochs %llu", static_cast<unsigned long long>(collectMemoHits.load()), static_cast<unsigned long long>(collectEpochBumps.load()));
++        AgcDriver::ProfilePrint_nid_no_patch(" written pages found %llu,", static_cast<unsigned long long>(writtenPagesFound.load()));
++#ifdef _WIN32
++        {
++            std::uint64_t alarmSkips = 0, alarmFaults = 0;
++            GuestArena::GuestArenaWriteAlarmStats_nid_postfix(&alarmSkips, &alarmFaults);
++            AgcDriver::ProfilePrint_nid_no_patch(" write alarms: %llu collects skipped, %llu faults,", static_cast<unsigned long long>(alarmSkips), static_cast<unsigned long long>(alarmFaults));
++        }
++#endif
+         AgcDriver::ProfilePrint_nid_no_patch(" collect-dirty %llu tracker waits %llu / %llu", static_cast<unsigned long long>(collectDirty.load()), static_cast<unsigned long long>(trackerWaits.load()), static_cast<unsigned long long>(trackerAcquisitions.load()));
+         AgcDriver::ProfilePrint_nid_no_patch(" | arena 0x%llx+0x%llx image 0x%llx+0x%llx forgets %llu (%.0f MiB)", static_cast<unsigned long long>(PagesBase()), static_cast<unsigned long long>(PagesSize()), static_cast<unsigned long long>(ImagePagesBase()), static_cast<unsigned long long>(ImagePagesSize()), static_cast<unsigned long long>(forgetCalls.load()), forgetBytes.load() / 1048576.0);
+         {
+@@ -1481,6 +1490,7 @@ void stampWrittenRun(void* context, std::uintptr_t begin, std::uintptr_t end) {
+     else {
+         const auto generation = tracker.generation.load(std::memory_order_relaxed);
+         noteWrittenRun(runs, begin, end, generation);
++        writtenPagesFound.fetch_add((end - begin + 4095) / 4096, std::memory_order_relaxed);
+         for (auto block = tracker.blockOf(begin); block <= tracker.blockOf(end - 1); ++block) tracker.stamp(block, generation, runs.kind);
+     }
+ #ifndef _WIN32
+diff --git a/core/libs/prx/libc/include/GuestArena.hpp b/core/libs/prx/libc/include/GuestArena.hpp
+index a1c8d411a..996e2a4d3 100644
+--- a/core/libs/prx/libc/include/GuestArena.hpp
++++ b/core/libs/prx/libc/include/GuestArena.hpp
+@@ -40,6 +40,7 @@ void GuestArenaSetAccessObserver_nid_postfix(void (*callback)(std::uintptr_t add
+ #ifdef _WIN32
+ bool GuestArenaHandleWrite_nid_postfix(std::uintptr_t address);
+ bool GuestArenaHandleRead_nid_postfix(std::uintptr_t address);
++void GuestArenaWriteAlarmStats_nid_postfix(std::uint64_t* skips, std::uint64_t* faults);
+ void GuestArenaTrap_nid_postfix(std::uintptr_t address, std::size_t bytes);
+ bool GuestArenaTrapArmed_nid_postfix(std::uintptr_t address);
+ bool GuestArenaHandleTrap_nid_postfix(std::uintptr_t address, std::uintptr_t instruction);
+diff --git a/core/libs/prx/libc/include/WindowsMappings.hpp b/core/libs/prx/libc/include/WindowsMappings.hpp
+index 471dfaa69..e1577b738 100644
+--- a/core/libs/prx/libc/include/WindowsMappings.hpp
++++ b/core/libs/prx/libc/include/WindowsMappings.hpp
+@@ -224,6 +224,7 @@ public:
+         std::lock_guard lock(mutex);
+         collectableRanges.clear();
+         for (auto it = views.lower_bound(address); it != views.end() && it->first < address + bytes; ++it) {
++            if (it->second.resident) disarmRun(it->first, allSubpages);
+             it->second.protection = protection;
+             it->second.armed = 0;
+             invalidate(it->first, it->second);
+@@ -235,6 +236,11 @@ public:
+         for (auto it = views.lower_bound(address & ~(pageBytes - 1)); it != views.end() && it->first < address + bytes; ++it) {
+             if (it->second.resident) {
+                 ++it->second.pins;
++                if (it->second.armed != 0) {
++                    protectSubpages(it->first, it->second.armed, it->second.protection, "pin resident guest page writable", it->second.viewBytes);
++                    disarmRun(it->first, it->second.armed);
++                    it->second.armed = 0;
++                }
+                 invalidate(it->first, it->second);
+                 continue;
+             }
+@@ -309,6 +315,14 @@ public:
+         if (found == views.end() || !writable(found->second.protection)) return false;
+         auto& view = found->second;
+         if (view.resident) {
++            const auto alarm = static_cast<std::uint8_t>(view.armed & subpagesOf(base, address, address + 1));
++            if (alarm != 0) {
++                protectSubpages(base, alarm, view.protection, "resume resident guest write", view.viewBytes);
++                view.armed &= static_cast<std::uint8_t>(~alarm);
++                disarmRun(base, alarm);
++                ++alarmFaults;
++                return true;
++            }
+             const auto memory = query(address);
+             return memory.State == MEM_COMMIT && writable(memory.Protect & 0xffu);
+         }
+@@ -319,6 +333,12 @@ public:
+         return true;
+     }
+ 
++    void AlarmStats(std::uint64_t* skips, std::uint64_t* faults) {
++        std::lock_guard lock(mutex);
++        *skips = alarmSkips;
++        *faults = alarmFaults;
++    }
++
+     bool HandleRead(std::uintptr_t address) {
+         std::lock_guard lock(mutex);
+         if (!views.contains(address & ~(pageBytes - 1))) return false;
+@@ -365,6 +385,7 @@ public:
+             if (opened == 0) continue;
+             protectSubpages(it->first, opened, view.protection, "open shared memory to a host write", view.viewBytes);
+             view.armed &= static_cast<std::uint8_t>(~opened);
++            if (view.resident) disarmRun(it->first, opened);
+         }
+         return true;
+     }
+@@ -741,6 +762,7 @@ private:
+         std::uint32_t fresh;
+         std::uintptr_t key;
+         std::uint64_t offset;
++        std::array<std::uint64_t, 8> alarmed{};
+     };
+     struct Window {
+         void* view = nullptr;
+@@ -752,8 +774,72 @@ private:
+         return (run.collected[bit >> 6] >> (bit & 63) & 1) != 0;
+     }
+ 
++    static bool writeAlarms() {
++        static const bool enabled = [] {
++            const char* text = std::getenv("APS5_WRITE_ALARMS");
++            return text != nullptr && text[0] != '0' && text[0] != 0;
++        }();
++        return enabled;
++    }
++
++    static bool runAlarmed(const Run& run, std::size_t bit) {
++        return (run.alarmed[bit >> 6] >> (bit & 63) & 1) != 0;
++    }
++
++    void disarmRun(std::uintptr_t base, std::uint8_t mask) {
++        if (mask == 0 || residentRuns.empty()) return;
++        auto run = residentRuns.upper_bound(base);
++        if (run == residentRuns.begin()) return;
++        --run;
++        if (base >= run->second.end) return;
++        for (std::size_t sub = 0; sub < subpages; ++sub) {
++            if ((mask & (1u << sub)) == 0) continue;
++            const auto at = base + sub * subpageBytes;
++            if (at < run->first || at >= run->second.end) continue;
++            const auto bit = (at - run->first) >> 12;
++            run->second.alarmed[bit >> 6] &= ~(1ull << (bit & 63));
++        }
++    }
++
++    bool allAlarmed(std::uintptr_t start, const Run& run, std::uintptr_t first, std::uintptr_t stop) const {
++        for (auto at = first; at < stop; at += 4096) {
++            if (!runAlarmed(run, (at - start) >> 12)) return false;
++        }
++        return true;
++    }
++
++    void armRun(std::uintptr_t start, Run& run, std::uintptr_t first, std::uintptr_t stop) {
++        for (auto it = views.lower_bound(first & ~(pageBytes - 1)); it != views.end() && it->first < stop; ++it) {
++            auto& view = it->second;
++            if (!view.resident || view.pins != 0 || view.hostWrites != 0 || view.hostImports != 0 || !writable(view.protection)) continue;
++            std::uint8_t mask = 0;
++            for (std::size_t sub = 0; sub < subpages; ++sub) {
++                const auto at = it->first + sub * subpageBytes;
++                if (at < first || at >= stop || at < start || at >= run.end || (sub + 1) * subpageBytes > view.viewBytes) continue;
++                if ((view.armed & (1u << sub)) != 0) continue;
++                mask |= static_cast<std::uint8_t>(1u << sub);
++            }
++            if (mask == 0) continue;
++            const DWORD protection = view.protection == PAGE_EXECUTE_READWRITE ? PAGE_EXECUTE_READ : PAGE_READONLY;
++            protectSubpages(it->first, mask, protection, "arm resident write alarm", view.viewBytes);
++            view.armed |= mask;
++            for (std::size_t sub = 0; sub < subpages; ++sub) {
++                if ((mask & (1u << sub)) == 0) continue;
++                const auto bit = (it->first + sub * subpageBytes - start) >> 12;
++                run.alarmed[bit >> 6] |= 1ull << (bit & 63);
++            }
++        }
++    }
++
+     void collectResident(std::uintptr_t start, Run& run, std::uintptr_t from, std::uintptr_t stop, void** pages, std::size_t* count, bool clear, Collection collection) {
+         const auto first = from & ~std::uintptr_t{4095};
++        if (writeAlarms() && clear && collection == Collection::All && run.fresh == 0) {
++            if (allAlarmed(start, run, first, stop)) {
++                ++alarmSkips;
++                return;
++            }
++            armRun(start, run, first, stop);
++        }
+         if (run.fresh == 0 && collection != Collection::Fresh) {
+             ULONG_PTR reported = (stop - first + 4095) / 4096;
+             DWORD granularity = 0;
+@@ -1262,6 +1348,8 @@ private:
+     }
+     std::map<std::pair<std::uintptr_t, std::uint64_t>, std::shared_ptr<Physical>> physical;
+     std::map<std::uintptr_t, Run> residentRuns;
++    std::uint64_t alarmSkips = 0;
++    std::uint64_t alarmFaults = 0;
+     std::map<std::pair<std::uintptr_t, std::uint64_t>, std::map<std::uintptr_t, Run>::iterator> residentIndex;
+     std::vector<std::shared_ptr<Saved>> savedPool;
+     std::size_t savedPoolBytes = 0;
+diff --git a/core/libs/prx/libc/src/GuestArena.cpp b/core/libs/prx/libc/src/GuestArena.cpp
+index d778c92ad..9faf0b454 100644
+--- a/core/libs/prx/libc/src/GuestArena.cpp
++++ b/core/libs/prx/libc/src/GuestArena.cpp
+@@ -421,6 +421,10 @@ bool GuestArenaHandleRead_nid_postfix(std::uintptr_t address) {
+     return WindowsMappings::Get().HandleRead(address);
+ }
+ 
++void GuestArenaWriteAlarmStats_nid_postfix(std::uint64_t* skips, std::uint64_t* faults) {
++    WindowsMappings::Get().AlarmStats(skips, faults);
++}
++
+ namespace {
+ 
+ struct Traps {
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index 0cb64b041..784b1f6f9 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -497,6 +497,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_WORKER_AFFINITY` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/WorkerAffinity.cpp` |  | pins the queue workers and presenter to the performant cores of a hybrid CPU (needed to enable it on non-Linux hosts) |
+ | `APS5_WORKER_AFFINITY_MASK` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/WorkerAffinity.cpp` |  | explicit hex CPU affinity mask for the queue workers and presenter |
+ | `APS5_WORKING_SET_MIB` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | sets the process working-set minimum to this many MiB (Windows only) |
++| `APS5_WRITE_ALARMS` | presence | `core/libs/prx/libc/include/WindowsMappings.hpp` |  | Windows: after a collect walks a resident run, its writable pages are made read-only ("armed"); a later collect of a range whose pages are all still armed returns without GetWriteWatch, and the first CPU write to an armed page faults once, restores the page and lets the write watch see it. Host writes, imports, pins and protection changes disarm first. `[guestmem]` counts skipped collects and alarm faults |
+ | `APS5_WRITE_EVIDENCE_AFTER` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/WriteEvidence.cpp` | 4 | consecutive unchanged observations before a dword's written-element evidence is trusted |
+ | `APS5_WRITE_EVIDENCE_MAX_KIB` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/WriteEvidence.cpp` | 16 | largest written range in KiB that the evidence may serve |
+ | `APS5_WRITE_EVIDENCE_SAMPLE` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/WriteEvidence.cpp` | 16 | reads one in this many pending writes to sample them |
+-- 
+2.55.0.windows.5
+

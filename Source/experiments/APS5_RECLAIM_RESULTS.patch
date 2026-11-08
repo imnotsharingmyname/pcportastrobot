@@ -1,0 +1,90 @@
+diff --git a/core/shader/recompiler/Recompiler.cpp b/core/shader/recompiler/Recompiler.cpp
+index 437d284e5..a85a79d1a 100644
+--- a/core/shader/recompiler/Recompiler.cpp
++++ b/core/shader/recompiler/Recompiler.cpp
+@@ -20,6 +20,9 @@
+ #include <memory>
+ #include <set>
+ #include <mutex>
++#include <condition_variable>
++#include <thread>
++#include <vector>
+ #include <new>
+ #include <shared_mutex>
+ #include <unordered_map>
+@@ -1471,6 +1474,51 @@ bool VerifyMaskedResultMemo() {
+     return verify;
+ }
+ 
++bool ReclaimResultsOffThread() {
++    static const bool reclaim = [] {
++        const char* text = std::getenv("APS5_RECLAIM_RESULTS");
++        return text != nullptr && text[0] != 0 && text[0] != '0';
++    }();
++    return reclaim;
++}
++
++struct ResultReclaimer {
++    std::mutex mutex;
++    std::condition_variable wake;
++    std::vector<std::shared_ptr<const RecompileResult>> pending;
++
++    ResultReclaimer() {
++        std::thread([this] {
++            std::vector<std::shared_ptr<const RecompileResult>> batch;
++            for (;;) {
++                {
++                    std::unique_lock lock(mutex);
++                    wake.wait(lock, [&] { return !pending.empty(); });
++                    std::swap(batch, pending);
++                }
++                batch.clear();
++            }
++        }).detach();
++    }
++
++    void Take(std::vector<std::shared_ptr<const RecompileResult>>& results) {
++        bool notify = false;
++        {
++            std::lock_guard lock(mutex);
++            const bool wasEmpty = pending.empty();
++            for (auto& result : results) pending.push_back(std::move(result));
++            notify = wasEmpty;
++        }
++        results.clear();
++        if (notify) wake.notify_one();
++    }
++};
++
++void ReclaimResults(std::vector<std::shared_ptr<const RecompileResult>>& results) {
++    static auto* reclaimer = new ResultReclaimer();
++    reclaimer->Take(results);
++}
++
+ ResultMemoEntry* memoSet(const std::unique_ptr<ResultMemoTable>& table, std::uint64_t index) {
+     if (table == nullptr) return nullptr;
+     return table->data() + static_cast<std::size_t>((index ^ (index >> 32u)) % ResultMemoSets) * ResultMemoWays;
+@@ -1829,6 +1877,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry&
+     result->cacheHit = cacheHit;
+     std::shared_ptr<const RecompileResult> shared = std::move(result);
+     const auto bytes = resultBytes(*shared);
++    std::vector<std::shared_ptr<const RecompileResult>> evicted;
+     const auto insert = [&](std::unique_ptr<ResultMemoTable>& table, std::uint64_t at, std::uint64_t key, std::shared_ptr<const MemoPatch> recipe, bool count) {
+         if (table == nullptr) {
+             table = std::make_unique<ResultMemoTable>();
+@@ -1852,6 +1901,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry&
+             if (count) counters.evictions.fetch_add(1, std::memory_order_relaxed);
+             counters.heldBytes.fetch_sub(victim->bytes, std::memory_order_relaxed);
+             counters.heldEntries.fetch_sub(1, std::memory_order_relaxed);
++            if (ReclaimResultsOffThread()) evicted.push_back(std::move(victim->result));
+         }
+         const auto held = bytes + (recipe != nullptr ? patchBytes(*recipe) : 0u);
+         *victim = {variantId, key, shared, nextMemoUse(), std::move(recipe), held};
+@@ -1864,6 +1914,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry&
+         shared = insert(source.memo, index, hash, nullptr, true);
+         if (patch != nullptr && patch->valid) static_cast<void>(insert(source.maskedMemo, maskedIndex, maskedHash, patch, false));
+     }
++    if (!evicted.empty()) ReclaimResults(evicted);
+     if (const auto budget = resultMemoBudget(); budget != 0 && counters.heldBytes.load(std::memory_order_relaxed) > budget) trimResultMemo(budget);
+     reportResultMemo();
+     return shared;

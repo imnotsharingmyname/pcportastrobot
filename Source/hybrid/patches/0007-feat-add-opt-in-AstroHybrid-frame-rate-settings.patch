@@ -1,0 +1,210 @@
+From dd3da79ab270d843efd22c4de9e275616b859d45 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Sun, 8 Nov 2026 19:01:19 +0000
+Subject: [PATCH] feat: add opt-in AstroHybrid frame-rate settings
+
+---
+ .../presentation/performanceOverlay.cpp       |  5 ++
+ src/graphics/presentation/videoOut.cpp        | 74 ++++++++++++++++++-
+ src/graphics/presentation/videoOut.h          |  3 +
+ src/graphics/presentation/window/window.cpp   | 10 ++-
+ 4 files changed, 88 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/presentation/performanceOverlay.cpp b/src/graphics/presentation/performanceOverlay.cpp
+index 11d7943c..6f4f395d 100644
+--- a/src/graphics/presentation/performanceOverlay.cpp
++++ b/src/graphics/presentation/performanceOverlay.cpp
+@@ -1,4 +1,5 @@
+ #include "graphics/presentation/performanceOverlay.h"
++#include "graphics/presentation/videoOut.h"
+ 
+ #include "common/debugCounters.h"
+ #include "common/emulatorConfig.h"
+@@ -717,6 +718,10 @@ float DrawPerformanceOverlay(const GraphicContext& graphics, vk::Extent2D extent
+ 		} else {
+ 			ImGui::TextDisabled("Waiting for frames");
+ 		}
++		if (const auto* limit = VideoOut::FrameLimitLabel()) {
++			ImGui::TextUnformatted("Frame-rate limit");
++			ImGui::Text("%s  (Ctrl+F2 to change)", limit);
++		}
+ 		DrawFrameGraph(shown.history, shown.history_count, (details ? 330.0f : 260.0f) * scale,
+ 		               46.0f * scale);
+ 		if (details) {
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 72b047f3..53936ad3 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -36,6 +36,8 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <cstdlib>
++#include <cstring>
+ #include <fmt/format.h>
+ #include <list>
+ #include <thread>
+@@ -869,6 +871,46 @@ void VideoOutDriver::Impl::VblankEnd() {
+ // refresh rate changes. Independent of KYTY_PRESENT_PORT_UNLOCKED, which only changes FlipQueue::Flip.
+ static Live::Switch g_present_abs_vblank("KYTY_PRESENT_ABS_VBLANK", Live::ParseDefaultOff);
+ 
++namespace {
++
++constexpr uint32_t FRAME_LIMIT_DISABLED = UINT32_MAX;
++constexpr std::array<uint32_t, 4> FRAME_LIMITS {30, 60, 120, 0};
++constexpr std::array<const char*, 4> FRAME_LIMIT_LABELS {"30 FPS", "60 FPS", "120 FPS",
++                                                       "No limit"};
++
++std::atomic<uint32_t>& FrameLimitChoice() {
++	static std::atomic<uint32_t> choice {[] {
++		const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT");
++		if (value != nullptr) {
++			constexpr std::array<const char*, 4> options {"30", "60", "120", "unlimited"};
++			for (uint32_t i = 0; i < options.size(); ++i) {
++				if (std::strcmp(value, options[i]) == 0) {
++					return i;
++				}
++			}
++		}
++		return FRAME_LIMIT_DISABLED;
++	}()};
++	return choice;
++}
++
++} // namespace
++
++const char* FrameLimitLabel() {
++	const auto choice = FrameLimitChoice().load(std::memory_order_relaxed);
++	return choice == FRAME_LIMIT_DISABLED ? nullptr : FRAME_LIMIT_LABELS[choice];
++}
++
++bool CycleFrameLimit() {
++	auto& setting = FrameLimitChoice();
++	const auto choice = setting.load(std::memory_order_relaxed);
++	if (choice == FRAME_LIMIT_DISABLED) {
++		return false;
++	}
++	setting.store((choice + 1) % FRAME_LIMITS.size(), std::memory_order_relaxed);
++	return true;
++}
++
+ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 	// A 120 Hz timer loop that blocks between vblanks; it presents and fires the flip events the
+ 	// guest waits for. Its only spin is the last <= 50 us of a vblank wait (SleepMicro).
+@@ -894,13 +936,35 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 	uint64_t abs_origin  = 0;
+ 	uint64_t abs_index   = 0;
+ 	uint32_t abs_refresh = 0;
++	uint32_t previous_limit = FRAME_LIMIT_DISABLED;
++	uint64_t next_flip = 0;
++
++	const auto flip = [&](uint32_t limit) {
++		if (limit == 0) {
++			return m_flip_queue.Flip(0);
++		}
++		const auto now = Common::Timer::QueryPerformanceCounter();
++		if (now < next_flip || !m_flip_queue.Flip(0)) {
++			return false;
++		}
++		next_flip = now + (frequency + limit - 1) / limit;
++		return true;
++	};
+ 
+ 	uint32_t placement_count = 0; // placement samples (common/cpuPlacement.h), every 8th vblank
+ 	while (!token.stop_requested()) {
+ 		if ((++placement_count & 7u) == 0u) {
+ 			Common::SamplePlacement(Common::ThreadRole::Host);
+ 		}
+-		const bool absolute    = g_present_abs_vblank.On();
++		const auto choice = FrameLimitChoice().load(std::memory_order_relaxed);
++		if (choice != previous_limit) {
++			previous_limit = choice;
++			next_flip = 0;
++		}
++		const bool limit_enabled = choice != FRAME_LIMIT_DISABLED;
++		const auto limit = limit_enabled ? FRAME_LIMITS[choice] : 0;
++		const bool absolute = g_present_abs_vblank.On() ||
++		                      (limit_enabled && Config::GetPresentMode() == Config::PresentMode::Immediate);
+ 		bool       behind      = false; // a vblank deadline was missed: may present a blank frame
+ 		uint64_t   frame_begin = 0;
+ 		uint64_t   period      = 1;
+@@ -932,13 +996,17 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 				// Present each ready flip as it arrives; the guest's vblank events keep their clock.
+ 				while (!token.stop_requested() &&
+ 				       Common::Timer::QueryPerformanceCounter() < deadline) {
+-					if (m_flip_queue.Flip(0)) {
++					if (flip(limit)) {
+ 						continue;
+ 					}
+ 					const auto current = Common::Timer::QueryPerformanceCounter();
+ 					if (current >= deadline) {
+ 						break;
+ 					}
++					if (limit != 0 && current < next_flip) {
++						sleep_until(std::min(deadline, next_flip));
++						continue;
++					}
+ 					const auto remaining_us =
+ 					    ((deadline - current) * 1000000u + frequency - 1) / frequency;
+ 					Common::Thread::SleepMicro(
+@@ -988,7 +1056,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 		}
+ 
+ 		VblankBegin();
+-		bool presented = m_flip_queue.Flip(0);
++		bool presented = flip(limit);
+ 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
+ 			if (m_presenter.PresentLastFrame()) {
+ 				presented = true;
+diff --git a/src/graphics/presentation/videoOut.h b/src/graphics/presentation/videoOut.h
+index 72fe2c72..c4ce13e7 100644
+--- a/src/graphics/presentation/videoOut.h
++++ b/src/graphics/presentation/videoOut.h
+@@ -52,6 +52,9 @@ private:
+                                            Graphics::Presenter& presenter);
+ void                          VideoOutShutdown();
+ 
++[[nodiscard]] const char* FrameLimitLabel();
++bool CycleFrameLimit();
++
+ KYTY_SYSV_ABI int  VideoOutOpen(int user_id, int bus_type, int index, const void* param);
+ KYTY_SYSV_ABI int  VideoOutClose(int handle);
+ KYTY_SYSV_ABI int  VideoOutSetFlipMaster(int slave_handle, int master_handle);
+diff --git a/src/graphics/presentation/window/window.cpp b/src/graphics/presentation/window/window.cpp
+index 629109cb..00c56f76 100644
+--- a/src/graphics/presentation/window/window.cpp
++++ b/src/graphics/presentation/window/window.cpp
+@@ -17,6 +17,7 @@
+ #include "graphics/presentation/performanceOverlay.h"
+ #include "graphics/presentation/renderDoc.h"
+ #include "graphics/presentation/systemOverlay.h"
++#include "graphics/presentation/videoOut.h"
+ #include "graphics/presentation/window/hostInput.h"
+ #include "graphics/presentation/window/windowInternal.h"
+ #include "kytyGitVersion.h"
+@@ -532,7 +533,11 @@ void WindowContext::ProcessEvent(double time_s) {
+ #endif
+ 			case SDLK_F2:
+ 				if (pressed) {
+-					if ((event->key.mod & SDL_KMOD_SHIFT) != 0) {
++					if ((event->key.mod & SDL_KMOD_CTRL) != 0 && VideoOut::CycleFrameLimit()) {
++						if (!PerformanceOverlayEnabled()) {
++							TogglePerformanceOverlay();
++						}
++					} else if ((event->key.mod & SDL_KMOD_SHIFT) != 0) {
+ 						TogglePerformanceOverlayDetails();
+ 					} else {
+ 						TogglePerformanceOverlay();
+@@ -1027,6 +1032,9 @@ void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
+ 	    (has_title ? title : ""), (has_title ? ", " : ""), (has_title_id ? title_id : ""),
+ 	    (has_title_id ? ", " : ""), (has_app_ver ? app_ver : ""), (has_app_ver ? " " : ""),
+ 	    device_name, processor_name, frame_num, current_fps);
++	if (const auto* limit = VideoOut::FrameLimitLabel()) {
++		text += fmt::format(" | FPS limit: {}", limit);
++	}
+ 
+ 	SDL_SetWindowTitle(window, text.c_str());
+ }
+-- 
+2.55.0.windows.5
+

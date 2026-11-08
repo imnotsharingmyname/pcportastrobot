@@ -1,0 +1,90 @@
+From f395495079b011429d496d933ab4ade28ed7e3d7 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 30 Oct 2026 03:03:53 +0000
+Subject: [PATCH] feat(agc): support opt-in block shadows for thin linear
+ storage images
+
+---
+ .../libSceAgcDriver/Graphics/src/Texture.cpp  | 19 ++++++++++++++++---
+ .../prx/libSceAgcDriver/tests/Recorder.cpp    |  7 ++++++-
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
+index 53aab4395..318bb55e6 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
+@@ -276,6 +276,18 @@ bool BlockTrackingEnabled() {
+     return !disabled;
+ }
+ 
++bool LinearBlockTrackingEnabled() {
++    static const bool enabled = [] {
++        const char* text = std::getenv("APS5_LINEAR_BLOCK_TRACKING");
++        return text != nullptr && text[0] != 0 && text[0] != '0';
++    }();
++    return enabled;
++}
++
++std::array<std::uint32_t, 3> StorageWindowBlock(TextureTileMode tileMode, std::uint32_t elementBytes) {
++    return tileMode == TextureTileMode::kLinear ? std::array<std::uint32_t, 3>{elementBytes, 1u, 1u} : ThinBlockLayout(tileMode, elementBytes);
++}
++
+ struct PhaseTimer {
+     std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+     double lap() {
+@@ -1492,7 +1504,8 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler,
+         const bool layered = geometry.layers >= 2 && !geometry.thick && geometry.imageDepth == 1 && geometry.layers == geometry.imageLayers && geometry.layerBytes * geometry.layers == guestBytes && geometry.layerBytes % 65536 == 0 && descriptor.baseAddress % 65536 == 0;
+         // Tile blocks divide the stamp blocks, so at an aligned base every unit is whole tile blocks
+         // of its (layer, mip) slices (sliceWindows).
+-        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && !geometry.thick && descriptor.tileMode != TextureTileMode::kLinear && descriptor.baseAddress % 65536 == 0;
++        const bool linearUnits = LinearBlockTrackingEnabled() && geometry.imageDepth == 1;
++        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && !geometry.thick && (descriptor.tileMode != TextureTileMode::kLinear || linearUnits) && descriptor.baseAddress % 65536 == 0;
+         trackedLayers = blockUnits ? static_cast<std::uint32_t>((guestBytes + 65535) / 65536) : layered && LayerTrackingEnabled() ? geometry.layers : 1u;
+         trackedLayerBytes = blockUnits ? 65536 : guestBytes / trackedLayers;
+         layerGeneration.assign(trackedLayers, 0);
+@@ -3017,7 +3030,7 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> StorageTexture::unitRuns(co
+ std::vector<StorageTexture::SliceWindow> StorageTexture::sliceWindows(std::span<const std::pair<std::uint64_t, std::uint64_t>> runs) const {
+     std::vector<SliceWindow> windows;
+     const auto elementBytes = BytesPerElement(descriptor.format);
+-    const auto block = ThinBlockLayout(descriptor.tileMode, elementBytes);
++    const auto block = StorageWindowBlock(descriptor.tileMode, elementBytes);
+     for (const auto& [runBegin, runEnd] : runs) {
+         for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
+             for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
+@@ -3490,7 +3503,7 @@ std::uint64_t StorageTexture::writeBackWindows(std::span<const ImportSegment> se
+         std::size_t last;
+     };
+     std::vector<SlabRetile> slabRetiled;
+-    const auto blockBytes = ThinBlockLayout(descriptor.tileMode, elementBytes)[0];
++    const auto blockBytes = StorageWindowBlock(descriptor.tileMode, elementBytes)[0];
+     for (std::size_t i = 0; i < windows.size(); ++i) {
+         const auto& window = windows[i];
+         // The tail levels follow each other, sharing the previous one's region.
+diff --git a/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp b/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
+index 408f1becf..ce3d5dfd0 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
+@@ -6931,6 +6931,10 @@ void singlePassTests(const Device& device, Recorder& recorder, bool watched) {
+         std::uint32_t pipeBankXor = 0;
+     };
+     constexpr Case cases[] = {
++        {"R8 linear 300x170", 1, TextureTileMode::kLinear, 300, 170, 1},
++        {"R16 linear 257x129, 3 mips", 7, TextureTileMode::kLinear, 257, 129, 3},
++        {"RGBA8 linear 520x260", 56, TextureTileMode::kLinear, 520, 260, 1},
++        {"RGBA16F linear 385x257, 3 mips", 71, TextureTileMode::kLinear, 385, 257, 3},
+         {"R8 64 KiB R_X 200x150", 1, TextureTileMode::kR64KBX, 200, 150, 1},
+         {"R16 64 KiB R_X 200x150, 3 mips", 7, TextureTileMode::kR64KBX, 200, 150, 3},
+         {"RGBA8 64 KiB R_X 520x260, 6 mips", 56, TextureTileMode::kR64KBX, 520, 260, 6},
+@@ -7096,7 +7100,8 @@ void singlePassTests(const Device& device, Recorder& recorder, bool watched) {
+             results[mode].moves = StorageTexture::SinglePassMoves() - movesBefore;
+             if (results[mode].reuploaded != texels) failures += what + (mode == 1 ? " (single pass)" : " (copies)") + ": the second image does not hold the texels written back\n";
+         }
+-        if (results[0].moves != 0 || results[1].moves < 3) failures += what + ": single-pass moves " + std::to_string(results[0].moves) + " with the copies and " + std::to_string(results[1].moves) + " in single pass (want 0 and at least 3)\n";
++        const auto minimumMoves = test.tileMode == TextureTileMode::kLinear ? 2u : 3u;
++        if (results[0].moves != 0 || results[1].moves < minimumMoves) failures += what + ": single-pass moves " + std::to_string(results[0].moves) + " with the copies and " + std::to_string(results[1].moves) + " in single pass (want 0 and at least " + std::to_string(minimumMoves) + ")\n";
+         if (results[0].uploaded != results[1].uploaded) failures += what + ": the first upload differs between the copies and single pass\n";
+         if (results[0].memory != results[1].memory) {
+             std::size_t differ = 0;
+-- 
+2.55.0.windows.5
+

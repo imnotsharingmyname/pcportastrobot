@@ -1,0 +1,24 @@
+# Game files are copyrighted and huge: never commit
+/Game/
+/Analysis/elf/
+# Third-party checkouts and downloaded toolchains
+/Tools/AnyPS5/
+/Tools/shadPS4/
+/Tools/sharpemu/
+/Tools/winlibs/
+/Tools/jdk/
+/Tools/ghidra/
+/Tools/dl/
+/REA/rea/
+/REA/*.backup*
+/Build/
+/Runtime/
+/Logs/*.log
+/Logs/**/*.log
+/Logs/rea_session.json
+/Build/elf-input/
+/Tools/KytyPS5-jetsku/
+/Tools/kyty-int21/
+/Tools/renderdoc/
+/Tools/xref_scan.exe
+/.arena/

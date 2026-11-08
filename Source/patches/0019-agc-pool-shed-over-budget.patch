@@ -1,0 +1,52 @@
+From 7dc4129e70316be46b3f0fafdbf2f170d0d268a0 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 30 Oct 2026 11:00:09 +0000
+Subject: [PATCH] perf(agc): shed the device pool tier while video memory is
+ over budget (APS5_POOL_SHED_OVER_BUDGET)
+
+Pooled images were already dropped while the device-local heap is over
+budget, but device-tier buffers stayed retained up to the tier budget
+(~890 MiB), pushing new textures and buffers into host memory. With the
+switch a device buffer returned while over budget frees the tier.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp | 9 ++++++++-
+ docs/dev/ENVIRONMENT.md                                  | 1 +
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp
+index 8cb9eb114..6d99e0eda 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp
+@@ -575,7 +575,14 @@ void BufferPool::Put(const BufferAllocation& allocation) noexcept {
+     try {
+         std::lock_guard lock(mutex);
+         auto& tier = tierFor(allocation.bytes, allocation.properties);
+-        if (allocation.allocationBytes > tier.budget) {
++        static const bool shedOverBudget = [] {
++            const char* text = std::getenv("APS5_POOL_SHED_OVER_BUDGET");
++            return text != nullptr && text[0] != 0 && text[0] != '0';
++        }();
++        if (shedOverBudget && &tier == &deviceTier && heapOverBudget()) {
++            while (deviceTier.slots != 0) evictOldest(deviceTier, evicted);
++            evicted.push_back(allocation);
++        } else if (allocation.allocationBytes > tier.budget) {
+             evicted.push_back(allocation);
+         } else {
+             while (tier.slots != 0 && (tier.retainedBytes + allocation.allocationBytes > tier.budget || tier.slots >= maxSlots)) evictOldest(tier, evicted);
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index b526bd265..ac8a6bc62 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -383,6 +383,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_PIPELINE_DRAIN_SUBMISSIONS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp` |  | lets a submission end without submitting its recorded work, so it joins a later submit with the pipeline's queue; any value drains the pipeline and submits at the end of the submission |
+ | `APS5_PIPELINE_JOURNAL_ENTRIES` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/PipelineJournal.cpp` | 4096 | number of journal entries loaded at most; a longer journal keeps its last entries, the ones recorded last |
+ | `APS5_PIPELINE_JOURNAL_MAX_MIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/PipelineJournal.cpp` | 1024 | size cap in MiB on the pipeline journal; the file is rewritten down to three quarters of the cap when it is reached, keeping the newest pipelines and the modules they name and leaving room for later records |
++| `APS5_POOL_SHED_OVER_BUDGET` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp` |  | a device-local buffer returned to the pool while the device-local heap is over its VK_EXT_memory_budget budget is freed, along with every other buffer and image the device tier retains, instead of being kept for reuse (pooled images already behave so), so new allocations stay in video memory instead of spilling to host memory; an empty value or one starting with `0` leaves it off |
+ | `APS5_PIPELINE_JOURNAL_THREADS` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/PipelineJournal.cpp` |  | threads that replay the journal's pipelines, 0 disables the replay; unset uses half the hardware threads, at least one |
+ | `APS5_PIPELINE_STATS` | string | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | captures and prints driver statistics for each new pipeline, requiring `VK_KHR_pipeline_executable_properties`; `1` enables |
+ | `APS5_PIPELINE_STORE_ENTRIES` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/Pipeline.cpp` | adaptive | fixes the LRU bound on the entries of the pipeline store, which otherwise starts at 1024 and doubles up to 4096 for a journal replay that does not fit and while evicted pipelines keep coming back; an entry is evicted only once no recorded draw holds it |
+-- 
+2.55.0.windows.5
+

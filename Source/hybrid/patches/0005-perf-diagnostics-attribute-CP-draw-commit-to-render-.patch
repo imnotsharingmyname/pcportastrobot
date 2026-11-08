@@ -1,0 +1,342 @@
+From dbb0cfd5c3e24ec5e0feabacc4ae889725bb0f3c Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Sun, 8 Nov 2026 01:25:34 +0000
+Subject: [PATCH] perf(diagnostics): attribute CP draw commit to render targets
+
+---
+ .../host_gpu/renderer/drawPrep/cpGaps.cpp     | 67 ++++++++++++++++++-
+ .../host_gpu/renderer/drawPrep/cpGaps.h       | 58 ++++++++++++++++
+ .../host_gpu/renderer/drawPrep/drawPrep.cpp   |  4 +-
+ .../renderer/pipeline/descriptors.cpp         | 12 ++++
+ src/graphics/host_gpu/renderer/renderDraw.cpp | 54 +++++++++++++++
+ 5 files changed, 192 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/cpGaps.cpp b/src/graphics/host_gpu/renderer/drawPrep/cpGaps.cpp
+index a853db86..08eae437 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/cpGaps.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/cpGaps.cpp
+@@ -4,11 +4,52 @@
+ #include <cinttypes>
+ #include <cstdio>
+ #include <cstdlib>
++#include <span>
+ #include <string>
+ #include <utility>
+ 
+ namespace Libs::Graphics::CpGaps {
+ 
++DrawCommitScope::DrawCommitScope() noexcept {
++	static const bool enabled = [] {
++		const auto* value = std::getenv("KYTY_CP_PASS_STATS");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	if (enabled && t_state != nullptr) {
++		m_state = t_state;
++		m_previous = m_state->draw_pass_sample;
++		m_state->draw_pass_sample = &m_sample;
++		m_start = Tsc();
++	}
++}
++
++DrawCommitScope::~DrawCommitScope() {
++	if (m_state == nullptr) {
++		return;
++	}
++	const auto elapsed = Tsc() - m_start;
++	m_state->draw_pass_sample = m_previous;
++	auto& totals = m_state->draw_pass_totals;
++	auto* bucket = &totals.back();
++	for (auto& candidate: std::span(totals).first(totals.size() - 1)) {
++		if (candidate.draws == 0 || candidate.key == m_sample.key) {
++			bucket = &candidate;
++			bucket->key = m_sample.key;
++			break;
++		}
++	}
++	++bucket->draws;
++	bucket->ticks += elapsed;
++	bucket->binding_ticks += m_sample.binding_ticks;
++	bucket->descriptor_ticks += m_sample.descriptor_ticks;
++	bucket->rebind_ticks += m_sample.rebind_ticks;
++	bucket->shader_table_bindings += m_sample.shader_table_bindings;
++	bucket->shader_table_bytes += m_sample.shader_table_bytes;
++	bucket->shader_table_reduction += m_sample.shader_table_reduction;
++	bucket->shader_byte_reduction += m_sample.shader_byte_reduction;
++}
++
++
+ const char* CatName(Cat cat) noexcept {
+ 	static constexpr const char* names[] = {
+ 	    "commit",      "headself",    "headwait.barrier", "headwait.start", "headwait.shallow",
+@@ -122,10 +163,34 @@ void Print(ThreadState& state, Report& report, uint64_t now_ns, uint64_t now_tsc
+ 		line += text;
+ 	}
+ 	std::printf("%s\n", line.c_str());
+-	std::fflush(stdout);
+ 	ledger.ResetTotals();
+ 	report.start_ns  = now_ns;
+ 	report.start_tsc = now_tsc;
++	for (size_t i = 0; i < state.draw_pass_totals.size(); ++i) {
++		auto& pass = state.draw_pass_totals[i];
++		if (pass.draws == 0) {
++			continue;
++		}
++		const auto& key = pass.key;
++		std::printf("CpPass: %s %ux%u c%u color0=%u depth=%u draws/frame=%.1f "
++		            "commit_ms/frame=%.3f bindings_ms/frame=%.3f descriptors_ms/frame=%.3f "
++		            "rebind_ms/frame=%.3f shader_tables/frame=%.1f shader_bytes/frame=%.0f "
++		            "potential_tables_saved/frame=%.1f potential_bytes_saved/frame=%.0f\n",
++		            i + 1 == state.draw_pass_totals.size() ? "overflow" :
++		                key.width == 0 ? "unclassified" : "attachments",
++		            key.width, key.height, key.colors, key.color_format, key.depth_format,
++		            static_cast<double>(pass.draws) / frames,
++		            static_cast<double>(pass.ticks) * ms_tick,
++		            static_cast<double>(pass.binding_ticks) * ms_tick,
++		            static_cast<double>(pass.descriptor_ticks) * ms_tick,
++		            static_cast<double>(pass.rebind_ticks) * ms_tick,
++		            static_cast<double>(pass.shader_table_bindings) / frames,
++		            static_cast<double>(pass.shader_table_bytes) / frames,
++		            static_cast<double>(pass.shader_table_reduction) / frames,
++		            static_cast<double>(pass.shader_byte_reduction) / frames);
++		pass = {};
++	}
++	std::fflush(stdout);
+ 	report.frames    = 0;
+ }
+ 
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/cpGaps.h b/src/graphics/host_gpu/renderer/drawPrep/cpGaps.h
+index 0b1e59cb..a761344d 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/cpGaps.h
++++ b/src/graphics/host_gpu/renderer/drawPrep/cpGaps.h
+@@ -279,10 +279,47 @@ enum class Event : uint8_t {
+ constexpr size_t EventCount = static_cast<size_t>(Event::Count);
+ 
+ // The GPU thread's ledger (null on every other thread, and while the diagnostic is off).
++struct DrawPassKey {
++	uint32_t width = 0;
++	uint32_t height = 0;
++	uint32_t colors = 0;
++	uint32_t color_format = 0;
++	uint32_t depth_format = 0;
++
++	bool operator==(const DrawPassKey&) const = default;
++};
++
++struct DrawPassSample {
++	DrawPassKey key;
++	uint64_t binding_ticks = 0;
++	uint64_t descriptor_ticks = 0;
++	uint64_t rebind_ticks = 0;
++	uint64_t shader_table_bindings = 0;
++	uint64_t shader_table_bytes = 0;
++	int64_t shader_table_reduction = 0;
++	int64_t shader_byte_reduction = 0;
++};
++
++struct DrawPassTotals {
++	DrawPassKey key;
++	uint64_t draws = 0;
++	uint64_t ticks = 0;
++	uint64_t binding_ticks = 0;
++	uint64_t descriptor_ticks = 0;
++	uint64_t rebind_ticks = 0;
++	uint64_t shader_table_bindings = 0;
++	uint64_t shader_table_bytes = 0;
++	int64_t shader_table_reduction = 0;
++	int64_t shader_byte_reduction = 0;
++};
++
+ struct ThreadState {
+ 	Ledger                           ledger;
+ 	double                           ticks_per_ns = 1.0;
+ 	std::array<uint64_t, EventCount> events {};
++	DrawPassSample* draw_pass_sample = nullptr;
++	// Last entry is the overflow bucket.
++	std::array<DrawPassTotals, 33> draw_pass_totals {};
+ };
+ inline constinit thread_local ThreadState* t_state = nullptr;
+ 
+@@ -308,6 +345,27 @@ private:
+ 	ThreadState* m_state = nullptr;
+ };
+ 
++// KYTY_CP_PASS_STATS=1 with KYTY_CP_GAP_STATS=1 records the same inclusive commit
++// boundary by the final draw's attachment signature. Non-draw commits remain unclassified.
++class DrawCommitScope {
++public:
++	DrawCommitScope() noexcept;
++	~DrawCommitScope();
++	DrawCommitScope(const DrawCommitScope&) = delete;
++	DrawCommitScope& operator=(const DrawCommitScope&) = delete;
++
++private:
++	Scope m_gap {Cat::Commit};
++	ThreadState* m_state = nullptr;
++	DrawPassSample* m_previous = nullptr;
++	DrawPassSample m_sample;
++	uint64_t m_start = 0;
++};
++
++[[nodiscard]] inline DrawPassSample* CurrentDrawPassSample() noexcept {
++	return t_state != nullptr ? t_state->draw_pass_sample : nullptr;
++}
++
+ // The innermost scope continues as `cat` (dispatch phases).
+ inline void Phase(Cat cat) noexcept {
+ 	if (Enabled()) [[unlikely]] {
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+index f02f4cff..8ec061a6 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+@@ -1680,7 +1680,7 @@ void Engine::ExecuteIndirect(uint64_t position, const std::function<void()>& dra
+ 	executor.m_run_parts           = commit && slot.run_parts_valid ? &slot.run_parts : nullptr;
+ 	executor.m_in_engine_commit    = commit;
+ 	{
+-		const CpGaps::Scope gap(CpGaps::Cat::Commit);
++		const CpGaps::DrawCommitScope gap;
+ 		CommitStats::BeginDraw();
+ 		draw();
+ 		CommitStats::EndDraw();
+@@ -1798,7 +1798,7 @@ void PrintDrawPrepSummary() {
+ 
+ void Engine::Commit(Slot& slot) {
+ 	Profiler::ScopedFrameWait commit_time(Profiler::FrameWait::DrawPrepCommit);
+-	const CpGaps::Scope       gap(CpGaps::Cat::Commit);
++	const CpGaps::DrawCommitScope gap;
+ 	if (!CommitStats::IndirectOnly()) {
+ 		CommitStats::BeginDraw();
+ 	}
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+index af1556d4..089d4522 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+@@ -30,6 +30,7 @@
+ #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+ #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
+ #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
++#include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
+ #include "graphics/host_gpu/renderer/drawPrep/xframeReuse.h"
+ #include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
+ #include "graphics/host_gpu/renderer/image/imageView.h"
+@@ -2076,6 +2077,8 @@ static const std::vector<GuestRange>* ResolveWrittenRanges(RenderContext&
+ 
+ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
+ 	KYTY_PROFILER_FUNCTION();
++	auto* pass = CpGaps::CurrentDrawPassSample();
++	const auto start = pass != nullptr ? CpGaps::Tsc() : 0;
+ 	prepared.write_preparation_tick = BufferCache::ShaderWriteRetickEnabled()
+ 	                                      ? m_context.GetCommandScheduler().CurrentTick()
+ 	                                      : UINT64_MAX;
+@@ -2163,6 +2166,9 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
+ 		BufferLookupStats::NoteStage(SyncEpoch::Current());
+ 	}
+ 	CommitStats::StepMark(CommitStats::Step::RbTables);
++	if (pass != nullptr) [[unlikely]] {
++		pass->rebind_ticks += CpGaps::Tsc() - start;
++	}
+ }
+ 
+ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
+@@ -2976,6 +2982,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
+ 				Profiler::CountFrameEvent(E::DescriptorOffsetAuditOverLimit);
+ 			}
+ 		}
++		auto* pass = pipeline_bind_point == vk::PipelineBindPoint::eGraphics
++		                 ? CpGaps::CurrentDrawPassSample() : nullptr;
++		const auto descriptor_start = pass != nullptr ? CpGaps::Tsc() : 0;
+ 		if (pipeline.uses_push_descriptors) {
+ 			const CommitStats::SubScope desc_scope(CommitStats::Sub::DescPush);
+ 			// KYTY_PUSH_SHADOW_FRESH_SKIP: a stage's shader data or flattened SRT was uploaded for
+@@ -2995,6 +3004,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
+ 			    prepared_bindings, [](const auto* prepared) { return prepared->fresh_upload; });
+ 			CommitDescriptorSet(buffer, pipeline_bind_point, pipeline, fresh);
+ 		}
++		if (pass != nullptr) [[unlikely]] {
++			pass->descriptor_ticks += CpGaps::Tsc() - descriptor_start;
++		}
+ 	}
+ 	CommitStats::StepMark(CommitStats::Step::CbDescriptors);
+ }
+diff --git a/src/graphics/host_gpu/renderer/renderDraw.cpp b/src/graphics/host_gpu/renderer/renderDraw.cpp
+index d2887c1b..ad642673 100644
+--- a/src/graphics/host_gpu/renderer/renderDraw.cpp
++++ b/src/graphics/host_gpu/renderer/renderDraw.cpp
+@@ -25,6 +25,7 @@
+ #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+ #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
+ #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
++#include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
+ #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
+ #include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
+ #include "graphics/host_gpu/renderer/image/textureCommon.h"
+@@ -3826,6 +3827,42 @@ static CommitStats::DrawShape MakeCommitShape(
+ 	return shape;
+ }
+ 
++static void AuditGraphicsPushBudget(CpGaps::DrawPassSample& sample,
++                                    std::span<PreparedBindings* const> stages,
++                                    uint32_t reserved_dwords, uint32_t budget_bytes) {
++	uint32_t cursor = reserved_dwords;
++	const auto budget = std::min(budget_bytes / 4u, 64u);
++	uint64_t proposed_tables = 0;
++	uint64_t proposed_bytes = 0;
++	const auto measure = [&](const PreparedBindings& stage) {
++		const auto dwords = stage.runtime->program->bindings.ShaderDataDwords();
++		if (stage.shader_data_buffer.buffer != nullptr) {
++			++sample.shader_table_bindings;
++			sample.shader_table_bytes += stage.shader_data_buffer.range;
++		}
++		if (dwords != 0) {
++			if (cursor <= budget && dwords <= budget - cursor) {
++				cursor += dwords;
++			} else {
++				++proposed_tables;
++				proposed_bytes += uint64_t {dwords} * 4;
++			}
++		}
++	};
++	// The program cache assigns the pixel stage first, then the vertex stages.
++	if (!stages.empty() && stages.back()->runtime->program->stage == ShaderType::Pixel) {
++		measure(*stages.back());
++		stages = stages.first(stages.size() - 1);
++	}
++	for (const auto* stage: stages) {
++		measure(*stage);
++	}
++	sample.shader_table_reduction = static_cast<int64_t>(sample.shader_table_bindings) -
++	                               static_cast<int64_t>(proposed_tables);
++	sample.shader_byte_reduction = static_cast<int64_t>(sample.shader_table_bytes) -
++	                              static_cast<int64_t>(proposed_bytes);
++}
++
+ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
+                                          const DrawCallInfo& draw, DrawRenderState& state,
+                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
+@@ -4328,7 +4365,24 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 	{
+ 		KYTY_PROFILER_DETAIL_BLOCK("Draw::CommitBindings");
+ 		const CommitStats::SubScope push_scope(CommitStats::Sub::Push);
++		auto* pass = CpGaps::CurrentDrawPassSample();
++		const auto start = pass != nullptr ? CpGaps::Tsc() : 0;
+ 		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages, m_run_active);
++		if (pass != nullptr) [[unlikely]] {
++			pass->binding_ticks += CpGaps::Tsc() - start;
++			using PushData = ShaderRecompiler::IR::PushData;
++			const auto reserved = PushData::GraphicsPushStart(
++			    mesh_active ? PushData::MeshDrawDwords(state.vertex_info[0].mesh.split_groups != 0)
++			                : 0,
++			    vertex_stages.back().user_clip_planes);
++			AuditGraphicsPushBudget(
++			    *pass, stages, reserved,
++			    m_context.GetGraphics().GetPhysicalDeviceProperties().limits.maxPushConstantsSize);
++			pass->key = {rendering.width, rendering.height, rendering.num_color_attachments,
++			             state.color_count != 0 ? static_cast<uint32_t>(state.color_info[0].desc.info.pixel_format) : 0,
++			             rendering.depth_stencil_attachment.image_view != nullptr
++			                 ? static_cast<uint32_t>(state.depth_info.desc.info.pixel_format) : 0};
++		}
+ 	}
+ 	if (run_verify_push) {
+ 		OwnedCounters::Add(DrawRun::GetTotals().partial_pushes, 1);
+-- 
+2.55.0.windows.5
+

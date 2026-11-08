@@ -1,0 +1,276 @@
+diff --git a/src/graphics/host_gpu/memoryTracker.h b/src/graphics/host_gpu/memoryTracker.h
+index 05910a66..53c7e55c 100644
+--- a/src/graphics/host_gpu/memoryTracker.h
++++ b/src/graphics/host_gpu/memoryTracker.h
+@@ -111,6 +111,16 @@ public:
+ 	// one. False when ranges were dropped since the last take (overflow): the caller must
+ 	// re-examine everything.
+ 	[[nodiscard]] bool TakeDirtiedRanges(RangeSet& ranges, uint64_t& epoch);
++	// A published region lives until this tracker is destroyed. Workers may resolve the
++	// pointer, but the CP must read its current serial when obtaining the binding.
++	[[nodiscard]] const RegionManager* FindSignatureRegion(uint64_t vaddr,
++	                                                      uint64_t size) const noexcept {
++		if (vaddr >= TRACKER_ADDRESS_SIZE || size == 0 ||
++		    size > TRACKER_REGION_SIZE - vaddr % TRACKER_REGION_SIZE) {
++			return nullptr;
++		}
++		return m_regions[vaddr / TRACKER_REGION_SIZE].load(std::memory_order_acquire);
++	}
+ 	// The sum of the mutation serials (RegionManager::Serial) of the regions [vaddr, vaddr + size)
+ 	// spans, or 0 when one of them does not exist yet (or the range is invalid). Serials only grow,
+ 	// so while this sum is unchanged no CPU-dirty, GPU-dirty, hot or readback-pending bit of any
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+index 07cee45e..38a87420 100644
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -3666,15 +3666,15 @@ bool BufferCache::VerifyRelaxedSnapshot(uint64_t vaddr, uint64_t size,
+ }
+ 
+ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size,
+-                                                       bool is_written, bool is_texel_buffer,
+-                                                       BufferId id) {
++                                                       bool is_written, bool is_texel_buffer, BufferId id,
++                                                       const RegionManager* signature_region) {
+ 	auto& command = m_scheduler.Current();
+ 	if (command.IsInvalid() || !GuestRange {vaddr, size}.Valid()) {
+ 		EXIT("BufferCache: buffer request requires a recording command buffer\n");
+ 	}
+ 	if (!is_written && !is_texel_buffer && m_binding_memo != nullptr && size < BindingMemoMaxSize &&
+ 	    GuestGpu::IsGpuThread()) {
+-		return ObtainReadBinding(vaddr, size, id);
++		return ObtainReadBinding(vaddr, size, id, signature_region);
+ 	}
+ 	return ObtainBufferNow(vaddr, size, is_written, is_texel_buffer, id, nullptr);
+ }
+@@ -3742,13 +3742,13 @@ void PrintBindingMemoStats() {
+ 
+ // KYTY_CP_COMMIT_STATS=steps: the memo lookup's time by outcome (diagnostic only).
+ std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBinding(uint64_t vaddr, uint64_t size,
+-                                                            BufferId id) {
++                                                            BufferId id, const RegionManager* signature_region) {
+ 	if (!CommitStats::StepsEnabled()) [[likely]] {
+-		return ObtainReadBindingMemo(vaddr, size, id);
++		return ObtainReadBindingMemo(vaddr, size, id, signature_region);
+ 	}
+ 	m_last_read_hit   = false;
+ 	const auto start  = CommitStats::Now();
+-	const auto result = ObtainReadBindingMemo(vaddr, size, id);
++	const auto result = ObtainReadBindingMemo(vaddr, size, id, signature_region);
+ 	const bool hit    = m_last_read_hit;
+ 	CommitStats::AddSub(hit ? CommitStats::Sub::ReadHit : CommitStats::Sub::ReadMiss,
+ 	                    CommitStats::Now() - start);
+@@ -3757,7 +3757,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBinding(uint64_t vaddr, uint
+ }
+ 
+ std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBindingMemo(uint64_t vaddr, uint64_t size,
+-                                                                BufferId id) {
++                                                                BufferId id, const RegionManager* signature_region) {
+ 	// KYTY_BINDING_EPOCH_MEMO (bufferCache.h).
+ 	// KYTY_CP_BINDING_MEMO_PREFETCH (default off, live): issue the read hint before the tracker
+ 	// query, so its region/serial loads can overlap the random memo-line fetch. This is a CPU cache
+@@ -3786,7 +3786,11 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBindingMemo(uint64_t vaddr,
+ 	}
+ 	const auto sig_start = CommitStats::StepsEnabled() ? CommitStats::Now() : 0;
+ 	const auto epoch  = SyncEpoch::Current();
+-	const auto before = m_memory_tracker.RangeSignature(vaddr, size);
++	if (signature_region != nullptr && m_binding_memo_verify != 0) [[unlikely]] {
++		EXIT_IF(signature_region != m_memory_tracker.FindSignatureRegion(vaddr, size));
++	}
++	const auto before = signature_region != nullptr ? signature_region->Serial()
++	                                               : m_memory_tracker.RangeSignature(vaddr, size);
+ 	if (sig_start != 0) {
+ 		CommitStats::AddSub(CommitStats::Sub::ReadSig, CommitStats::Now() - sig_start);
+ 	}
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.h b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+index 82d0fb2e..eaa6a7ff 100644
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.h
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+@@ -153,10 +153,15 @@ public:
+ 	[[nodiscard]] bool TakeEagerFlushRequest(bool in_rendering);
+ 	[[nodiscard]] Buffer&  GetBuffer(BufferId id) { return m_slot_buffers[id]; }
+ 	[[nodiscard]] BufferId FindBuffer(uint64_t vaddr, uint64_t size);
++	[[nodiscard]] const RegionManager* FindSignatureRegion(uint64_t vaddr,
++	                                                      uint64_t size) const noexcept {
++		return m_memory_tracker.FindSignatureRegion(vaddr, size);
++	}
+ 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
+ 	                                                        bool     is_written,
+ 	                                                        bool     is_texel_buffer = false,
+-	                                                        BufferId id              = {});
++	                                                        BufferId id              = {},
++	                                                        const RegionManager* signature_region = nullptr);
+ 	// KYTY_CP_BINDING_BATCH_PREFETCH (default on, live): a CPU cache hint for the binding memo
+ 	// slot a later ObtainBuffer(vaddr, size, false, false) on the GPU thread looks up. A stage's
+ 	// bindings issue all hints first (RenderExecutor::RebindBuffers), so the slots' cache misses
+@@ -530,10 +535,10 @@ private:
+ 	std::array<BindingMemo, BindingHotMemoSlots> m_binding_hot_memo {};
+ 	uint64_t m_binding_hot_generation = 0;
+ 	bool     m_binding_hot_enabled = false;
+-	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainReadBinding(uint64_t vaddr, uint64_t size,
+-	                                                             BufferId id);
+-	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainReadBindingMemo(uint64_t vaddr, uint64_t size,
+-	                                                                 BufferId id);
++	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainReadBinding(
++	    uint64_t vaddr, uint64_t size, BufferId id, const RegionManager* signature_region);
++	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainReadBindingMemo(
++	    uint64_t vaddr, uint64_t size, BufferId id, const RegionManager* signature_region);
+ 	// KYTY_CP_COMMIT_STATS=steps: the last ObtainReadBindingMemo call was a memo hit.
+ 	bool m_last_read_hit = false;
+ 	// The binding without the memo; *obtained receives the cache buffer's id (unchanged for a
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
+index 45a7df72..fed1c8b1 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
+@@ -8,6 +8,7 @@
+ #include "common/profiler.h"
+ #include "graphics/guest_gpu/hardwareContext.h"
+ #include "graphics/host_gpu/graphicContext.h"
++#include "graphics/host_gpu/renderer/cache/bufferCache.h"
+ #include "graphics/host_gpu/renderer/cache/samplerCache.h"
+ #include "graphics/host_gpu/renderer/cache/textureCache.h"
+ #include "graphics/host_gpu/renderer/colorRenderTarget.h"
+@@ -60,12 +61,15 @@ bool TryDecode(const DescriptorValue& value, T& descriptor) {
+ // FindBuffers' ranges: decoded and clamped as it does, while ClampRangeSize leaves every size
+ // unchanged (otherwise the command processor clamps: it logs the clamp or stops the emulator).
+ bool PlanRanges(const CompiledShaderInfo& program, const ResourceSnapshot& resources,
+-                StagePlan& stage) {
++                StagePlan& stage, const BufferCache* buffers) {
+ 	const auto count = program.info.buffers.size();
+ 	if (resources.buffers.size() < count) {
+ 		return false;
+ 	}
+ 	stage.ranges.resize(count);
++	if (buffers != nullptr) {
++		stage.signature_regions.assign(count, nullptr);
++	}
+ 	for (size_t i = 0; i < count; i++) {
+ 		ShaderBufferResource descriptor {};
+ 		if (!TryDecode(resources.buffers[i], descriptor)) {
+@@ -90,6 +94,10 @@ bool PlanRanges(const CompiledShaderInfo& program, const ResourceSnapshot& resou
+ 		}
+ 		range.address = address;
+ 		range.size    = requested_size;
++		if (buffers != nullptr && !program.info.buffers[i].written &&
++		    !program.info.buffers[i].formatted) {
++			stage.signature_regions[i] = buffers->FindSignatureRegion(address, requested_size);
++		}
+ 	}
+ 	return true;
+ }
+@@ -573,7 +581,7 @@ void ComputeBindingPlan(const BindingPlanContext& context, const RegisterSnapsho
+ 	const auto plan_stage = [&](const CompiledShaderInfo& program, const ResourceSnapshot& data,
+ 	                            StagePlan& stage) {
+ 		if (BindingPartEnabled(parts, BindingPart::Buffers)) {
+-			stage.ranges_valid = PlanRanges(program, data, stage);
++			stage.ranges_valid = PlanRanges(program, data, stage, context.buffers);
+ 			if (!stage.ranges_valid) {
+ 				Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepBindingAbstainRanges);
+ 			}
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.h b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.h
+index 754a3eb6..945c51ae 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.h
++++ b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.h
+@@ -45,6 +45,8 @@ struct DrawIndexArgs;
+ struct GraphicContext;
+ class SamplerCache;
+ class TextureBindingMemo;
++class BufferCache;
++class RegionManager;
+ 
+ namespace DrawPrep {
+ 
+@@ -114,6 +116,7 @@ struct StagePlan {
+ 	// FindBuffers: every V# of the program, in order.
+ 	bool               ranges_valid = false;
+ 	std::vector<Range> ranges;
++	std::vector<const RegionManager*> signature_regions;
+ 	// PrepareBindings/RebindBuffers: the stage's shader data with the user dwords and the
+ 	// mip-statistics fields filled in and the memory-offset dwords zero.
+ 	bool                  shader_data_valid = false;
+@@ -132,6 +135,7 @@ struct StagePlan {
+ 
+ 	void Reset() {
+ 		ranges_valid         = false;
++		signature_regions.clear();
+ 		shader_data_valid    = false;
+ 		mip_stats_active     = false;
+ 		samplers_valid       = false;
+@@ -223,6 +227,7 @@ struct BindingPlanContext {
+ 	SamplerCache*             samplers     = nullptr;
+ 	const GraphicContext*     graphics     = nullptr;
+ 	const TextureBindingMemo* texture_memo = nullptr; // FindHint only
++	const BufferCache*        buffers      = nullptr; // published tracker regions only
+ };
+ 
+ // The plan of a draw whose preparation succeeded (prepared.ok), on the preparing thread, from the
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+index 8ec061a6..30d0163d 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+@@ -1086,8 +1086,11 @@ void PrepareSlot(PipelineCache& pipeline_cache, Engine::Slot& slot, bool exact)
+ 
+ BindingPlanContext MakeBindingPlanContext(RenderContext& renderer) {
+ 	(void)BindingParts(); // read (and logged) here, before any worker needs it
++	const auto* tracker = EnvValue("KYTY_DRAW_PREP_TRACKER_REGION");
++	const bool plan_tracker = tracker != nullptr && std::strcmp(tracker, "1") == 0;
+ 	return {&renderer.GetPipelineCache(), &renderer.GetSamplerCache(), &renderer.GetGraphics(),
+-	        &renderer.GetRenderExecutor().GetTextureMemo()};
++	        &renderer.GetRenderExecutor().GetTextureMemo(),
++	        plan_tracker ? &renderer.GetBufferCache() : nullptr};
+ }
+ 
+ // The DrawPrep#k thread's number k (0 on other threads): its busy time is FrameWait
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+index 089d4522..215df111 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+@@ -211,7 +211,8 @@ static vk::DescriptorBufferInfo
+ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource& source,
+                     const ShaderRecompiler::IR::BufferResource& resource, ShaderType stage,
+                     uint32_t slot, uint32_t& buffer_offset,
+-                    const std::vector<GuestRange>* written_ranges, bool uniform_view) {
++                    const std::vector<GuestRange>* written_ranges, bool uniform_view,
++                    const RegionManager* signature_region) {
+ 	buffer_offset = 0;
+ 
+ 	const auto& [address, size, id] = source;
+@@ -242,7 +243,7 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
+ 	auto [buffer, offset] =
+ 	    narrowed ? context.GetBufferCache().ObtainWrittenBuffer(address, size, *written_ranges, id)
+ 	             : context.GetBufferCache().ObtainBuffer(address, size, resource.written,
+-	                                                     sync_images, id);
++	                                                     sync_images, id, signature_region);
+ 	if (lookup_start != 0) {
+ 		// KYTY_BUFFER_LOOKUP_STATS.
+ 		const auto outcome = BufferLookupStats::TakeOutcome();
+@@ -2122,6 +2123,11 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
+ 	CommitStats::StepMark(CommitStats::Step::RbHead);
+ 	const auto* uniform_binding = ShaderRecompiler::IR::FindBinding(
+ 	    program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::UniformBuffers);
++	const auto* plan = prepared.plan;
++	const auto* signature_plan =
++	    plan != nullptr && plan->ranges_valid &&
++	            plan->signature_regions.size() == prepared.buffer_sources.size()
++	        ? plan : nullptr;
+ 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+ 		uint32_t   buffer_offset = 0;
+ 		const auto ranges_start  = program.info.buffers[i].written ? BufferLookupStats::Now() : 0;
+@@ -2133,9 +2139,16 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
+ 		}
+ 		const bool uniform_view = uniform_binding != nullptr &&
+ 		                          std::ranges::binary_search(uniform_binding->resources, i);
+-		prepared.buffers.push_back(NativeStorageBuffer(m_context, prepared.buffer_sources[i],
++		const auto& source = prepared.buffer_sources[i];
++		const RegionManager* signature_region = nullptr;
++		if (signature_plan != nullptr && signature_plan->ranges[i].address == source.address &&
++		    signature_plan->ranges[i].size == source.size) {
++			signature_region = signature_plan->signature_regions[i];
++		}
++		prepared.buffers.push_back(NativeStorageBuffer(m_context, source,
+ 		                                               program.info.buffers[i], program.stage, i,
+-		                                               buffer_offset, written, uniform_view));
++		                                               buffer_offset, written, uniform_view,
++		                                               signature_region));
+ 		pack_memory_offset(i, buffer_offset);
+ 	}
+ 	CommitStats::StepMark(CommitStats::Step::RbBindings);

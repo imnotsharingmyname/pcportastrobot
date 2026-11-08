@@ -1,0 +1,576 @@
+From 7afc16282eda1b426748677342ac567b524efcf7 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 20:55:34 +0000
+Subject: [PATCH] feat(libkernel): hand guest memory to Kyty's GPU stack behind
+ APS5_GPU_ENGINE=kyty
+
+AstroHybrid: AstroBot.exe renders with Kyty's GPU stack (kyty_gpu.dll) while
+AnyPS5 keeps CPU execution and the other system services.
+
+- libc: GuestArenaDonate / GuestArenaDonateAt split a placeholder range off
+  the guest arena for another owner and never hand it out again;
+  GuestArenaDonated reports whether an address lies in such a range.
+- libkernel: with APS5_GPU_ENGINE=kyty the game's direct and flexible
+  memory calls go to kyty_gpu.dll, and munmap, mprotect, virtual queries and
+  range names go there for addresses in a donated range. Unset (default):
+  unchanged. APS5_GPU_ENGINE_TRACE=1 logs each forwarded map.
+- libAstroHybridHost: the host callbacks kyty_gpu.dll binds (GPU event
+  registration on the game's event queues and their delivery, guest range
+  donation) and the SystemService HDR hooks of the replaced driver.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ core/libs/prx/libAstroHybridHost/Export.cpp   | 154 ++++++++++++++++++
+ core/libs/prx/libc/include/GuestArena.hpp     |   3 +
+ core/libs/prx/libc/src/GuestArena.cpp         |  82 ++++++++++
+ .../prx/libkernel/DirectMemory/Export.cpp     | 129 ++++++++++++++-
+ 4 files changed, 367 insertions(+), 1 deletion(-)
+ create mode 100644 core/libs/prx/libAstroHybridHost/Export.cpp
+
+diff --git a/core/libs/prx/libAstroHybridHost/Export.cpp b/core/libs/prx/libAstroHybridHost/Export.cpp
+new file mode 100644
+index 000000000..620a30065
+--- /dev/null
++++ b/core/libs/prx/libAstroHybridHost/Export.cpp
+@@ -0,0 +1,154 @@
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <mutex>
++#include <vector>
++#include "SceTypes.hpp"
++#include "prx/libc/include/General.hpp"
++#include "prx/libc/include/GuestArena.hpp"
++#include "prx/libkernel/Equeue/Equeue.hpp"
++#include "prx/libSceAgcDriver/Execution/include/HostHdr.hpp"
++
++namespace {
++
++constexpr std::uint32_t KytyGpuAbiVersion = (1u << 16u) | 1u;
++constexpr std::uint32_t EventEopInterrupt = 1;
++constexpr std::uint32_t EventFlip = 2;
++constexpr std::int16_t FilterGraphicsCore = -14;
++constexpr std::int16_t FilterVideoOut = -13;
++constexpr std::uintptr_t VideoOutEventFlip = 0;
++constexpr int ErrorBadQueue = static_cast<int>(0x80020009u);
++constexpr std::size_t DonationAlignment = std::size_t{1} << 30u;
++
++struct HostCallbacks {
++    std::uint32_t structSize;
++    std::uint32_t abiVersion;
++    void* user;
++    void (*log)(void* user, int level, const char* message);
++    int (*addGpuEvent)(void* user, std::int64_t equeue, std::uint32_t kind, std::int64_t ident, void* udata);
++    int (*deleteGpuEvent)(void* user, std::int64_t equeue, std::uint32_t kind, std::int64_t ident);
++    void (*deliverEvent)(void* user, std::uint32_t kind, std::int64_t ident, std::uint64_t data);
++    int (*queryMemory)(void* user, std::uint64_t address, std::uint64_t* base, std::uint64_t* size, std::uint32_t* flags, const void** alias);
++    const char* (*app0Path)(void* user);
++    int (*donateGuestRange)(void* user, std::uint64_t size, std::uint64_t* base);
++};
++
++static_assert(sizeof(HostCallbacks) == 72);
++
++struct Registration {
++    KernelEqueue eq;
++    std::uint32_t kind;
++    std::int64_t ident;
++};
++
++std::mutex g_mutex;
++std::vector<Registration> g_registrations;
++
++void Log(void*, int level, const char* message) {
++    std::fprintf(stderr, "[astrohybrid %d] %s\n", level, message);
++}
++
++std::int16_t FilterOf(std::uint32_t kind) {
++    return kind == EventFlip ? FilterVideoOut : FilterGraphicsCore;
++}
++
++std::uintptr_t IdentOf(std::uint32_t kind, std::int64_t ident) {
++    return kind == EventFlip ? VideoOutEventFlip : static_cast<std::uintptr_t>(ident);
++}
++
++int AddGpuEvent(void*, std::int64_t equeue, std::uint32_t kind, std::int64_t ident, void* udata) {
++    if (equeue == 0 || !EqueuePin_nid_postfix(equeue)) return ErrorBadQueue;
++    if (kind != EventEopInterrupt && kind != EventFlip) return ErrorBadQueue;
++    KernelEqueueEvent event{};
++    event.event.ident = IdentOf(kind, ident);
++    event.event.filter = FilterOf(kind);
++    event.event.flags = kind == EventFlip ? EV_ADD : EV_ADD | EV_CLEAR;
++    event.event.udata = udata;
++    if (kind == EventFlip) {
++        event.filter.triggerFunc = [](KernelEqueueEvent* e, void* data) {
++            KernelEvent triggered = e->event;
++            triggered.fflags = triggered.fflags < 0xfu ? triggered.fflags + 1u : triggered.fflags;
++            triggered.data = static_cast<intptr_t>(reinterpret_cast<uintptr_t>(data));
++            if (e->triggered) {
++                e->pendingEvents.push_back(triggered);
++            } else {
++                e->event = triggered;
++                e->triggered = true;
++            }
++        };
++        event.filter.resetFunc = [](KernelEqueueEvent* e) {
++            e->triggered = false;
++            e->event.fflags = 0;
++            e->event.data = 0;
++        };
++    } else {
++        event.filter.triggerFunc = [](KernelEqueueEvent* e, void*) {
++            e->event.data = e->triggered ? e->event.data + 1 : 1;
++            e->triggered = true;
++        };
++        event.filter.resetFunc = [](KernelEqueueEvent* e) {
++            e->triggered = false;
++            e->event.data = 0;
++        };
++    }
++    const int result = EqueueAddEvent_nid_postfix(equeue, event);
++    if (result != EQUEUE_OK) return result;
++    std::lock_guard lock(g_mutex);
++    if (std::none_of(g_registrations.begin(), g_registrations.end(), [&](const Registration& r) { return r.eq == equeue && r.kind == kind && r.ident == ident; })) {
++        g_registrations.push_back({equeue, kind, ident});
++    }
++    return 0;
++}
++
++int DeleteGpuEvent(void*, std::int64_t equeue, std::uint32_t kind, std::int64_t ident) {
++    {
++        std::lock_guard lock(g_mutex);
++        std::erase_if(g_registrations, [&](const Registration& r) { return r.eq == equeue && r.kind == kind && r.ident == ident; });
++    }
++    const int result = EqueueDeleteEvent_nid_postfix(equeue, IdentOf(kind, ident), FilterOf(kind));
++    return result == EQUEUE_OK ? 0 : result;
++}
++
++void DeliverEvent(void*, std::uint32_t kind, std::int64_t ident, std::uint64_t data) {
++    std::vector<Registration> registrations;
++    {
++        std::lock_guard lock(g_mutex);
++        registrations = g_registrations;
++    }
++    for (const auto& registration : registrations) {
++        if (registration.kind != kind || (kind == EventEopInterrupt && registration.ident != ident)) continue;
++        EqueueTriggerEvent_nid_postfix(registration.eq, IdentOf(kind, registration.ident), FilterOf(kind), reinterpret_cast<void*>(static_cast<uintptr_t>(data)));
++    }
++}
++
++int DonateGuestRange(void*, std::uint64_t size, std::uint64_t* base) {
++    if (base == nullptr || size == 0) return -1;
++    const auto donated = *base != 0 ? GuestArena::GuestArenaDonateAt_nid_postfix(static_cast<std::uintptr_t>(*base), static_cast<std::size_t>(size)) : GuestArena::GuestArenaDonate_nid_postfix(static_cast<std::size_t>(size), DonationAlignment);
++    if (donated == 0) return -1;
++    *base = donated;
++    return 0;
++}
++
++const HostCallbacks g_callbacks{sizeof(HostCallbacks), KytyGpuAbiVersion, nullptr, Log, AddGpuEvent, DeleteGpuEvent, DeliverEvent, nullptr, nullptr, DonateGuestRange};
++
++float g_reportedToneMapPeak = 0.0f;
++
++}
++
++extern "C" {
++
++const HostCallbacks* AstroHybridHostCallbacks_nid_no_patch() {
++    return &g_callbacks;
++}
++
++void AstroHybridHostHdr_nid_no_patch(AgcDriver::HostHdrStatus& status) {
++    status = AgcDriver::HostHdrStatus{};
++    status.reportedToneMapPeak = g_reportedToneMapPeak;
++}
++
++void AstroHybridNoteReportedToneMapPeak_nid_no_patch(float nits) {
++    g_reportedToneMapPeak = nits;
++}
++
++}
+diff --git a/core/libs/prx/libc/include/GuestArena.hpp b/core/libs/prx/libc/include/GuestArena.hpp
+index 996e2a4d3..ee019cfa5 100644
+--- a/core/libs/prx/libc/include/GuestArena.hpp
++++ b/core/libs/prx/libc/include/GuestArena.hpp
+@@ -30,6 +30,9 @@ std::uintptr_t GuestArenaHighestFree_nid_no_patch(std::size_t bytes, std::size_t
+ bool GuestArenaNextUsed_nid_no_patch(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end);
+ void GuestArenaMarkUsed_nid_postfix(const void* pointer, std::size_t bytes);
+ void GuestArenaRelease_nid_postfix(const void* pointer, std::size_t bytes);
++std::uintptr_t GuestArenaDonate_nid_postfix(std::size_t bytes, std::size_t alignment);
++std::uintptr_t GuestArenaDonateAt_nid_postfix(std::uintptr_t address, std::size_t bytes);
++bool GuestArenaDonated_nid_postfix(const void* pointer, std::size_t bytes);
+ // The reserved range, and whether it was reserved with page write watching (Windows MEM_WRITE_WATCH).
+ void GuestArenaRange_nid_postfix(std::uintptr_t* base, std::size_t* bytes);
+ bool GuestArenaWriteWatched_nid_postfix();
+diff --git a/core/libs/prx/libc/src/GuestArena.cpp b/core/libs/prx/libc/src/GuestArena.cpp
+index 9faf0b454..f192a1917 100644
+--- a/core/libs/prx/libc/src/GuestArena.cpp
++++ b/core/libs/prx/libc/src/GuestArena.cpp
+@@ -148,6 +148,75 @@ public:
+         _used.emplace(start, start + bytes);
+     }
+ 
++    std::uintptr_t Donate(std::size_t bytes, std::size_t alignment) {
++        if (_base == 0) throw std::runtime_error("guest address space arena is unavailable");
++        if (bytes == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0) throw std::invalid_argument("invalid guest arena donation");
++        std::lock_guard lock(_lock);
++        auto limit = _end;
++        std::uintptr_t candidate = 0;
++        while (limit >= _base && bytes <= limit - _base) {
++            const auto start = (limit - bytes) & ~(alignment - 1);
++            if (start < _base) break;
++            const auto next = _used.lower_bound(start + bytes);
++            if (next == _used.begin() || std::prev(next)->second <= start) {
++                candidate = start;
++                break;
++            }
++            limit = std::prev(next)->first;
++        }
++        if (candidate == 0) return 0;
++#ifdef _WIN32
++        const auto address = reinterpret_cast<void*>(candidate);
++        MEMORY_BASIC_INFORMATION info{};
++        if (VirtualQuery(address, &info, sizeof(info)) == 0 || info.State != MEM_RESERVE) return 0;
++        const auto placeholderStart = reinterpret_cast<std::uintptr_t>(info.AllocationBase);
++        const auto placeholderEnd = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
++        if (candidate + bytes > placeholderEnd) return 0;
++        if ((placeholderStart != candidate || placeholderEnd != candidate + bytes) && !VirtualFree(address, bytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) return 0;
++#endif
++        _used.emplace(candidate, candidate + bytes);
++        _holes.emplace_back(candidate, candidate + bytes);
++        _donated.emplace_back(candidate, bytes);
++        return candidate;
++    }
++
++    std::uintptr_t DonateAt(std::uintptr_t address, std::size_t bytes) {
++        if (_base == 0) throw std::runtime_error("guest address space arena is unavailable");
++        if (bytes == 0 || address < _base || bytes > _end - address) throw std::invalid_argument("invalid guest arena donation");
++        std::lock_guard lock(_lock);
++#ifdef _WIN32
++        for (std::uintptr_t cursor = address; cursor < address + bytes;) {
++            MEMORY_BASIC_INFORMATION info{};
++            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0 || info.State != MEM_RESERVE) return 0;
++            cursor = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
++        }
++        for (std::uintptr_t cursor = address; cursor < address + bytes;) {
++            MEMORY_BASIC_INFORMATION info{};
++            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) return 0;
++            const auto regionStart = reinterpret_cast<std::uintptr_t>(info.AllocationBase);
++            const auto regionEnd = std::min(address + bytes, reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize);
++            const auto pieceStart = std::max(cursor, regionStart);
++            const auto pieceBytes = regionEnd - pieceStart;
++            const auto placeholderEnd = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
++            if ((regionStart != pieceStart || placeholderEnd != regionEnd) && !VirtualFree(reinterpret_cast<void*>(pieceStart), pieceBytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) return 0;
++            cursor = regionEnd;
++        }
++#endif
++        const auto next = _used.lower_bound(address);
++        if (next == _used.end() || next->first != address) _used.emplace(address, address + bytes);
++        _holes.emplace_back(address, address + bytes);
++        _donated.emplace_back(address, bytes);
++        return address;
++    }
++
++    bool Donated(std::uintptr_t address, std::size_t bytes) {
++        std::lock_guard lock(_lock);
++        for (const auto& [base, size] : _donated) {
++            if (address >= base && bytes <= size && address - base <= size - bytes) return true;
++        }
++        return false;
++    }
++
+     void Release(const void* pointer, std::size_t bytes) {
+         std::lock_guard lock(_lock);
+         const auto start = reinterpret_cast<std::uintptr_t>(pointer);
+@@ -338,6 +407,7 @@ private:
+ 
+     std::uintptr_t _base = 0;
+     std::uintptr_t _end = 0;
++    std::vector<std::pair<std::uintptr_t, std::size_t>> _donated;
+     bool _writeWatched = false;
+ 
+ public:
+@@ -392,6 +462,18 @@ void GuestArenaRelease_nid_postfix(const void* pointer, std::size_t bytes) {
+     Arena::Get().Release(pointer, bytes);
+ }
+ 
++std::uintptr_t GuestArenaDonate_nid_postfix(std::size_t bytes, std::size_t alignment) {
++    return Arena::Get().Donate(bytes, alignment);
++}
++
++std::uintptr_t GuestArenaDonateAt_nid_postfix(std::uintptr_t address, std::size_t bytes) {
++    return Arena::Get().DonateAt(address, bytes);
++}
++
++bool GuestArenaDonated_nid_postfix(const void* pointer, std::size_t bytes) {
++    return Arena::Get().Donated(reinterpret_cast<std::uintptr_t>(pointer), bytes);
++}
++
+ void GuestArenaRange_nid_postfix(std::uintptr_t* base, std::size_t* bytes) {
+     *base = Arena::Get().Base();
+     *bytes = Arena::Get().Size();
+diff --git a/core/libs/prx/libkernel/DirectMemory/Export.cpp b/core/libs/prx/libkernel/DirectMemory/Export.cpp
+index 619cf8363..8ac62570a 100644
+--- a/core/libs/prx/libkernel/DirectMemory/Export.cpp
++++ b/core/libs/prx/libkernel/DirectMemory/Export.cpp
+@@ -2,10 +2,13 @@
+ #include "prx/libc/include/Api.hpp"
+ #include <cstdint>
+ #include <cstddef>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include "SceTypes.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/GuestAllocations.hpp"
++#include "prx/libc/include/GuestArena.hpp"
+ #include "prx/libc/include/GuestWriteWatch.hpp"
+ #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+ #include "prx/libkernel/AppMetadata/include/ParamJsonParser.hpp"
+@@ -222,9 +225,51 @@ void ReleaseFlexibleMappingRange(std::uintptr_t address, size_t len) {
+     _releaseFlexible(address, len);
+ }
+ 
++namespace {
++
++bool KytyGpuEngine() {
++    static const bool enabled = [] {
++        const char* engine = std::getenv("APS5_GPU_ENGINE");
++        return engine != nullptr && std::strcmp(engine, "kyty") == 0;
++    }();
++    return enabled;
++}
++
++template <typename Function>
++Function KytyGpuExport(const char* nid) {
++#ifdef _WIN32
++    HMODULE module = GetModuleHandleA("kyty_gpu.dll");
++    if (module == nullptr) module = LoadLibraryA("kyty_gpu.dll");
++    if (module == nullptr) throw std::runtime_error("APS5_GPU_ENGINE=kyty: kyty_gpu.dll is not loadable");
++    const auto function = GetProcAddress(module, nid);
++    if (function == nullptr) throw std::runtime_error(std::string("APS5_GPU_ENGINE=kyty: kyty_gpu.dll does not export ") + nid);
++    return reinterpret_cast<Function>(reinterpret_cast<void*>(function));
++#else
++    throw std::runtime_error(std::string("APS5_GPU_ENGINE=kyty is Windows only: ") + nid);
++#endif
++}
++
++void KytyGpuTrace(const char* call, const void* requested, const void* result, std::uint64_t length, int flags, int status) {
++    static const bool enabled = std::getenv("APS5_GPU_ENGINE_TRACE") != nullptr;
++    if (!enabled) return;
++    std::fprintf(stderr, "[gpu-engine] %s requested %p len 0x%llx flags 0x%x -> %d at %p\n", call, requested, static_cast<unsigned long long>(length), flags, status, result);
++}
++
++bool KytyGpuOwns(const void* address, std::size_t bytes) {
++    return KytyGpuEngine() && GuestArena::GuestArenaDonated_nid_postfix(address, bytes == 0 ? 1 : bytes);
++}
++
++}
++
+ extern "C" {
+ 
+ int APS5_VABI sceKernelAllocateDirectMemory(int64_t search_start, int64_t search_end, size_t len, size_t alignment, int memory_type, int64_t* phys_addr_out) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(int64_t, int64_t, size_t, size_t, int, int64_t*)>("rTXw65xmLIA");
++  const int status = kyty(search_start, search_end, len, alignment, memory_type, phys_addr_out);
++  KytyGpuTrace("AllocateDirectMemory", reinterpret_cast<const void*>(search_start), phys_addr_out != nullptr ? reinterpret_cast<const void*>(*phys_addr_out) : nullptr, len, memory_type, status);
++  return status;
++ }
+  if (search_start < 0 || search_end <= search_start || len == 0
+   || (len & (PS5_PAGE_SIZE - 1)) || !phys_addr_out
+   || (alignment != 0 && (alignment & (PS5_PAGE_SIZE - 1))))
+@@ -233,6 +278,10 @@ int APS5_VABI sceKernelAllocateDirectMemory(int64_t search_start, int64_t search
+ }
+ 
+ int APS5_VABI sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int memory_type, int64_t* phys_addr_out) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(size_t, size_t, int, int64_t*)>("B+vc2AO2Zrc");
++  return kyty(len, alignment, memory_type, phys_addr_out);
++ }
+  return sceKernelAllocateDirectMemory(0, static_cast<int64_t>(DIRECT_MEMORY_SIZE), len, alignment, memory_type, phys_addr_out);
+ }
+ 
+@@ -247,6 +296,10 @@ int APS5_VABI sceKernelAvailableDirectMemorySize(int64_t search_start, int64_t s
+ }
+ 
+ int APS5_VABI sceKernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(int64_t, int, void*, size_t)>("BHouLQzh0X0");
++  return kyty(offset, flags, info, info_size);
++ }
+  constexpr int SCE_KERNEL_DMQ_FIND_NEXT = 1;
+  if (!info || offset < 0) return SCE_KERNEL_ERROR_EINVAL;
+  struct DirectMemoryQueryInfo { int64_t start; int64_t end; int memory_type; };
+@@ -269,6 +322,10 @@ int APS5_VABI sceKernelGetDirectMemoryType(int64_t offset, int* memory_type, int
+ }
+ 
+ size_t APS5_VABI sceKernelGetDirectMemorySize(void) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<size_t (APS5_VABI*)()>("pO96TwzOm5E");
++  return kyty();
++ }
+  return DIRECT_MEMORY_SIZE;
+ }
+ 
+@@ -277,6 +334,13 @@ int APS5_VABI sceKernelEnableDmemAliasing(void) {
+ }
+ 
+ int APS5_VABI sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(void**, size_t, int, int, int64_t, size_t)>("L-Q3LEjIbgA");
++  const void* requested = addr != nullptr ? *addr : nullptr;
++  const int status = kyty(addr, len, prot, flags, direct_memory_start, alignment);
++  KytyGpuTrace("MapDirectMemory", requested, addr != nullptr ? *addr : nullptr, len, flags, status);
++  return status;
++ }
+  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
+  (void)alignment;
+  const int result = DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
+@@ -285,6 +349,13 @@ int APS5_VABI sceKernelMapDirectMemory(void** addr, size_t len, int prot, int fl
+ }
+ 
+ int APS5_VABI sceKernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags, int64_t direct_memory_start, size_t alignment) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(void**, size_t, int, int, int, int64_t, size_t)>("BQQniolj9tQ");
++  const void* requested = addr != nullptr ? *addr : nullptr;
++  const int status = kyty(addr, len, type, prot, flags, direct_memory_start, alignment);
++  KytyGpuTrace("MapDirectMemory2", requested, addr != nullptr ? *addr : nullptr, len, flags, status);
++  return status;
++ }
+  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
+  (void)type;
+  const int result = DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
+@@ -293,12 +364,29 @@ int APS5_VABI sceKernelMapDirectMemory2(void** addr, size_t len, int type, int p
+ }
+ 
+ int APS5_VABI sceKernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(void**, size_t, int, int)>("4h6F1LLbTiw");
++  const void* requested = addr_in_out != nullptr ? *addr_in_out : nullptr;
++  const int status = kyty(addr_in_out, len, prot, flags);
++  KytyGpuTrace("MapFlexibleMemory", requested, addr_in_out != nullptr ? *addr_in_out : nullptr, len, flags, status);
++  return status;
++ }
+  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
+  constexpr int IgnoredHeapFlag = 0x8000;
+- return _mapFlexible(addr_in_out, len, prot, flags & ~IgnoredHeapFlag);
++ const void* requested = addr_in_out != nullptr ? *addr_in_out : nullptr;
++ const int status = _mapFlexible(addr_in_out, len, prot, flags & ~IgnoredHeapFlag);
++ KytyGpuTrace("MapFlexibleMemory (AnyPS5)", requested, addr_in_out != nullptr ? *addr_in_out : nullptr, len, flags, status);
++ return status;
+ }
+ 
+ int APS5_VABI sceKernelMapNamedDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment, const char* name) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(void**, size_t, int, int, int64_t, size_t, const char*)>("NcaWUxfMNIQ");
++  const void* requested = addr != nullptr ? *addr : nullptr;
++  const int status = kyty(addr, len, prot, flags, direct_memory_start, alignment, name);
++  KytyGpuTrace("MapNamedDirectMemory", requested, addr != nullptr ? *addr : nullptr, len, flags, status);
++  return status;
++ }
+  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
+  const int result = DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
+  if (result == 0) _releaseFlexible(reinterpret_cast<uintptr_t>(*addr), len);
+@@ -307,6 +395,13 @@ int APS5_VABI sceKernelMapNamedDirectMemory(void** addr, size_t len, int prot, i
+ }
+ 
+ int32_t APS5_VABI sceKernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int32_t (APS5_VABI*)(void**, size_t, int, int, const char*)>("mL8NDH86iQI");
++  const void* requested = addr_in_out != nullptr ? *addr_in_out : nullptr;
++  const int32_t status = kyty(addr_in_out, len, prot, flags, name);
++  KytyGpuTrace("MapNamedFlexibleMemory", requested, addr_in_out != nullptr ? *addr_in_out : nullptr, len, flags, status);
++  return status;
++ }
+  if (UndefinedProtection(prot)) return SCE_KERNEL_ERROR_EINVAL;
+  const int result = _mapFlexible(addr_in_out, len, prot, flags);
+  if (result == 0 && name) sceKernelSetVirtualRangeName(*addr_in_out, len, name);
+@@ -319,12 +414,20 @@ int32_t APS5_VABI sceKernelMapNamedFlexibleMemoryInternal(void** addr_in_out, si
+ }
+ 
+ int APS5_VABI sceKernelMprotect(const void* addr, size_t len, int prot) {
++ if (KytyGpuOwns(addr, len)) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(const void*, size_t, int)>("vSMAm3cxYTY");
++  return kyty(addr, len, prot);
++ }
+  constexpr int DefinedProtection = 0x3F7;
+  if (len == 0) return 0;
+  return DoMprotect(addr, len, prot & DefinedProtection);
+ }
+ 
+ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
++ if (KytyGpuOwns(reinterpret_cast<const void*>(vaddr), len)) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(uint64_t, size_t)>("cQke9UuBQOk");
++  return kyty(vaddr, len);
++ }
+  const int result = DoMunmap(reinterpret_cast<void*>(vaddr), len);
+  if (result == 0) {
+   _releaseFlexible(static_cast<uintptr_t>(vaddr), len);
+@@ -349,6 +452,10 @@ int APS5_VABI sceKernelReleaseFlexibleMemory(void* addr, size_t len) {
+ }
+ 
+ int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(int64_t, size_t)>("MBuItvba6z8");
++  return kyty(start, len);
++ }
+  if (start < 0 || len == 0) return SCE_KERNEL_ERROR_EINVAL;
+  if ((static_cast<std::uint64_t>(start) & (PS5_PAGE_SIZE - 1)) != 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 ||
+      len > DIRECT_MEMORY_SIZE || static_cast<std::uint64_t>(start) > DIRECT_MEMORY_SIZE - len)
+@@ -365,6 +472,10 @@ int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, s
+ }
+ 
+ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
++ if (KytyGpuOwns(addr, 1)) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(const void*, int, VirtualQueryInfo*, uint64_t)>("rVjRvHJ0X6c");
++  return kyty(addr, flags, info, info_size);
++ }
+  if (!info || info_size < sizeof(VirtualQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
+  memset(info, 0, sizeof(VirtualQueryInfo));
+  const auto address = reinterpret_cast<uintptr_t>(addr);
+@@ -499,6 +610,10 @@ int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
+ }
+ 
+ int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(size_t*)>("aNz11fnnzi4");
++  return kyty(size);
++ }
+  if (!size) return SCE_KERNEL_ERROR_EINVAL;
+  const size_t configured = _configuredFlexibleSize();
+  const size_t images = GuestImageSegmentBytes_nid_no_patch();
+@@ -508,6 +623,10 @@ int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size) {
+ }
+ 
+ int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
++ if (KytyGpuEngine()) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(size_t*)>("n1-v6FgU7MQ");
++  return kyty(size);
++ }
+  if (!size) return SCE_KERNEL_ERROR_EINVAL;
+  *size = _configuredFlexibleSize();
+  return 0;
+@@ -519,6 +638,10 @@ int APS5_VABI sceKernelInternalMemoryGetAvailableSize(std::size_t* size) {
+ }
+ 
+ int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name) {
++ if (KytyGpuOwns(addr, len)) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(const void*, uint64_t, const char*)>("DGMG3JshrZU");
++  return kyty(addr, len, name);
++ }
+  const auto start = reinterpret_cast<uintptr_t>(addr);
+  if (!addr || len == 0 || !name || len > UINTPTR_MAX - start) return SCE_KERNEL_ERROR_EINVAL;
+  std::lock_guard lock(g_rangeNameLock);
+@@ -528,6 +651,10 @@ int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const
+ }
+ 
+ int APS5_VABI sceKernelClearVirtualRangeName(const void* addr, uint64_t len) {
++ if (KytyGpuOwns(addr, len)) {
++  static const auto kyty = KytyGpuExport<int (APS5_VABI*)(const void*, uint64_t)>("mkgXxsoxWHg");
++  return kyty(addr, len);
++ }
+  const auto start = reinterpret_cast<uintptr_t>(addr);
+  if (!addr || len == 0 || len > UINTPTR_MAX - start) return SCE_KERNEL_ERROR_EINVAL;
+  std::lock_guard lock(g_rangeNameLock);
+-- 
+2.55.0.windows.5
+

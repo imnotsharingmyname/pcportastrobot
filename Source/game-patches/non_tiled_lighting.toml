@@ -1,0 +1,14 @@
+# ASTRO BOT PPSA21567 01.019.000: select the game's existing non-tiled deferred-lighting renderer.
+# Ported from the community 01.018.000 GoldHEN mod (KytyPS5 issue #1011, mod 1: offset 0x73B3BCF there).
+# The same sequence "45 84 F6 | 0F 84 F1 08 00 00 | 45 31 F6 4C 8D 3D ..." occurs once in 01.019.000 at
+# va 0x73b451f; the conditional near jump at +3 becomes an unconditional jump to the same target
+# (rel32 0x8F1 from a 6-byte JE equals rel32 0x8F2 from a 5-byte JMP) plus a NOP.
+format = 1
+
+[[patch]]
+name        = "non_tiled_lighting"
+target      = "eboot.elf"
+va          = 0x73b4522
+expected    = "0f84f1080000"
+value       = "e9f208000090"
+description = "always take the non-tiled deferred-lighting renderer branch"

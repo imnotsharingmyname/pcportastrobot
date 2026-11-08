@@ -1,0 +1,66 @@
+From 1d12195c82749d5532282ae68dd666be921a3c59 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Sat, 7 Nov 2026 05:18:06 +0000
+Subject: [PATCH] perf: add opt-in draw preparation worker priority
+
+KYTY_DRAW_PREP_PRIORITY remains 0 by default. With priority 1 and existing hot/cold spin limits 10/5 us, two flanked Sky Garden PGO tests improve average CSV FPS about 4.2% and slowest-one-percent FPS about 12.4%. Deep wait falls below 0.4 ms; total CP gap drops about 1 ms/frame. Priority alone mostly moves wait into idle, so the short spin settings are essential. Loader interface/graphics/lazy checks pass; both enabled screenshots are correct. Root Docs/OVERNIGHT.md records raw runs.
+---
+ src/common/threads.cpp                               | 7 +++++++
+ src/common/threads.h                                 | 2 ++
+ src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp | 2 ++
+ 3 files changed, 11 insertions(+)
+
+diff --git a/src/common/threads.cpp b/src/common/threads.cpp
+index 09837bed..1de8ba4f 100644
+--- a/src/common/threads.cpp
++++ b/src/common/threads.cpp
+@@ -282,6 +282,13 @@ void RaiseCurrentThreadPriority() {
+ #endif
+ }
+ 
++void RaiseDrawPrepThreadPriority() {
++#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
++	static const int level = PriorityLevelFromEnv("KYTY_DRAW_PREP_PRIORITY", 0);
++	RaiseCurrentThreadPriorityLevel(level);
++#endif
++}
++
+ int ServiceThreadPriorityLevel() {
+ 	static const int level = PriorityLevelFromEnv("KYTY_SERVICE_PRIORITY", 2);
+ 	return level;
+diff --git a/src/common/threads.h b/src/common/threads.h
+index 60e4861d..4ca62c08 100644
+--- a/src/common/threads.h
++++ b/src/common/threads.h
+@@ -15,6 +15,8 @@ void InitializeThreads();
+ // 2 = highest. Also opts the thread out of Windows power throttling (EcoQoS). No-op elsewhere.
+ void RaiseCurrentThreadPriority();
+ 
++void RaiseDrawPrepThreadPriority();
++
+ // The same for the short-running service threads the command processor waits on: the video-out
+ // present thread, the Vulkan queue-submission worker and the command schedulers' priority
+ // (completion) threads. They block between bursts and never spin. At the guest threads' priority
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+index 2d54862b..f02f4cff 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+@@ -8,6 +8,7 @@
+ #include "common/hangWatchdog.h"
+ #include "common/logging/log.h"
+ #include "common/profiler.h"
++#include "common/threads.h"
+ #include "graphics/guest_gpu/command_processor/cpOps.h"
+ #include "graphics/guest_gpu/graphicsRun.h"
+ #include "graphics/guest_gpu/pm4.h"
+@@ -1198,6 +1199,7 @@ struct Engine::Workers {
+ 		char name[32];
+ 		std::snprintf(name, sizeof(name), "DrawPrep#%u", index + 1u);
+ 		Profiler::SetThreadName(name);
++		Common::RaiseDrawPrepThreadPriority();
+ 		t_worker_thread = true;
+ 		uint32_t placement_count = 0; // placement samples (common/cpuPlacement.h), every 64th slot
+ 		t_worker_number = index + 1u;
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,146 @@
+diff --git a/core/libs/prx/libc/src/specifics/windows/CrashReport.cpp b/core/libs/prx/libc/src/specifics/windows/CrashReport.cpp
+index 39c37a274..9d1a7d0b3 100644
+--- a/core/libs/prx/libc/src/specifics/windows/CrashReport.cpp
++++ b/core/libs/prx/libc/src/specifics/windows/CrashReport.cpp
+@@ -371,6 +371,125 @@ std::uintptr_t TrapCaller(const CONTEXT& faulting) {
+     return faulting.Rip;
+ }
+ 
++struct ProbeWriter {
++    std::uint64_t writer;
++    std::uint64_t lastUsed;
++    std::uint64_t peak;
++    std::uint64_t calls;
++    std::uint64_t peakList;
++};
++
++struct ProbeTotals {
++    unsigned long long hits;
++    unsigned long long frames;
++    unsigned long long sumCalls;
++    unsigned long long peakCalls;
++    unsigned long long peakUsed;
++    unsigned long long peakList;
++    unsigned long long blockBytes;
++    unsigned long long maxBlock;
++};
++
++std::uint64_t g_probeAddress = 0;
++SRWLOCK g_probeLock = SRWLOCK_INIT;
++ProbeWriter g_probeWriters[64]{};
++ProbeTotals g_probeTotals{};
++ULONGLONG g_probeTick = 0;
++unsigned g_probeLarge = 0;
++
++void FinishProbeFrame(ProbeWriter& writer) {
++    if (writer.calls == 0) return;
++    ++g_probeTotals.frames;
++    g_probeTotals.sumCalls += writer.calls;
++    g_probeTotals.peakCalls = std::max<unsigned long long>(g_probeTotals.peakCalls, writer.calls);
++    g_probeTotals.peakUsed = std::max<unsigned long long>(g_probeTotals.peakUsed, writer.peak);
++    g_probeTotals.peakList = std::max<unsigned long long>(g_probeTotals.peakList, writer.peakList);
++    writer.calls = 0;
++    writer.peak = 0;
++    writer.peakList = 0;
++}
++
++bool HandleProbe(EXCEPTION_POINTERS* info) {
++    if (g_probeAddress == 0 || info->ExceptionRecord->ExceptionCode != EXCEPTION_BREAKPOINT) return false;
++    CONTEXT* context = info->ContextRecord;
++    if (context->Rip != g_probeAddress && context->Rip != g_probeAddress + 1) return false;
++    std::uint64_t base = 0;
++    std::uint64_t end = 0;
++    std::uint64_t block = 0;
++    const bool known = ReadWord(context->Rsi + 0x8, &base) && ReadWord(context->Rsi + 0x18, &end) && ReadWord(context->Rdi + 0x10, &block);
++    AcquireSRWLockExclusive(&g_probeLock);
++    if (known) {
++        const std::uint64_t used = base - end;
++        const std::uint64_t size = block & 0xffffffffu;
++        ++g_probeTotals.hits;
++        g_probeTotals.blockBytes += size;
++        g_probeTotals.maxBlock = std::max<unsigned long long>(g_probeTotals.maxBlock, size);
++        if (size > 4096 && g_probeLarge < 64) {
++            ++g_probeLarge;
++            std::uint64_t ret = 0;
++            std::uint64_t words[4]{};
++            ReadWord(context->Rsp, &ret);
++            for (int i = 0; i < 4; ++i) ReadWord(context->Rdi + 8 * i, &words[i]);
++            Report("[probe] large inline block %llu B: return 0x%llx writer 0x%llx used %llu KiB list %llu index %llu object 0x%llx: %016llx %016llx %016llx %016llx\n",
++                static_cast<unsigned long long>(size), static_cast<unsigned long long>(ret), static_cast<unsigned long long>(context->Rsi), static_cast<unsigned long long>(used >> 10),
++                static_cast<unsigned long long>(context->R12), static_cast<unsigned long long>(context->R14), static_cast<unsigned long long>(context->Rdi),
++                static_cast<unsigned long long>(words[0]), static_cast<unsigned long long>(words[1]), static_cast<unsigned long long>(words[2]), static_cast<unsigned long long>(words[3]));
++        }
++        ProbeWriter* slot = nullptr;
++        for (auto& writer : g_probeWriters) {
++            if (writer.writer == context->Rsi || writer.writer == 0) {
++                slot = &writer;
++                break;
++            }
++        }
++        if (slot != nullptr) {
++            if (slot->writer == 0) slot->writer = context->Rsi;
++            if (used < slot->lastUsed) FinishProbeFrame(*slot);
++            slot->lastUsed = used;
++            slot->peak = std::max(slot->peak, used + size);
++            slot->peakList = std::max<std::uint64_t>(slot->peakList, context->R12);
++            ++slot->calls;
++        }
++    }
++    const ULONGLONG now = GetTickCount64();
++    if (now - g_probeTick >= 1000) {
++        const ProbeTotals totals = g_probeTotals;
++        g_probeTotals = {};
++        g_probeTick = now;
++        ReleaseSRWLockExclusive(&g_probeLock);
++        Report("[probe] 1 s: %llu inline blocks (%llu KiB, max %llu B); %llu writer frames, blocks/frame avg %llu max %llu; peak top-down use %llu KiB; peak list %llu\n",
++            totals.hits, totals.blockBytes >> 10, totals.maxBlock, totals.frames, totals.frames ? totals.sumCalls / totals.frames : 0, totals.peakCalls, totals.peakUsed >> 10, totals.peakList);
++    } else {
++        ReleaseSRWLockExclusive(&g_probeLock);
++    }
++    context->Rsp -= 8;
++    *reinterpret_cast<std::uint64_t*>(context->Rsp) = context->Rbp;
++    context->Rip = g_probeAddress + 1;
++    return true;
++}
++
++void InstallProbe() {
++    const std::uint64_t requested = EnvironmentNumber("APS5_PROBE_INLINE_WRITER");
++    if (requested == 0) return;
++    const auto module = reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr));
++    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
++    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(module + dos->e_lfanew);
++    const std::uint64_t address = requested - nt->OptionalHeader.ImageBase + module;
++    auto* code = reinterpret_cast<std::uint8_t*>(address);
++    if (*code != 0x55) {
++        Report("[probe] 0x%llx does not start with push rbp, probe off\n", static_cast<unsigned long long>(requested));
++        return;
++    }
++    DWORD old = 0;
++    if (!VirtualProtect(code, 1, PAGE_EXECUTE_READWRITE, &old)) return;
++    g_probeAddress = address;
++    *code = 0xcc;
++    VirtualProtect(code, 1, old, &old);
++    FlushInstructionCache(GetCurrentProcess(), code, 1);
++    g_probeTick = GetTickCount64();
++    Report("[probe] inline-writer probe at 0x%llx\n", static_cast<unsigned long long>(address));
++}
++
+ LONG WINAPI ReportCrash(EXCEPTION_POINTERS* info) {
+     static std::atomic<bool> reported{false};
+     const auto* fault = info->ExceptionRecord;
+@@ -378,6 +497,7 @@ LONG WINAPI ReportCrash(EXCEPTION_POINTERS* info) {
+     if (fault->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && fault->NumberParameters >= 2 && fault->ExceptionInformation[0] == 1 && GuestArena::GuestArenaHandleWrite_nid_postfix(fault->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+     if (fault->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && fault->NumberParameters >= 2 && fault->ExceptionInformation[0] == 0 && GuestArena::GuestArenaHandleRead_nid_postfix(fault->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+     if (HandleWatch(info)) return EXCEPTION_CONTINUE_EXECUTION;
++    if (HandleProbe(info)) return EXCEPTION_CONTINUE_EXECUTION;
+     if (HandleSse4a(info)) return EXCEPTION_CONTINUE_EXECUTION;
+     const auto* record = info->ExceptionRecord;
+     if ((record->ExceptionCode & GccExceptionMask) == GccException) {
+@@ -700,6 +820,7 @@ const bool g_crashReportInstalled = [] {
+     std::signal(SIGABRT, AbortSignalHandler);
+     _set_invalid_parameter_handler(InvalidParameterHandler);
+     InstallWatch();
++    InstallProbe();
+     if (const char* hang = std::getenv("APS5_HANG_DUMP_SECS")) {
+         unsigned long long seconds = 0;
+         if (hang[0] >= '0' && hang[0] <= '9') {

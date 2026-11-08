@@ -1,0 +1,83 @@
+diff --git a/src/common/cpuPlacement.cpp b/src/common/cpuPlacement.cpp
+index 66af9e79..6420efe6 100644
+--- a/src/common/cpuPlacement.cpp
++++ b/src/common/cpuPlacement.cpp
+@@ -150,13 +150,17 @@ CpuLayout ComputeCpuLayout(const std::vector<CpuSetInfo>& sets, CpuReserveMode m
+ 	}
+ 	const Core* cp       = candidates[0];
+ 	const Core* recorder = needed == 2 ? candidates[1] : nullptr;
++	const bool  sibling  = mode == CpuReserveMode::CpSibling;
+ 	uint32_t    general  = 0;
+ 	for (const auto& set: sets) {
+ 		if (set.group != 0 || set.logical >= 64 || !set.allowed) {
+ 			continue;
+ 		}
+ 		const auto bit = uint64_t {1} << set.logical;
+-		if (set.core == cp->index) {
++		if (set.core == cp->index && sibling && layout.cp_mask != 0) {
++			layout.recorder_ids.push_back(set.id);
++			layout.recorder_mask |= bit;
++		} else if (set.core == cp->index) {
+ 			layout.cp_ids.push_back(set.id);
+ 			layout.cp_mask |= bit;
+ 		} else if (recorder != nullptr && set.core == recorder->index) {
+@@ -176,13 +180,15 @@ CpuLayout ComputeCpuLayout(const std::vector<CpuSetInfo>& sets, CpuReserveMode m
+ 	}
+ 	layout.reserved      = true;
+ 	layout.cp_core       = cp->index;
+-	layout.recorder_core = recorder != nullptr ? recorder->index : -1;
++	layout.recorder_core = recorder != nullptr ? recorder->index : sibling && layout.recorder_mask != 0 ? cp->index : -1;
+ 	layout.description   = "CP on logical " + MaskText(layout.cp_mask) + " (core " +
+ 	                       std::to_string(cp->index) + ", preference " +
+ 	                       std::to_string(cp->preference) + ")";
+ 	if (recorder != nullptr) {
+ 		layout.description += ", recorder on logical " + MaskText(layout.recorder_mask) +
+ 		                      " (core " + std::to_string(recorder->index) + ")";
++	} else if (layout.recorder_mask != 0) {
++		layout.description += ", recorder on its SMT sibling, logical " + MaskText(layout.recorder_mask);
+ 	}
+ 	layout.description += ", other threads on " + MaskText(layout.general_mask);
+ 	return layout;
+@@ -383,6 +389,9 @@ CpuReserveMode ParseCpuReserveMode(const char* text, bool* valid) {
+ 	if (std::strcmp(text, "cp+recorder") == 0 || std::strcmp(text, "2") == 0) {
+ 		return CpuReserveMode::CpRecorder;
+ 	}
++	if (std::strcmp(text, "cp+sibling") == 0 || std::strcmp(text, "3") == 0) {
++		return CpuReserveMode::CpSibling;
++	}
+ 	if (valid != nullptr) {
+ 		*valid = false;
+ 	}
+@@ -395,7 +404,7 @@ CpuReserveMode GetCpuReserveMode() {
+ 		bool        valid = true;
+ 		const auto  mode  = ParseCpuReserveMode(value, &valid);
+ 		if (!valid) {
+-			std::printf("KYTY_CPU_RESERVE must be off, cp or cp+recorder (got '%s'): off\n", value);
++			std::printf("KYTY_CPU_RESERVE must be off, cp, cp+recorder or cp+sibling (got '%s'): off\n", value);
+ 		}
+ 		return mode;
+ 	}();
+diff --git a/src/common/cpuPlacement.h b/src/common/cpuPlacement.h
+index 0d33c140..da0cd8dc 100644
+--- a/src/common/cpuPlacement.h
++++ b/src/common/cpuPlacement.h
+@@ -18,6 +18,10 @@
+ // process default CPU sets: guest threads, draw-prep workers, service and completion threads, the
+ // CP recorder, and driver threads alike.
+ // cp+recorder: the CP recorder thread (KYTY_CP_RECORDER=1) gets a second core the same way.
++// cp+sibling (AstroHybrid): the CP keeps its core's first logical processor and the recorder gets the
++// other one (its SMT sibling), which `cp` leaves almost idle; every other thread stays off the core
++// as with `cp`. On 6-core CPUs the draw-prep workers and guest threads then share 10 processors
++// without the recorder (Ryzen 5 5500, Sky Garden: the CP spun ~12% of its time on the head slot).
+ //
+ // Details:
+ // - The allowed processors are read at runtime: the process affinity mask (Process Lasso pins
+@@ -85,7 +89,7 @@
+ namespace Common {
+ 
+ enum class ThreadRole : uint8_t { Cp = 0, Recorder = 1, Guest = 2, Host = 3, Count = 4 };
+-enum class CpuReserveMode : uint8_t { Off, Cp, CpRecorder };
++enum class CpuReserveMode : uint8_t { Off, Cp, CpRecorder, CpSibling };
+ 
+ // One logical processor as GetSystemCpuSetInformation reports it.
+ struct CpuSetInfo {

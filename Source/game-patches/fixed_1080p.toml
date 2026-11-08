@@ -1,0 +1,17 @@
+# ASTRO BOT PPSA21567 01.019.000: keep the dynamic-resolution controller on its lowest level, 1920x1080.
+# The controller update (1.019 va 0x73e59b0; 0x73e5060 in 1.018 per KytyPS5's analysis) ends with
+#   73e5ab1: add r14d, [rbx+0x8]   ; step + base
+#   73e5ab5: mov [rbx+0xc], r14d   ; current level, then clamped to 0..4
+# Levels (table at 0x8e500a0, pixel counts): 0 = 1920x1080, 1-2 = 2432x1368, 3 = 3328x1872, 4 = 3840x2160.
+# Emulated end-of-pipe clocks are written when a packet is decoded, so the game measures the translator
+# instead of the GPU and stays at 4K. Replacing the add with xor r14d, r14d (+nop) stores level 0 every
+# update; the clamp after it keeps 0. The game uses level 0 itself whenever its GPU budget is exceeded.
+format = 1
+
+[[patch]]
+name        = "fixed_1080p"
+target      = "eboot.elf"
+va          = 0x73e5ab1
+expected    = "44037308"
+value       = "4531f690"
+description = "dynamic resolution level always 0 (1920x1080)"
