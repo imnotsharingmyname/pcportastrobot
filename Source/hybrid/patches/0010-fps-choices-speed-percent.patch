@@ -1,0 +1,85 @@
+From 2cbeebb246df68f92f54148f45c00216ef999b70 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Sun, 8 Nov 2026 20:32:55 +0000
+Subject: [PATCH] feat(hybrid): 35/50/55/90 FPS limits, game speed percent,
+ smoother real-time step
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/presentation/videoOut.cpp | 22 ++++++++++++++--------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index c78125c8..6ef666c4 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -885,15 +885,15 @@ static Live::Switch g_frame_limit_pacing("ASTROHYBRID_FPS_PACING", Live::ParseDe
+ namespace {
+ 
+ constexpr uint32_t FRAME_LIMIT_DISABLED = UINT32_MAX;
+-constexpr std::array<uint32_t, 6> FRAME_LIMITS {30, 40, 45, 60, 120, 0};
+-constexpr std::array<const char*, 6> FRAME_LIMIT_LABELS {"30 FPS", "40 FPS", "45 FPS", "60 FPS",
+-                                                       "120 FPS", "No limit"};
++constexpr std::array<uint32_t, 10> FRAME_LIMITS {30, 35, 40, 45, 50, 55, 60, 90, 120, 0};
++constexpr std::array<const char*, 10> FRAME_LIMIT_LABELS {"30 FPS", "35 FPS", "40 FPS", "45 FPS", "50 FPS",
++                                                        "55 FPS", "60 FPS", "90 FPS", "120 FPS", "No limit"};
+ 
+ std::atomic<uint32_t>& FrameLimitChoice() {
+ 	static std::atomic<uint32_t> choice {[] {
+ 		const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT");
+ 		if (value != nullptr) {
+-			constexpr std::array<const char*, 6> options {"30", "40", "45", "60", "120", "unlimited"};
++			constexpr std::array<const char*, 10> options {"30", "35", "40", "45", "50", "55", "60", "90", "120", "unlimited"};
+ 			for (uint32_t i = 0; i < options.size(); ++i) {
+ 				if (std::strcmp(value, options[i]) == 0) {
+ 					return i;
+@@ -912,12 +912,15 @@ struct GameStep {
+ 	bool      ready = false;
+ 	bool      dead  = false;
+ 	double    ema   = 0.0;
++	double    scale = 1.0;
+ 	uint64_t  last  = 0;
+ };
+ 
+ // ASTROHYBRID_GAME_SPEED=1 (default off): Astro Bot advances a fixed 1/FrameRate per frame from one
+ // global (eboot 0x8ff0040: f64 frame rate, f32 1/rate, u64 microseconds per frame; image +0x400000),
+ // so below 60 FPS the game runs in slow motion (30 FPS = half speed). With the switch on, every
++// present writes the measured frame rate there; ASTROHYBRID_GAME_SPEED_PERCENT (25..150, default 100)
++// scales the result (90 = 10% slower). Every
+ // present writes the measured frame rate there (the limit itself when the cadence holds it), clamped
+ // to 20..120. ASTROHYBRID_GAME_STEP_ADDR overrides the address; the block is checked first.
+ void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t limit) {
+@@ -950,23 +953,26 @@ void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t l
+ 		step.dt    = dt;
+ 		step.us    = reinterpret_cast<uint64_t*>(addr + 16);
+ 		step.ready = true;
++		if (const char* speed = std::getenv("ASTROHYBRID_GAME_SPEED_PERCENT"); speed != nullptr) {
++			step.scale = std::clamp(std::strtod(speed, nullptr), 25.0, 150.0) / 100.0;
++		}
+ 		std::printf("Game speed: frame-rate block at 0x%llx (game rate %g), real-time step on\n",
+ 		       static_cast<unsigned long long>(addr), *fps);
+ 	}
+ 	if (step.last != 0 && now > step.last) {
+ 		const double rate = static_cast<double>(frequency) / static_cast<double>(now - step.last);
+-		step.ema          = step.ema == 0.0 ? rate : step.ema + (rate - step.ema) * 0.2;
++		step.ema          = step.ema == 0.0 ? rate : step.ema + (rate - step.ema) * 0.03;
+ 	}
+ 	step.last = now;
+ 	if (step.ema == 0.0) {
+ 		return;
+ 	}
+ 	double rate = step.ema;
+-	if (limit != 0 && std::abs(rate - limit) <= limit * 0.04) {
++	if (limit != 0 && std::abs(rate - limit) <= limit * 0.06) {
+ 		rate = limit;
+ 	}
+-	rate = std::clamp(rate, 20.0, 120.0);
+-	if (std::abs(rate - *step.fps) < 0.25) {
++	rate = std::clamp(rate, 20.0, 120.0) / step.scale;
++	if (std::abs(rate - *step.fps) < 0.75) {
+ 		return;
+ 	}
+ 	*step.fps = rate;
+-- 
+2.55.0.windows.5
+
