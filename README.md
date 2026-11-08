@@ -28,7 +28,7 @@ GPU command processing is the limit.
 | `Tools/hybrid` | Launcher window (`launcher.ps1`), run-folder builder, reverse-engineering helpers |
 | `Tests` | Benchmarks and A/B test scripts |
 | `Docs` | Handover, plans, and the full results log (`OVERNIGHT.md`, every measurement good or bad) |
-| `Play-AstroBot.bat` | Opens the launcher: lighting, frame-rate limit, window size, fullscreen, real-time speed |
+| `Tools/hybrid/launcher` | `AstroBot Launcher.exe` source: one window for lighting, frame-rate limit, window size, fullscreen, real-time speed. Build it with `build_launcher.ps1` (uses your own game icon; the exe is not in the repo) |
 
 ## Notable findings
 

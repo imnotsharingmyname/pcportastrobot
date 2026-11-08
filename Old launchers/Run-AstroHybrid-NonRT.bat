@@ -3,5 +3,5 @@ rem AstroHybrid with the non-RT lighting patch (AstroBot-NonRT.exe): the version
 rem benchmark in Docs\OVERNIGHT.md used. Same settings and defaults as Run-AstroHybrid.bat.
 setlocal
 set ASTROHYBRID_EXE=AstroBot-NonRT.exe
-call "%~dp0Run-AstroHybrid.bat" %*
+call "%~dp0..\Run-AstroHybrid.bat" %*
 exit /b %ERRORLEVEL%

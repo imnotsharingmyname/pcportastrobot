@@ -2,7 +2,7 @@
 rem Launches the relinked Astro Bot (AnyPS5 runtime). Build first with: powershell -ExecutionPolicy Bypass -File Tools\build.ps1
 rem Status: reaches title screen and intro cutscene; NOT a finished port (see KNOWN_ISSUES.md).
 setlocal
-set "ROOT=%~dp0"
+set "ROOT=%~dp0..\"
 if not exist "%ROOT%Build\Run\AstroBot.exe" (
   echo Build\Run\AstroBot.exe not found. Run Tools\build.ps1 first.
   exit /b 1
