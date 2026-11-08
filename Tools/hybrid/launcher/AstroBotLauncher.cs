@@ -15,7 +15,7 @@ static class AstroBotLauncher
     static readonly string[] LightingExes = { "AstroBot-NonRT.exe", "AstroBot.exe" };
     static readonly string[] FpsLabels = { "30 FPS - steady (recommended)", "35 FPS", "45 FPS", "50 FPS", "55 FPS", "60 FPS", "No limit" };
     static readonly string[] FpsValues = { "30", "35", "45", "50", "55", "60", "unlimited" };
-    static readonly string[] SpeedLabels = { "100% - real time", "95%", "90%", "85%", "80%", "75%" };
+    static readonly string[] SpeedLabels = { "100% - real time", "95%", "90%", "85%", "80%", "75% (recommended)" };
     static readonly string[] SpeedValues = { "100", "95", "90", "85", "80", "75" };
     static readonly string[] SizeLabels = { "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440" };
     static readonly int[,] SizeValues = { { 1280, 720 }, { 1600, 900 }, { 1920, 1080 }, { 2560, 1440 } };
@@ -84,7 +84,7 @@ static class AstroBotLauncher
 
         var lighting = AddRow(form, "Lighting", LightingLabels, ReadInt(json, "lighting", 0, LightingLabels.Length), ref y);
         var fps = AddRow(form, "Frame rate", FpsLabels, json.Contains("\"fpsv\"") ? ReadInt(json, "fps", 0, FpsLabels.Length) : 0, ref y);
-        var speed = AddRow(form, "Game speed", SpeedLabels, ReadInt(json, "speed", 0, SpeedLabels.Length), ref y);
+        var speed = AddRow(form, "Game speed", SpeedLabels, ReadInt(json, "speed", 5, SpeedLabels.Length), ref y);
         var size = AddRow(form, "Window size", SizeLabels, ReadInt(json, "size", 2, SizeLabels.Length), ref y);
         var fullscreen = new CheckBox { Text = "Start in fullscreen", AutoSize = true, Checked = ReadBool(json, "fullscreen", true), Location = new Point(150, y) };
         form.Controls.Add(fullscreen);
