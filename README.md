@@ -1,10 +1,6 @@
 # Astro Bot native PC port (AstroHybrid): DLSS Frame Generation, Reflex, any controller
 
-<p align="center">
-  <a href="https://ko-fi.com/justhappyguy">
-    <img src="https://raw.githubusercontent.com/imnotsharingmyname/pcportastrobot/main/.github/assets/kofi-support-banner.svg" alt="Support AstroHybrid on Ko-fi — help fund development, optimisation and testing" width="760">
-  </a>
-</p>
+
 
 A personal research project: running my own legally owned PS5 copy of **Astro Bot** (PPSA21567, v01.019.000)
 natively on Windows, with NVIDIA DLSS Super Resolution, DLSS (Multi) Frame Generation and Reflex added on top.
