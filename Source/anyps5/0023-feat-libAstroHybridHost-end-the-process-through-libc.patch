@@ -1,0 +1,59 @@
+From 79443fc616ff6dbc8a54afe473d8c2349273f369 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Sat, 7 Nov 2026 01:01:33 +0000
+Subject: [PATCH 23/26] feat(libAstroHybridHost): end the process through libc
+ when Kyty's window closes
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ core/libs/prx/libAstroHybridHost/Export.cpp | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/core/libs/prx/libAstroHybridHost/Export.cpp b/core/libs/prx/libAstroHybridHost/Export.cpp
+index 541dd3b222..df091b0c9f 100644
+--- a/core/libs/prx/libAstroHybridHost/Export.cpp
++++ b/core/libs/prx/libAstroHybridHost/Export.cpp
+@@ -7,13 +7,14 @@
+ #include "SceTypes.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/GuestArena.hpp"
++#include "prx/libc/include/Shutdown.hpp"
+ #include "prx/libkernel/Equeue/Equeue.hpp"
+ #include "prx/libScePad/include/PadState.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/HostHdr.hpp"
+ 
+ namespace {
+ 
+-constexpr std::uint32_t KytyGpuAbiVersion = (1u << 16u) | 2u;
++constexpr std::uint32_t KytyGpuAbiVersion = (1u << 16u) | 3u;
+ 
+ struct PadTouch {
+     std::uint16_t x;
+@@ -54,9 +55,10 @@ struct HostCallbacks {
+     const char* (*app0Path)(void* user);
+     int (*donateGuestRange)(void* user, std::uint64_t size, std::uint64_t* base);
+     void (*publishPad)(void* user, int port, const PadState* state);
++    void (*requestExit)(void* user, int code);
+ };
+ 
+-static_assert(sizeof(HostCallbacks) == 80);
++static_assert(sizeof(HostCallbacks) == 88);
+ 
+ struct Registration {
+     KernelEqueue eq;
+@@ -168,7 +170,11 @@ void PublishPad(void*, int port, const PadState* state) {
+     PadPublishInputForPort_nid_postfix(port, input);
+ }
+ 
+-const HostCallbacks g_callbacks{sizeof(HostCallbacks), KytyGpuAbiVersion, nullptr, Log, AddGpuEvent, DeleteGpuEvent, DeliverEvent, nullptr, nullptr, DonateGuestRange, PublishPad};
++void RequestExit(void*, int code) {
++    LibcRequestExit_nid_postfix(code);
++}
++
++const HostCallbacks g_callbacks{sizeof(HostCallbacks), KytyGpuAbiVersion, nullptr, Log, AddGpuEvent, DeleteGpuEvent, DeliverEvent, nullptr, nullptr, DonateGuestRange, PublishPad, RequestExit};
+ 
+ float g_reportedToneMapPeak = 0.0f;
+ 
+-- 
+2.55.0.windows.5
+

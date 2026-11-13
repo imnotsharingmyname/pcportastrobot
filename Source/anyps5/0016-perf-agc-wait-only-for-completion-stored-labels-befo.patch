@@ -1,0 +1,51 @@
+From 0ed7b2ba47b743a66a4b69e7fd8e100d959f5b05 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 30 Oct 2026 10:00:04 +0000
+Subject: [PATCH 16/26] perf(agc): wait only for completion-stored labels
+ before resource reads (APS5_SYNC_COMPLETION_LABELS_ONLY)
+
+CompletePendingCpuWrites synced on any label in the read range. Labels
+stored on the GPU reach memory in stream order and their writes are
+noted for barriers, so only labels landing at batch completion, or still
+queued, need the CPU to wait. The switch narrows the check to
+CompletionLabelIn, as the device already does for its own label stores.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp   | 7 ++++++-
+ docs/dev/ENVIRONMENT.md                                    | 1 +
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+index 639099d3d7..c2fb9d73bf 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+@@ -3423,7 +3423,12 @@ bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std
+     };
+     const bool dispatchWriter = context.copiedWriters != nullptr && overlaps(*context.copiedWriters);
+     const bool drawWriter = !dispatchWriter && overlaps(*drawWriters);
+-    if (dispatchWriter || drawWriter || (labels && recorder->PendingLabelIn(address, bytes))) {
++    static const bool completionLabelsOnly = [] {
++        const char* text = std::getenv("APS5_SYNC_COMPLETION_LABELS_ONLY");
++        return text != nullptr && text[0] != 0 && text[0] != '0';
++    }();
++    const bool labelWait = labels && (completionLabelsOnly ? recorder->CompletionLabelIn(address, bytes) : recorder->PendingLabelIn(address, bytes));
++    if (dispatchWriter || drawWriter || labelWait) {
+         static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+         if (profile) {
+             static AgcDriver::Mutex mutex;
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index 54b32affd4..13536ff2a2 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -14,6 +14,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `ANYPS5_TEST_QUOTED_ARGV0` | presence | `core/libs/tests/GuestLoadExecHost.cpp` |  | makes the load-exec test's first argument one with quotes, a backslash and non-ASCII text |
+ | `APS5_EBOOT` | string | `core/libs/prx/libSceSystemService/Export.cpp` |  | host path of the executable launched for /app0/eboot.bin; unset or empty means the running executable |
+ | `APS5_SKIP_TIMING_TESTS` | string | `core/libs/tests/PreciseWait.cpp` |  | treats the timing tests' runner as preempted, so they skip without probing the clock; an empty value or one starting with 0 leaves the probe on |
++| `APS5_SYNC_COMPLETION_LABELS_ONLY` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | a resource read waits for the GPU only for labels whose value lands at batch completion (or queued labels), not for labels the GPU itself stores in stream order; an empty value or one starting with `0` leaves it off |
+ | `APS5_USBD_DEVICE` | string | `core/libs/tests/GuestUsbd.cpp` |  | selects the USB device a test drives, as vendor:product in hex |
+ 
+ ### core/relinker
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,242 @@
+From 764c177c0e84cc387e867333715078a082d70461 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 30 Oct 2026 00:55:46 +0000
+Subject: [PATCH 12/26] feat(agc): compute-lane batches on a second Vulkan
+ queue (APS5_COMPUTE_QUEUE)
+
+With APS5_COMPUTE_LANE on, APS5_COMPUTE_QUEUE creates one more queue in the
+graphics family and submits compute-lane batches to it. A batch whose lane
+differs from the previous batch waits on the recorder timeline for that
+batch, and the present blit waits for the newest batch, so execution order
+is unchanged. Device idles also idle the compute queue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Execution/src/VulkanDevice.cpp            | 27 +++++++++-
+ .../Graphics/include/Context.hpp              |  1 +
+ .../Graphics/include/Recorder.hpp             |  3 ++
+ .../Graphics/src/DeferredDestruction.cpp      |  4 ++
+ .../libSceAgcDriver/Graphics/src/Recorder.cpp | 49 ++++++++++++++++---
+ docs/dev/ENVIRONMENT.md                       |  1 +
+ 6 files changed, 75 insertions(+), 10 deletions(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+index 95cb95e436..59af0c392d 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+@@ -451,6 +451,7 @@ struct VulkanDevice::State {
+     std::uint32_t sparseFamily = VK_QUEUE_FAMILY_IGNORED;
+     std::uint32_t sparseIndex = 0;
+     VkQueue sparseQueue = VK_NULL_HANDLE;
++    VkQueue computeQueue = VK_NULL_HANDLE;
+     std::mutex sparseQueueMutex;
+     VkQueue settleQueue = VK_NULL_HANDLE;
+     std::uint32_t settleFamily = 0;
+@@ -1716,7 +1717,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
+     queueInfo.queueFamilyIndex = family;
+     queueInfo.queueCount = 1;
+     queueInfo.pQueuePriorities = &priority;
+-    const float priorities[3]{1.0f, 1.0f, 1.0f};
++    const float priorities[4]{1.0f, 1.0f, 1.0f, 1.0f};
+ #ifdef _WIN32
+     const bool settles = true;
+ #else
+@@ -1769,7 +1770,12 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
+     const auto settleIndex = plan.settleIndex;
+     VkDeviceQueueCreateInfo queueInfos[3]{queueInfo, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
+     queueInfos[0].queueCount = plan.mainCount;
+-    queueInfos[0].pQueuePriorities = plan.mainCount > 1 ? priorities : &priority;
++    std::uint32_t computeIndex = 0;
++    if (Graphics::Recorder::ComputeQueueEnabled() && family < queues.size() && queues[family].queueCount > plan.mainCount && plan.mainCount < 4) {
++        computeIndex = plan.mainCount;
++        queueInfos[0].queueCount = plan.mainCount + 1;
++    }
++    queueInfos[0].pQueuePriorities = queueInfos[0].queueCount > 1 ? priorities : &priority;
+     deviceInfo.queueCreateInfoCount = 1;
+     const auto addQueue = [&](std::uint32_t queueFamily, std::uint32_t index) {
+         for (std::uint32_t info = 1; info < deviceInfo.queueCreateInfoCount; ++info) {
+@@ -2146,6 +2152,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
+     }
+     state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, 0, &state->queue);
+     state->queueFamily = family;
++    if (computeIndex != 0) {
++        state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, computeIndex, &state->computeQueue);
++        APS5_LOG_OUT("Compute-lane queue family=%u index=%u", family, computeIndex);
++    }
+     if (plan.present) {
+         state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, plan.presentIndex, &state->presentQueue);
+         APS5_LOG_OUT("Presentation queue family=%u index=%u", family, plan.presentIndex);
+@@ -3852,6 +3862,18 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
+     submit.pCommandBuffers = &commands;
+     submit.signalSemaphoreCount = 1;
+     submit.pSignalSemaphores = &rendered;
++    VkTimelineSemaphoreSubmitInfoKHR laneTimeline{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO_KHR};
++    VkSemaphore laneSemaphore = VK_NULL_HANDLE;
++    std::uint64_t laneValue = 0;
++    const VkPipelineStageFlags laneStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++    if (state->computeQueue != VK_NULL_HANDLE && state->recorder && state->recorder->NewestTimelinePoint(&laneSemaphore, &laneValue)) {
++        submit.waitSemaphoreCount = 1;
++        submit.pWaitSemaphores = &laneSemaphore;
++        submit.pWaitDstStageMask = &laneStage;
++        laneTimeline.waitSemaphoreValueCount = 1;
++        laneTimeline.pWaitSemaphoreValues = &laneValue;
++        submit.pNext = &laneTimeline;
++    }
+     timing.Mark("command_record_scale");
+     // The slot's fence signaled (retired above) or was never used: the reset cannot block.
+     check(state->DeviceFunction<PFN_vkResetFences>("vkResetFences")(state->device, 1, &slot.fence), "vkResetFences present");
+@@ -4174,6 +4196,7 @@ Graphics::Context VulkanDevice::buildContext() const {
+     context.queueFamily = state->queueFamily;
+     context.sparseFamily = state->sparseFamily;
+     context.sparseQueue = state->sparseQueue;
++    context.computeQueue = state->computeQueue;
+     context.sparseQueueMutex = &state->sparseQueueMutex;
+     context.settleQueue = state->settlePool != VK_NULL_HANDLE ? state->settleQueue : VK_NULL_HANDLE;
+     context.settlePool = state->settlePool;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp
+index b0b982e7c4..94454458b1 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp
+@@ -202,6 +202,7 @@ struct Context {
+     std::uint32_t queueFamily = 0;
+     std::uint32_t sparseFamily = VK_QUEUE_FAMILY_IGNORED;
+     VkQueue sparseQueue = VK_NULL_HANDLE;
++    VkQueue computeQueue = VK_NULL_HANDLE;
+     std::mutex* sparseQueueMutex = nullptr;
+     VkQueue settleQueue = VK_NULL_HANDLE;
+     VkCommandPool settlePool = VK_NULL_HANDLE;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
+index 54019b4546..d4988182b3 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
+@@ -427,6 +427,8 @@ public:
+     static bool ComputeLanesEnabled();
+     static std::uint8_t CallerLane();
+     static void SetThreadLane(std::uint8_t lane);
++    static bool ComputeQueueEnabled();
++    bool NewestTimelinePoint(VkSemaphore* semaphore, std::uint64_t* value) const;
+     VkDevice Device() const { return context.device; }
+     // Whether the calling thread runs inside a batch's completion action (finish()): a store made
+     // there must not have a publish recorded for it (UnitShadow), see SyncThrough.
+@@ -860,6 +862,7 @@ private:
+     std::vector<const Batch*> finishing;
+     mutable std::shared_ptr<const WriteRanges> published;
+     std::uint64_t submissions = 0;
++    std::uint8_t lastSubmittedLane = 0;
+     std::size_t inFlightKeptBytes = 0;
+     std::uint64_t writeNoteCount = 0;
+     std::shared_ptr<Buffer> drawUpload;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/DeferredDestruction.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/DeferredDestruction.cpp
+index 05da02fca1..4714560dbf 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/DeferredDestruction.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/DeferredDestruction.cpp
+@@ -104,6 +104,10 @@ void DestroyDeferredAtIdle(const Context& context, std::chrono::steady_clock::ti
+         if (objects == 0 || (objects < DrainObjects && now - found->second.oldest < DrainAge)) return;
+     }
+     const auto idle = context.Function<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(context.queue);
++    if (context.computeQueue != VK_NULL_HANDLE && idle == VK_SUCCESS) {
++        const auto computeIdle = context.Function<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(context.computeQueue);
++        if (computeIdle != VK_SUCCESS && computeIdle != VK_ERROR_DEVICE_LOST) throw std::runtime_error("AGC graphics: vkQueueWaitIdle (compute lane) before destroying deferred objects: Vulkan result " + std::to_string(computeIdle));
++    }
+     if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) throw std::runtime_error("AGC graphics: vkQueueWaitIdle before destroying deferred objects: Vulkan result " + std::to_string(idle));
+     Deferred taken;
+     {
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+index 7bbf7ed071..752070f018 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+@@ -1593,6 +1593,21 @@ void Recorder::SetThreadLane(std::uint8_t lane) {
+     threadLane = lane;
+ }
+ 
++bool Recorder::ComputeQueueEnabled() {
++    static const bool enabled = [] {
++        const char* text = std::getenv("APS5_COMPUTE_QUEUE");
++        return ComputeLanesEnabled() && text != nullptr && text[0] != '0' && text[0] != 0;
++    }();
++    return enabled;
++}
++
++bool Recorder::NewestTimelinePoint(VkSemaphore* semaphore, std::uint64_t* value) const {
++    if (timeline == VK_NULL_HANDLE || submissions == 0) return false;
++    *semaphore = timeline;
++    *value = submissions;
++    return true;
++}
++
+ void Recorder::ensureOpen() {
+     GuestMemory::AssertGpuLockHeld("Recorder::Commands");
+     if (open != nullptr && ComputeLanesEnabled() && open->lane != threadLane) {
+@@ -3703,13 +3718,30 @@ void Recorder::Submit() {
+     VkTimelineSemaphoreSubmitInfoKHR timelineInfo{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO_KHR};
+     const VkSemaphore hold = std::exchange(submitHold, VK_NULL_HANDLE);
+     const std::uint64_t holdValue = submitHoldValue;
+-    VkPipelineStageFlags holdStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
++    std::array<VkSemaphore, 2> waitSemaphores{};
++    std::array<std::uint64_t, 2> waitValues{};
++    std::array<VkPipelineStageFlags, 2> waitStages{};
++    std::uint32_t waitCount = 0;
+     if (hold != VK_NULL_HANDLE) {
+-        submission.waitSemaphoreCount = 1;
+-        submission.pWaitSemaphores = &hold;
+-        submission.pWaitDstStageMask = &holdStage;
+-        timelineInfo.waitSemaphoreValueCount = 1;
+-        timelineInfo.pWaitSemaphoreValues = &holdValue;
++        waitSemaphores[waitCount] = hold;
++        waitValues[waitCount] = holdValue;
++        waitStages[waitCount++] = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
++    }
++    VkQueue targetQueue = context.queue;
++    if (ComputeQueueEnabled() && context.computeQueue != VK_NULL_HANDLE && timeline != VK_NULL_HANDLE) {
++        if (batch->lane == 1) targetQueue = context.computeQueue;
++        if (submissions != 0 && lastSubmittedLane != batch->lane) {
++            waitSemaphores[waitCount] = timeline;
++            waitValues[waitCount] = submissions;
++            waitStages[waitCount++] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++        }
++    }
++    if (waitCount != 0) {
++        submission.waitSemaphoreCount = waitCount;
++        submission.pWaitSemaphores = waitSemaphores.data();
++        submission.pWaitDstStageMask = waitStages.data();
++        timelineInfo.waitSemaphoreValueCount = waitCount;
++        timelineInfo.pWaitSemaphoreValues = waitValues.data();
+     }
+     if (timeline != VK_NULL_HANDLE) {
+         timelineInfo.signalSemaphoreValueCount = 1;
+@@ -3717,10 +3749,10 @@ void Recorder::Submit() {
+         submission.signalSemaphoreCount = 1;
+         submission.pSignalSemaphores = &timeline;
+     }
+-    if (hold != VK_NULL_HANDLE || timeline != VK_NULL_HANDLE) submission.pNext = &timelineInfo;
++    if (waitCount != 0 || timeline != VK_NULL_HANDLE) submission.pNext = &timelineInfo;
+     DestroyDeferredAtIdle(context);
+     const auto submitStart = std::chrono::steady_clock::now();
+-    const auto result = function(queueSubmit, "vkQueueSubmit")(context.queue, 1, &submission, batch->fence);
++    const auto result = function(queueSubmit, "vkQueueSubmit")(targetQueue, 1, &submission, batch->fence);
+     if (result == VK_ERROR_DEVICE_LOST) {
+         const auto idle = context.Function<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(context.device);
+         if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
+@@ -3728,6 +3760,7 @@ void Recorder::Submit() {
+     Check(result, "vkQueueSubmit recorder");
+     batch->submitted = true;
+     batch->serial = ++submissions;
++    lastSubmittedLane = batch->lane;
+     batch->submittedAt = std::chrono::steady_clock::now();
+     CaptureTrace::Log("submit-confirmed batch=%llu tokens=%s", static_cast<unsigned long long>(batch->serial), tokensStr.c_str());
+     if (DrawProfiled()) {
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index e20cf98503..54b32affd4 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -113,6 +113,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_CHECK_INDIRECT_ARGS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | reads GPU-side indirect draw records back on the CPU and prints the first ones |
+ | `APS5_COMPLETION_STORE_SYNC` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | makes a store made by a completion action wait for later batches over its range |
+ | `APS5_COMPUTE_LANE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | lane-separated batches: queue workers 0x40 and 0x48 record into compute-lane batches and every other thread into graphics-lane batches; when a thread of the other lane records, the open batch is submitted first, so each batch holds one lane's work in the original order (groundwork for a separate compute queue); an empty value or one starting with `0` leaves it off |
++| `APS5_COMPUTE_QUEUE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | with `APS5_COMPUTE_LANE` on, compute-lane batches are submitted to a second queue of the graphics family; each batch on the other lane waits on the recorder timeline for the previous batch, and the present blit waits for the newest batch, so the GPU keeps the original order; an empty value or one starting with `0` leaves it off |
+ | `APS5_COPY_DESTINATION_STRICT` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | refuses a CPU copy whose destination has any pending writer, not only an unsettled one |
+ | `APS5_COPY_HLE_CPU_MAX` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/BufferCopy.cpp` | 262144 | largest copy in bytes the CPU side of the copy HLE handles |
+ | `APS5_COPY_HLE_GPU_MAX` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/BufferCopy.cpp` |  | largest copy in bytes the GPU side of the copy HLE handles; unset means no limit |
+-- 
+2.55.0.windows.5
+

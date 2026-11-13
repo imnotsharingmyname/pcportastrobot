@@ -1,0 +1,1050 @@
+From df8580c2f19e69cf9abf62b9470e9ed654a40340 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 20:10:52 +0000
+Subject: [PATCH 03/35] feat(hybrid): kyty_gpu.dll bridge for AnyPS5's native
+ AstroBot.exe (milestone 1)
+
+Kyty's GPU stack as a DLL that exports the 82 graphics NIDs AstroBot.exe
+imports (65 libSceAgc, 6 libSceAgcDriver, 11 libSceVideoOut). Each export is
+a System V-transparent thunk through a slot; init binds the slots through
+Kyty's own LIB_FUNC tables, except sceAgcDriverAddEqEvent and
+sceVideoOutAddFlipEvent, whose queue handles belong to AnyPS5's libkernel and
+go to host callbacks. Versioned C interface in src/hybrid/kytyGpuApi.h.
+
+Built by tools/hybrid/build_kyty_gpu.py from the existing kyty_emulator
+objects (bridge compiled with the same flags); tests/hybrid/kytyGpuLoadTest.c,
+built with MinGW GCC, passes 351 checks (352 with AnyPS5's winpthread
+preloaded). Renderer start-up, memory adapter and event delivery are
+milestone 2 and return KYTY_GPU_E_NOT_IMPLEMENTED.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/hybrid/kytyGpuApi.h              | 149 ++++++++++++++
+ src/hybrid/kytyGpuBridge.cpp         | 289 +++++++++++++++++++++++++++
+ src/hybrid/kytyGpuNids.inc           |  83 ++++++++
+ src/hybrid/kyty_gpu.def              |  85 ++++++++
+ tests/hybrid/kytyGpuLoadTest.c       | 185 +++++++++++++++++
+ tools/hybrid/build_kyty_gpu.py       |  97 +++++++++
+ tools/hybrid/gen_kyty_gpu_exports.py |  80 ++++++++
+ 7 files changed, 968 insertions(+)
+ create mode 100644 src/hybrid/kytyGpuApi.h
+ create mode 100644 src/hybrid/kytyGpuBridge.cpp
+ create mode 100644 src/hybrid/kytyGpuNids.inc
+ create mode 100644 src/hybrid/kyty_gpu.def
+ create mode 100644 tests/hybrid/kytyGpuLoadTest.c
+ create mode 100644 tools/hybrid/build_kyty_gpu.py
+ create mode 100644 tools/hybrid/gen_kyty_gpu_exports.py
+
+diff --git a/src/hybrid/kytyGpuApi.h b/src/hybrid/kytyGpuApi.h
+new file mode 100644
+index 00000000..1be37cd5
+--- /dev/null
++++ b/src/hybrid/kytyGpuApi.h
+@@ -0,0 +1,149 @@
++#ifndef KYTY_HYBRID_KYTYGPUAPI_H_
++#define KYTY_HYBRID_KYTYGPUAPI_H_
++
++/* AstroHybrid: the C interface between AnyPS5's native AstroBot.exe and kyty_gpu.dll.
++ *
++ * Both sides include this header with different toolchains (AnyPS5: MinGW GCC, Itanium C++ ABI;
++ * Kyty: clang-cl, MSVC ABI). Only C types cross it. Functions in the two tables below use the
++ * platform's default C calling convention (Microsoft x64 on Windows), which both toolchains agree
++ * on. The NID-named exports of kyty_gpu.dll are different: they are called by game code and use
++ * the System V calling convention, like AnyPS5's own prx exports (APS5_VABI).
++ *
++ * Versioning: the host passes KYTY_GPU_ABI_VERSION and sizeof() of its structs. The DLL refuses a
++ * different major version or a struct smaller than the fields it reads; fields are only ever
++ * appended. */
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define KYTY_GPU_ABI_VERSION_MAJOR 1u
++#define KYTY_GPU_ABI_VERSION_MINOR 0u
++#define KYTY_GPU_ABI_VERSION ((KYTY_GPU_ABI_VERSION_MAJOR << 16u) | KYTY_GPU_ABI_VERSION_MINOR)
++
++#if defined(_WIN32)
++#if defined(KYTY_GPU_BUILDING_DLL)
++#define KYTY_GPU_EXPORT __declspec(dllexport)
++#else
++#define KYTY_GPU_EXPORT __declspec(dllimport)
++#endif
++#else
++#define KYTY_GPU_EXPORT __attribute__((visibility("default")))
++#endif
++
++typedef enum KytyGpuStatus {
++	KYTY_GPU_OK                  = 0,
++	KYTY_GPU_E_VERSION           = -1, /* major version or struct size not supported */
++	KYTY_GPU_E_ARGUMENT          = -2,
++	KYTY_GPU_E_STATE             = -3, /* called in the wrong lifecycle state */
++	KYTY_GPU_E_NOT_IMPLEMENTED   = -4, /* interface present, implementation is a later milestone */
++	KYTY_GPU_E_HOST_CALLBACK     = -5, /* a required host callback is missing */
++	KYTY_GPU_E_UNKNOWN_NID       = -6,
++} KytyGpuStatus;
++
++/* How an exported NID reaches its implementation. */
++typedef enum KytyGpuBinding {
++	KYTY_GPU_BINDING_KYTY_VERIFIED = 1, /* Kyty's HLE function; argument layout compared with AnyPS5's */
++	KYTY_GPU_BINDING_KYTY          = 2, /* Kyty's HLE function; game ABI, layout not yet compared */
++	KYTY_GPU_BINDING_BRIDGE        = 3, /* implemented by the bridge (host handles, AnyPS5 semantics) */
++} KytyGpuBinding;
++
++typedef struct KytyGpuNidInfo {
++	const char* nid;      /* export name, e.g. "UglJIZjGssM" */
++	const char* library;  /* AnyPS5 prx the game imports it from, e.g. "libSceAgcDriver.prx" */
++	const char* function; /* implementation name, for logs */
++	uint32_t    binding;  /* KytyGpuBinding */
++	uint32_t    bound;    /* nonzero once the export reaches its implementation */
++} KytyGpuNidInfo;
++
++/* Memory flags for register_memory. */
++#define KYTY_GPU_MEMORY_GPU_READ  0x1u
++#define KYTY_GPU_MEMORY_GPU_WRITE 0x2u
++#define KYTY_GPU_MEMORY_DIRECT    0x4u /* direct memory (has a backing alias) */
++
++/* GPU -> host event kinds (host_callbacks.gpu_event). */
++#define KYTY_GPU_EVENT_EOP_INTERRUPT 1u /* ident: AGC event id (queue), data: unused */
++#define KYTY_GPU_EVENT_FLIP          2u /* ident: video out handle, data: flip argument */
++#define KYTY_GPU_EVENT_VBLANK        3u /* ident: video out handle */
++
++typedef struct KytyGpuHostCallbacks {
++	uint32_t struct_size; /* sizeof(KytyGpuHostCallbacks) on the host */
++	uint32_t abi_version; /* KYTY_GPU_ABI_VERSION of the host */
++	void*    user;        /* passed back to every callback */
++
++	/* Diagnostics. level: 0 info, 1 warning, 2 error. May be null. */
++	void (*log)(void* user, int level, const char* message);
++
++	/* The game's event queues live in AnyPS5's libkernel. The bridge forwards the AGC and VideoOut
++	 * event registrations to the host, which owns the queue handles, and raises events through
++	 * deliver_event. Return 0 or a negative SCE error. */
++	int (*add_gpu_event)(void* user, int64_t equeue, uint32_t kind, int64_t ident, void* udata);
++	int (*delete_gpu_event)(void* user, int64_t equeue, uint32_t kind, int64_t ident);
++	void (*deliver_event)(void* user, uint32_t kind, int64_t ident, uint64_t data);
++
++	/* Guest memory as AnyPS5's libkernel maps it. Return 0 and fill the range holding address, or
++	 * a negative value when it is not mapped. alias: an always-readable host view of the same
++	 * bytes, or null when the guest view itself is the backing. */
++	int (*query_memory)(void* user, uint64_t address, uint64_t* base, uint64_t* size,
++	                    uint32_t* flags, const void** alias);
++
++	/* The title's app0 directory (UTF-8), for shader and pipeline caches. May be null. */
++	const char* (*app0_path)(void* user);
++} KytyGpuHostCallbacks;
++
++typedef struct KytyGpuPacket { /* identical to AGC's Packet and AnyPS5's Packet */
++	uint32_t* addr;
++	uint32_t  dw_num;
++	uint8_t   flags;
++	uint8_t   reserved[3];
++} KytyGpuPacket;
++
++typedef struct KytyGpuApi {
++	uint32_t struct_size;
++	uint32_t abi_version;
++	const char* build; /* Kyty git version of the DLL */
++
++	/* Lifecycle. init binds every NID export (no graphics device yet); start_graphics creates
++	 * Kyty's Vulkan renderer and presentation; shutdown stops them. */
++	int (*init)(const KytyGpuHostCallbacks* host);
++	int (*start_graphics)(void);
++	void (*shutdown)(void);
++
++	/* Guest memory notifications from AnyPS5's libkernel. */
++	int (*register_memory)(uint64_t base, uint64_t size, uint32_t flags, const void* alias);
++	int (*unregister_memory)(uint64_t base, uint64_t size);
++	int (*invalidate_memory)(uint64_t base, uint64_t size); /* the CPU wrote the range */
++
++	/* Command submission (same semantics as the AGC driver calls). */
++	int (*submit_dcb)(const KytyGpuPacket* packet);
++	int (*submit_acb)(uint32_t queue, const KytyGpuPacket* packet);
++
++	/* Export table: count and the entry for an index or NID (null when out of range / unknown). */
++	uint32_t (*nid_count)(void);
++	const KytyGpuNidInfo* (*nid_info)(uint32_t index);
++	const KytyGpuNidInfo* (*find_nid)(const char* nid);
++} KytyGpuApi;
++
++/* The DLL's only C entry point; the host asks for the major version it was built with. Returns
++ * null for an unsupported version. */
++KYTY_GPU_EXPORT const KytyGpuApi* KytyGpuGetApi(uint32_t abi_version);
++typedef const KytyGpuApi* (*KytyGpuGetApiFn)(uint32_t abi_version);
++
++#ifdef __cplusplus
++}
++#endif
++
++#if defined(__cplusplus)
++static_assert(sizeof(KytyGpuPacket) == 16, "KytyGpuPacket layout");
++static_assert(offsetof(KytyGpuPacket, dw_num) == 8, "KytyGpuPacket layout");
++static_assert(offsetof(KytyGpuPacket, flags) == 12, "KytyGpuPacket layout");
++#else
++_Static_assert(sizeof(KytyGpuPacket) == 16, "KytyGpuPacket layout");
++_Static_assert(offsetof(KytyGpuPacket, dw_num) == 8, "KytyGpuPacket layout");
++_Static_assert(offsetof(KytyGpuPacket, flags) == 12, "KytyGpuPacket layout");
++#endif
++
++#endif /* KYTY_HYBRID_KYTYGPUAPI_H_ */
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+new file mode 100644
+index 00000000..6e54a300
+--- /dev/null
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -0,0 +1,289 @@
++// AstroHybrid bridge: Kyty's GPU stack as kyty_gpu.dll for AnyPS5's native AstroBot.exe.
++//
++// The DLL exports every graphics NID the game imports from libSceAgc, libSceAgcDriver and
++// libSceVideoOut (src/hybrid/kytyGpuNids.inc, generated by tools/hybrid/gen_kyty_gpu_exports.py).
++// Each export is a two-instruction System V-transparent thunk that jumps through a slot. Before
++// KytyGpuGetApi()->init() binds them, every slot points at a trap that names the NID and stops the
++// process, so a call that reaches an unbound export never runs on uninitialized state.
++//
++// init() resolves the slots through Kyty's own HLE registrations (the same LIB_FUNC tables
++// kyty_emulator uses), except for the calls that carry AnyPS5 kernel handles: those go to the
++// bridge functions below, which forward to the host callbacks.
++
++#define KYTY_GPU_BUILDING_DLL
++#include "hybrid/kytyGpuApi.h"
++
++#include "common/abi.h"
++#include "kytyGitVersion.h"
++#include "libs/agc.h"
++#include "loader/symbolDatabase.h"
++
++#include <atomic>
++#include <cstdarg>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++
++#if defined(_WIN32)
++#include <windows.h>
++#endif
++
++namespace Libs {
++void InitAgcDriver_1(Loader::SymbolDatabase* s);
++namespace LibGen5 {
++void InitVideoOut_1(Loader::SymbolDatabase* s);
++} // namespace LibGen5
++} // namespace Libs
++
++namespace {
++
++enum class State : int { Loaded, Initialized, Graphics, Stopped };
++
++struct NidRow {
++	const char* nid;
++	const char* library;
++	const char* function;
++	uint32_t    binding;
++};
++
++constexpr NidRow g_rows[] = {
++#define KYTY_GPU_NID(index, nid, library, function, binding) {nid, library, function, binding},
++#include "hybrid/kytyGpuNids.inc"
++#undef KYTY_GPU_NID
++};
++constexpr uint32_t g_row_count = static_cast<uint32_t>(sizeof(g_rows) / sizeof(g_rows[0]));
++
++KytyGpuNidInfo        g_info[g_row_count];
++KytyGpuHostCallbacks  g_host {};
++std::atomic<State>    g_state {State::Loaded};
++std::mutex            g_lifecycle;
++
++void Log(int level, const char* format, ...) {
++	char text[1024];
++	va_list args;
++	va_start(args, format);
++	std::vsnprintf(text, sizeof(text), format, args);
++	va_end(args);
++	if (g_host.log != nullptr) {
++		g_host.log(g_host.user, level, text);
++	} else {
++		std::fprintf(stderr, "[kyty_gpu] %s\n", text);
++	}
++}
++
++} // namespace
++
++extern "C" {
++
++// One slot per export; the thunks read them with a RIP-relative indirect jump.
++void* g_kyty_gpu_slots[g_row_count];
++
++[[noreturn]] void KytyGpuUnboundNid(uint32_t index) {
++	const char* nid      = index < g_row_count ? g_rows[index].nid : "?";
++	const char* function = index < g_row_count ? g_rows[index].function : "?";
++	char text[256];
++	std::snprintf(text, sizeof(text),
++	              "kyty_gpu: %s (%s, export %u) was called before KytyGpuGetApi()->init() bound it",
++	              nid, function, index);
++	std::fprintf(stderr, "%s\n", text);
++	std::fflush(stderr);
++#if defined(_WIN32)
++	OutputDebugStringA(text);
++#endif
++	std::abort();
++}
++
++// Reached from a thunk with the export index in r11d. Jumps (does not call) to the reporter, so
++// the stack is exactly as at the guest's call.
++__attribute__((naked)) void KytyGpuUnboundTrap() {
++	__asm__ volatile("movl %r11d, %ecx\n\t"
++	                 "jmp KytyGpuUnboundNid\n\t");
++}
++
++#define KYTY_GPU_NID(index, nid, library, function, binding)                                       \
++	__attribute__((naked)) void kyty_gpu_nid_##index() {                                           \
++		__asm__ volatile("movl $" #index ", %r11d\n\t"                                             \
++		                 "jmpq *g_kyty_gpu_slots+" #index "*8(%rip)\n\t");                         \
++	}
++#include "hybrid/kytyGpuNids.inc"
++#undef KYTY_GPU_NID
++
++} // extern "C"
++
++namespace {
++
++// ---- Bridge implementations (System V, called by game code through the thunks) ----
++
++constexpr int SceAgcErrorInvalidArgument = static_cast<int>(0x8A6C0002u);
++constexpr int SceVideoOutErrorInvalidEventQueue = static_cast<int>(0x80290012u);
++
++int KYTY_SYSV_ABI BridgeAgcDriverAddEqEvent(int64_t equeue, int id, void* udata) {
++	if (g_host.add_gpu_event == nullptr) {
++		Log(2, "sceAgcDriverAddEqEvent: the host registered no add_gpu_event callback");
++		return SceAgcErrorInvalidArgument;
++	}
++	return g_host.add_gpu_event(g_host.user, equeue, KYTY_GPU_EVENT_EOP_INTERRUPT, id, udata);
++}
++
++int KYTY_SYSV_ABI BridgeVideoOutAddFlipEvent(int64_t equeue, int handle, void* udata) {
++	if (g_host.add_gpu_event == nullptr) {
++		Log(2, "sceVideoOutAddFlipEvent: the host registered no add_gpu_event callback");
++		return SceVideoOutErrorInvalidEventQueue;
++	}
++	return g_host.add_gpu_event(g_host.user, equeue, KYTY_GPU_EVENT_FLIP, handle, udata);
++}
++
++void* BridgeFunction(const char* name) {
++	if (std::strcmp(name, "BridgeAgcDriverAddEqEvent") == 0) {
++		return reinterpret_cast<void*>(&BridgeAgcDriverAddEqEvent);
++	}
++	if (std::strcmp(name, "BridgeVideoOutAddFlipEvent") == 0) {
++		return reinterpret_cast<void*>(&BridgeVideoOutAddFlipEvent);
++	}
++	return nullptr;
++}
++
++// ---- C API ----
++
++int ApiInit(const KytyGpuHostCallbacks* host) {
++	if (host == nullptr) {
++		return KYTY_GPU_E_ARGUMENT;
++	}
++	if ((host->abi_version >> 16u) != KYTY_GPU_ABI_VERSION_MAJOR ||
++	    host->struct_size < sizeof(KytyGpuHostCallbacks)) {
++		Log(2, "init: host ABI %u.%u with %u-byte callbacks, this DLL needs %u.x and %zu bytes",
++		    host->abi_version >> 16u, host->abi_version & 0xffffu, host->struct_size,
++		    KYTY_GPU_ABI_VERSION_MAJOR, sizeof(KytyGpuHostCallbacks));
++		return KYTY_GPU_E_VERSION;
++	}
++	std::lock_guard lock(g_lifecycle);
++	if (g_state.load() != State::Loaded) {
++		return KYTY_GPU_E_STATE;
++	}
++	g_host = *host;
++
++	Loader::SymbolDatabase symbols;
++	Libs::InitAgcDriver_1(&symbols);
++	Libs::LibGen5::InitVideoOut_1(&symbols);
++
++	uint32_t missing = 0;
++	for (uint32_t i = 0; i < g_row_count; ++i) {
++		void* target = nullptr;
++		if (g_rows[i].binding == KYTY_GPU_BINDING_BRIDGE) {
++			target = BridgeFunction(g_rows[i].function);
++		} else if (const auto* record = symbols.FindByNid(g_rows[i].nid, Loader::SymbolType::Func);
++		           record != nullptr) {
++			target = reinterpret_cast<void*>(record->vaddr);
++		}
++		if (target == nullptr) {
++			Log(2, "init: %s %s (%s) has no implementation", g_rows[i].library, g_rows[i].nid,
++			    g_rows[i].function);
++			++missing;
++			continue;
++		}
++		g_kyty_gpu_slots[i] = target;
++		g_info[i].bound     = 1;
++	}
++	if (missing != 0) {
++		return KYTY_GPU_E_UNKNOWN_NID;
++	}
++	g_state.store(State::Initialized);
++	Log(0, "init: %u graphics NIDs bound (Kyty %s)", g_row_count, KYTY_GIT_VERSION);
++	return KYTY_GPU_OK;
++}
++
++int ApiStartGraphics() {
++	if (g_state.load() != State::Initialized) {
++		return KYTY_GPU_E_STATE;
++	}
++	Log(2, "start_graphics: Kyty's renderer start-up inside the host process is milestone 2 "
++	       "(Config/Log/Timer/Pthread/Memory/Graphics lifecycles, window thread, memory adapter)");
++	return KYTY_GPU_E_NOT_IMPLEMENTED;
++}
++
++void ApiShutdown() {
++	std::lock_guard lock(g_lifecycle);
++	g_state.store(State::Stopped);
++}
++
++int ApiRegisterMemory(uint64_t base, uint64_t size, uint32_t flags, const void* alias) {
++	Log(2, "register_memory(0x%llx, 0x%llx, 0x%x, %p): Kyty memory adapter is milestone 2",
++	    static_cast<unsigned long long>(base), static_cast<unsigned long long>(size), flags, alias);
++	return KYTY_GPU_E_NOT_IMPLEMENTED;
++}
++
++int ApiUnregisterMemory(uint64_t base, uint64_t size) {
++	Log(2, "unregister_memory(0x%llx, 0x%llx): Kyty memory adapter is milestone 2",
++	    static_cast<unsigned long long>(base), static_cast<unsigned long long>(size));
++	return KYTY_GPU_E_NOT_IMPLEMENTED;
++}
++
++int ApiInvalidateMemory(uint64_t base, uint64_t size) {
++	Log(2, "invalidate_memory(0x%llx, 0x%llx): Kyty memory adapter is milestone 2",
++	    static_cast<unsigned long long>(base), static_cast<unsigned long long>(size));
++	return KYTY_GPU_E_NOT_IMPLEMENTED;
++}
++
++static_assert(sizeof(KytyGpuPacket) == sizeof(Libs::Graphics::Gen5Driver::Packet));
++static_assert(offsetof(KytyGpuPacket, dw_num) == offsetof(Libs::Graphics::Gen5Driver::Packet, dw_num));
++static_assert(offsetof(KytyGpuPacket, flags) == offsetof(Libs::Graphics::Gen5Driver::Packet, flags));
++
++int ApiSubmitDcb(const KytyGpuPacket* packet) {
++	if (g_state.load() != State::Graphics) {
++		return KYTY_GPU_E_STATE;
++	}
++	return Libs::Graphics::Gen5Driver::AgcDriverSubmitDcb(
++	    reinterpret_cast<const Libs::Graphics::Gen5Driver::Packet*>(packet));
++}
++
++int ApiSubmitAcb(uint32_t queue, const KytyGpuPacket* packet) {
++	if (g_state.load() != State::Graphics) {
++		return KYTY_GPU_E_STATE;
++	}
++	return Libs::Graphics::Gen5Driver::AgcDriverSubmitAcb(
++	    queue, reinterpret_cast<const Libs::Graphics::Gen5Driver::Packet*>(packet));
++}
++
++uint32_t ApiNidCount() {
++	return g_row_count;
++}
++
++const KytyGpuNidInfo* ApiNidInfo(uint32_t index) {
++	return index < g_row_count ? &g_info[index] : nullptr;
++}
++
++const KytyGpuNidInfo* ApiFindNid(const char* nid) {
++	if (nid == nullptr) {
++		return nullptr;
++	}
++	for (uint32_t i = 0; i < g_row_count; ++i) {
++		if (std::strcmp(g_rows[i].nid, nid) == 0) {
++			return &g_info[i];
++		}
++	}
++	return nullptr;
++}
++
++struct Tables {
++	Tables() {
++		for (uint32_t i = 0; i < g_row_count; ++i) {
++			g_kyty_gpu_slots[i] = reinterpret_cast<void*>(&KytyGpuUnboundTrap);
++			g_info[i]           = {g_rows[i].nid, g_rows[i].library, g_rows[i].function,
++			                       g_rows[i].binding, 0};
++		}
++	}
++};
++const Tables g_tables;
++
++const KytyGpuApi g_api = {
++    sizeof(KytyGpuApi),  KYTY_GPU_ABI_VERSION, KYTY_GIT_VERSION, ApiInit,     ApiStartGraphics,
++    ApiShutdown,         ApiRegisterMemory,    ApiUnregisterMemory, ApiInvalidateMemory, ApiSubmitDcb,
++    ApiSubmitAcb,        ApiNidCount,          ApiNidInfo,          ApiFindNid,
++};
++
++} // namespace
++
++extern "C" KYTY_GPU_EXPORT const KytyGpuApi* KytyGpuGetApi(uint32_t abi_version) {
++	return (abi_version >> 16u) == KYTY_GPU_ABI_VERSION_MAJOR ? &g_api : nullptr;
++}
+diff --git a/src/hybrid/kytyGpuNids.inc b/src/hybrid/kytyGpuNids.inc
+new file mode 100644
+index 00000000..2565546f
+--- /dev/null
++++ b/src/hybrid/kytyGpuNids.inc
+@@ -0,0 +1,83 @@
++// Generated by tools/hybrid/gen_kyty_gpu_exports.py from AstroBot.registry.json. Do not edit.
++KYTY_GPU_NID(0, "+kSrjIVxKFE", "libSceAgc.prx", "AgcDcbPushMarker", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(1, "-HOOCn0JY48", "libSceAgc.prx", "AgcDcbSetShRegistersIndirect", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(2, "-KRzWekV120", "libSceAgc.prx", "AgcDcbSetIndexSize_0600", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(3, "-RnpfpxIhec", "libSceAgc.prx", "AgcAcbDmaData", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(4, "0fWWK5uG9rQ", "libSceAgc.prx", "AgcQueueEndOfPipeActionPatchAddress", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(5, "1rZSWUv1IRc", "libSceAgc.prx", "AgcDcbCopyData", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(6, "23LRUSvYu1M", "libSceAgc.prx", "AgcInit", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(7, "2JtWUUiYBXs", "libSceAgc.prx", "AgcGetRegisterDefaults2", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(8, "3KDcnM3lrcU", "libSceAgc.prx", "AgcWaitRegMemPatchAddress", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(9, "57labkp+rSQ", "libSceAgc.prx", "AgcDcbAcquireMem", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(10, "6lNcCp+fxi4", "libSceAgc.prx", "AgcSetUcRegIndirectPatchSetAddress", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(11, "6mFxkVqdmbQ", "libSceAgc.prx", "AgcAcbPopMarker", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(12, "8N2tmT3jmC8", "libSceAgc.prx", "AgcDcbSetIndexCount", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(13, "Abendgtz+3o", "libSceAgc.prx", "AgcCbDispatchGetSize", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(14, "B+aG9DUnTKA", "libSceAgc.prx", "AgcDcbDrawIndexOffset", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(15, "BfBDZGbti7A", "libSceAgc.prx", "AgcGetIsTrinityMode", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(16, "CtB+A9-VxO0", "libSceAgc.prx", "AgcDcbDispatchIndirect", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(17, "D9sr1xGUriE", "libSceAgc.prx", "AgcCreatePrimState", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(18, "H7uZqCoNuWk", "libSceAgc.prx", "AgcDcbPopMarker", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(19, "HV4j+E0MBHE", "libSceAgc.prx", "AgcCreateInterpolantMapping", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(20, "JrtiDtKeS38", "libSceAgc.prx", "AgcAcbResetQueue", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(21, "KT-hTp-Ch14", "libSceAgc.prx", "AgcAcbAcquireMem", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(22, "LtTouSCZjHM", "libSceAgc.prx", "AgcCbNop", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(23, "MWiElSNE8j8", "libSceAgc.prx", "AgcDcbWaitUntilSafeForRendering", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(24, "Qrj4c+61z4A", "libSceAgc.prx", "AgcSetShRegIndirectPatchSetAddress", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(25, "RmaJwLtc8rY", "libSceAgc.prx", "AgcDcbSetBaseIndirectArgs", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(26, "T6xuVw0KUJo", "libSceAgc.prx", "AgcDebugRaiseException", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(27, "TRO721eVt4g", "libSceAgc.prx", "AgcDcbResetQueue", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(28, "UZbQjYAwwXM", "libSceAgc.prx", "AgcCbSetShRegistersDirect", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(29, "V++UgBtQhn0", "libSceAgc.prx", "AgcGetDataPacketPayloadAddress", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(30, "VmW0Tdpy420", "libSceAgc.prx", "AgcDcbWaitRegMem", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(31, "WmAc2MEj6Io", "libSceAgc.prx", "AgcDcbDmaData", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(32, "YUeqkyT7mEQ", "libSceAgc.prx", "AgcDcbSetFlip", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(33, "Yw0jKSqop+E", "libSceAgc.prx", "AgcDcbDrawIndexAuto", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(34, "ZvwO9euwYzc", "libSceAgc.prx", "AgcDcbSetCxRegistersIndirect", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(35, "aJf+j5yntiU", "libSceAgc.prx", "AgcDcbEventWrite", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(36, "bxGoVxpdSPQ", "libSceAgc.prx", "AgcCbSetShRegisterRangeDirectGetSize", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(37, "cFazmnXpJOE", "libSceAgc.prx", "AgcAcbEventWrite", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(38, "cpCILPya5Zk", "libSceAgc.prx", "AgcAcbPushMarker", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(39, "d-6uF9sZDIU", "libSceAgc.prx", "AgcSetCxRegIndirectPatchAddRegisters", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(40, "dolOmWH+huQ", "libSceAgc.prx", "AgcGetFusedShaderSize", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(41, "eZ4+17OQz4Q", "libSceAgc.prx", "AgcAcbWriteData", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(42, "f3dg2CSgRKY", "libSceAgc.prx", "AgcCreateShader", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(43, "fPSCdQxgpSw", "libSceAgc.prx", "AgcWriteDataPatchSetAddressOrOffset", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(44, "fd5Bp5tGTgo", "libSceAgc.prx", "AgcFuseShaderHalves_0200", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(45, "h9z6+0hEydk", "libSceAgc.prx", "AgcSuspendPoint", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(46, "htn36gPnBk4", "libSceAgc.prx", "AgcAcbWaitRegMem", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(47, "hvUfkUIQcOE", "libSceAgc.prx", "AgcDcbSetUcRegistersIndirect", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(48, "i1jyy49AjXU", "libSceAgc.prx", "AgcDcbWriteData", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(49, "j3EtxFkSIhQ", "libSceAgc.prx", "AgcAcbDispatchIndirect", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(50, "k3GhuSNmBLU", "libSceAgc.prx", "AgcCbDispatch", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(51, "l4fM9K-Lyks", "libSceAgc.prx", "AgcDcbSetIndexBuffer", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(52, "n2fD4A+pb+g", "libSceAgc.prx", "AgcCbSetShRegisterRangeDirect", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(53, "qj7QZpgr9Uw", "libSceAgc.prx", "AgcDcbContextStateOp", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(54, "qzMN2XKGA4k", "libSceAgc.prx", "AgcAcbCopyData", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(55, "t1vNu082-jM", "libSceAgc.prx", "AgcDcbDrawIndexIndirect", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(56, "t7PlZ9nt5Lc", "libSceAgc.prx", "AgcCbNopGetSize", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(57, "tSBxhAPyytQ", "libSceAgc.prx", "AgcDcbSetNumInstances", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(58, "u2T2DiA5hRI", "libSceAgc.prx", "AgcDcbStallCommandBufferParser", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(59, "vRoArM9zaIk", "libSceAgc.prx", "AgcSetUcRegIndirectPatchAddRegisters", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(60, "vcmNN+AAXnY", "libSceAgc.prx", "AgcSetCxRegIndirectPatchSetAddress", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(61, "vuSXe69VILM", "libSceAgc.prx", "AgcDcbGetLodStats", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(62, "wRbq6ZjNop4", "libSceAgc.prx", "AgcGetRegisterDefaults2Internal", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(63, "wr23dPKyWc0", "libSceAgc.prx", "AgcCbReleaseMem", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(64, "z2duB-hHQSM", "libSceAgc.prx", "AgcSetShRegIndirectPatchAddRegisters", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(65, "AhGvpITrf4M", "libSceAgcDriver.prx", "AgcDriverSubmitDcb", KYTY_GPU_BINDING_KYTY_VERIFIED)
++KYTY_GPU_NID(66, "UglJIZjGssM", "libSceAgcDriver.prx", "AgcDriverSubmitDcb", KYTY_GPU_BINDING_KYTY_VERIFIED)
++KYTY_GPU_NID(67, "W5z4eZrjEas", "libSceAgcDriver.prx", "AgcDriverRegisterResource", KYTY_GPU_BINDING_KYTY_VERIFIED)
++KYTY_GPU_NID(68, "X-Nm5KLREeg", "libSceAgcDriver.prx", "AgcDriverRegisterOwner", KYTY_GPU_BINDING_KYTY_VERIFIED)
++KYTY_GPU_NID(69, "gSRnr79F8tQ", "libSceAgcDriver.prx", "AgcDriverSubmitAcb", KYTY_GPU_BINDING_KYTY_VERIFIED)
++KYTY_GPU_NID(70, "w2rJhmD+dsE", "libSceAgcDriver.prx", "BridgeAgcDriverAddEqEvent", KYTY_GPU_BINDING_BRIDGE)
++KYTY_GPU_NID(71, "1FZBKy8HeNU", "libSceVideoOut.prx", "VideoOutGetVblankStatus", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(72, "DYhhWbJSeRg", "libSceVideoOut.prx", "VideoOutColorSettingsSetGamma", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(73, "HXzjK9yI30k", "libSceVideoOut.prx", "BridgeVideoOutAddFlipEvent", KYTY_GPU_BINDING_BRIDGE)
++KYTY_GPU_NID(74, "HuViW4HnrOw", "libSceVideoOut.prx", "VideoOutSubmitChangeBufferAttribute2", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(75, "PjS5uASwcV8", "libSceVideoOut.prx", "VideoOutSetBufferAttribute2", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(76, "Up36PTk687E", "libSceVideoOut.prx", "VideoOutOpen", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(77, "pv9CI5VC+R0", "libSceVideoOut.prx", "VideoOutAdjustColor", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(78, "rKBUtgRrtbk", "libSceVideoOut.prx", "VideoOutRegisterBuffers2", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(79, "uquVH4-Du78", "libSceVideoOut.prx", "VideoOutClose", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(80, "utPrVdxio-8", "libSceVideoOut.prx", "VideoOutGetOutputStatus", KYTY_GPU_BINDING_KYTY)
++KYTY_GPU_NID(81, "zgXifHT9ErY", "libSceVideoOut.prx", "VideoOutIsFlipPending", KYTY_GPU_BINDING_KYTY)
+diff --git a/src/hybrid/kyty_gpu.def b/src/hybrid/kyty_gpu.def
+new file mode 100644
+index 00000000..09681e62
+--- /dev/null
++++ b/src/hybrid/kyty_gpu.def
+@@ -0,0 +1,85 @@
++LIBRARY kyty_gpu
++EXPORTS
++    KytyGpuGetApi
++    "+kSrjIVxKFE"=kyty_gpu_nid_0
++    "-HOOCn0JY48"=kyty_gpu_nid_1
++    "-KRzWekV120"=kyty_gpu_nid_2
++    "-RnpfpxIhec"=kyty_gpu_nid_3
++    "0fWWK5uG9rQ"=kyty_gpu_nid_4
++    "1rZSWUv1IRc"=kyty_gpu_nid_5
++    "23LRUSvYu1M"=kyty_gpu_nid_6
++    "2JtWUUiYBXs"=kyty_gpu_nid_7
++    "3KDcnM3lrcU"=kyty_gpu_nid_8
++    "57labkp+rSQ"=kyty_gpu_nid_9
++    "6lNcCp+fxi4"=kyty_gpu_nid_10
++    "6mFxkVqdmbQ"=kyty_gpu_nid_11
++    "8N2tmT3jmC8"=kyty_gpu_nid_12
++    "Abendgtz+3o"=kyty_gpu_nid_13
++    "B+aG9DUnTKA"=kyty_gpu_nid_14
++    "BfBDZGbti7A"=kyty_gpu_nid_15
++    "CtB+A9-VxO0"=kyty_gpu_nid_16
++    "D9sr1xGUriE"=kyty_gpu_nid_17
++    "H7uZqCoNuWk"=kyty_gpu_nid_18
++    "HV4j+E0MBHE"=kyty_gpu_nid_19
++    "JrtiDtKeS38"=kyty_gpu_nid_20
++    "KT-hTp-Ch14"=kyty_gpu_nid_21
++    "LtTouSCZjHM"=kyty_gpu_nid_22
++    "MWiElSNE8j8"=kyty_gpu_nid_23
++    "Qrj4c+61z4A"=kyty_gpu_nid_24
++    "RmaJwLtc8rY"=kyty_gpu_nid_25
++    "T6xuVw0KUJo"=kyty_gpu_nid_26
++    "TRO721eVt4g"=kyty_gpu_nid_27
++    "UZbQjYAwwXM"=kyty_gpu_nid_28
++    "V++UgBtQhn0"=kyty_gpu_nid_29
++    "VmW0Tdpy420"=kyty_gpu_nid_30
++    "WmAc2MEj6Io"=kyty_gpu_nid_31
++    "YUeqkyT7mEQ"=kyty_gpu_nid_32
++    "Yw0jKSqop+E"=kyty_gpu_nid_33
++    "ZvwO9euwYzc"=kyty_gpu_nid_34
++    "aJf+j5yntiU"=kyty_gpu_nid_35
++    "bxGoVxpdSPQ"=kyty_gpu_nid_36
++    "cFazmnXpJOE"=kyty_gpu_nid_37
++    "cpCILPya5Zk"=kyty_gpu_nid_38
++    "d-6uF9sZDIU"=kyty_gpu_nid_39
++    "dolOmWH+huQ"=kyty_gpu_nid_40
++    "eZ4+17OQz4Q"=kyty_gpu_nid_41
++    "f3dg2CSgRKY"=kyty_gpu_nid_42
++    "fPSCdQxgpSw"=kyty_gpu_nid_43
++    "fd5Bp5tGTgo"=kyty_gpu_nid_44
++    "h9z6+0hEydk"=kyty_gpu_nid_45
++    "htn36gPnBk4"=kyty_gpu_nid_46
++    "hvUfkUIQcOE"=kyty_gpu_nid_47
++    "i1jyy49AjXU"=kyty_gpu_nid_48
++    "j3EtxFkSIhQ"=kyty_gpu_nid_49
++    "k3GhuSNmBLU"=kyty_gpu_nid_50
++    "l4fM9K-Lyks"=kyty_gpu_nid_51
++    "n2fD4A+pb+g"=kyty_gpu_nid_52
++    "qj7QZpgr9Uw"=kyty_gpu_nid_53
++    "qzMN2XKGA4k"=kyty_gpu_nid_54
++    "t1vNu082-jM"=kyty_gpu_nid_55
++    "t7PlZ9nt5Lc"=kyty_gpu_nid_56
++    "tSBxhAPyytQ"=kyty_gpu_nid_57
++    "u2T2DiA5hRI"=kyty_gpu_nid_58
++    "vRoArM9zaIk"=kyty_gpu_nid_59
++    "vcmNN+AAXnY"=kyty_gpu_nid_60
++    "vuSXe69VILM"=kyty_gpu_nid_61
++    "wRbq6ZjNop4"=kyty_gpu_nid_62
++    "wr23dPKyWc0"=kyty_gpu_nid_63
++    "z2duB-hHQSM"=kyty_gpu_nid_64
++    "AhGvpITrf4M"=kyty_gpu_nid_65
++    "UglJIZjGssM"=kyty_gpu_nid_66
++    "W5z4eZrjEas"=kyty_gpu_nid_67
++    "X-Nm5KLREeg"=kyty_gpu_nid_68
++    "gSRnr79F8tQ"=kyty_gpu_nid_69
++    "w2rJhmD+dsE"=kyty_gpu_nid_70
++    "1FZBKy8HeNU"=kyty_gpu_nid_71
++    "DYhhWbJSeRg"=kyty_gpu_nid_72
++    "HXzjK9yI30k"=kyty_gpu_nid_73
++    "HuViW4HnrOw"=kyty_gpu_nid_74
++    "PjS5uASwcV8"=kyty_gpu_nid_75
++    "Up36PTk687E"=kyty_gpu_nid_76
++    "pv9CI5VC+R0"=kyty_gpu_nid_77
++    "rKBUtgRrtbk"=kyty_gpu_nid_78
++    "uquVH4-Du78"=kyty_gpu_nid_79
++    "utPrVdxio-8"=kyty_gpu_nid_80
++    "zgXifHT9ErY"=kyty_gpu_nid_81
+diff --git a/tests/hybrid/kytyGpuLoadTest.c b/tests/hybrid/kytyGpuLoadTest.c
+new file mode 100644
+index 00000000..d9fab0ab
+--- /dev/null
++++ b/tests/hybrid/kytyGpuLoadTest.c
+@@ -0,0 +1,185 @@
++/* AstroHybrid milestone 1 acceptance test for kyty_gpu.dll.
++ *
++ * Built with AnyPS5's toolchain (MinGW GCC), not Kyty's, so it checks the C interface and the
++ * System V NID exports across the two compilers, the way AstroBot.exe will use them:
++ *   1. load the DLL (optionally after AnyPS5's libwinpthread-1.dll, as inside AstroBot.exe)
++ *   2. version negotiation and struct layouts of kytyGpuApi.h
++ *   3. every NID in the table is exported, and every NID export is in the table
++ *   4. init binds every export; a wrong host ABI is refused
++ *   5. System V calls through the thunks: a bridge function reaches the host callback with the
++ *      exact arguments, Kyty functions return their AGC results
++ *   6. lifecycle errors: start_graphics is not implemented yet, submit before graphics is refused
++ *
++ * Usage: kytyGpuLoadTest <kyty_gpu.dll> [<libwinpthread-1.dll to load first>]
++ * Exit code 0 when every check passes. */
++
++#include "../../src/hybrid/kytyGpuApi.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <windows.h>
++
++#define SYSV __attribute__((sysv_abi))
++
++static int g_failures = 0;
++static int g_checks   = 0;
++
++#define CHECK(condition, ...)                                                                      \
++	do {                                                                                           \
++		++g_checks;                                                                                \
++		if (!(condition)) {                                                                        \
++			++g_failures;                                                                          \
++			printf("FAIL %s:%d: ", __FILE__, __LINE__);                                            \
++			printf(__VA_ARGS__);                                                                   \
++			printf("\n");                                                                          \
++		}                                                                                          \
++	} while (0)
++
++struct HostRecord {
++	int      calls;
++	int64_t  equeue;
++	uint32_t kind;
++	int64_t  ident;
++	void*    udata;
++};
++
++static struct HostRecord g_record;
++
++static void HostLog(void* user, int level, const char* message) {
++	(void)user;
++	printf("  [dll %d] %s\n", level, message);
++}
++
++static int HostAddGpuEvent(void* user, int64_t equeue, uint32_t kind, int64_t ident, void* udata) {
++	struct HostRecord* record = (struct HostRecord*)user;
++	++record->calls;
++	record->equeue = equeue;
++	record->kind   = kind;
++	record->ident  = ident;
++	record->udata  = udata;
++	return 42;
++}
++
++typedef int (SYSV *AddEqEventFn)(int64_t equeue, int id, void* udata);
++typedef int (SYSV *RegisterOwnerFn)(uint32_t* owner, const char* name);
++typedef uint32_t (SYSV *NopGetSizeFn)(uint32_t dwords);
++typedef void (SYSV *TrinityFn)(uint8_t* result);
++
++static size_t CountExports(HMODULE module, int (*visit)(const char* name, void* context), void* context) {
++	const BYTE* base = (const BYTE*)module;
++	const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
++	const IMAGE_DATA_DIRECTORY* dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
++	const IMAGE_EXPORT_DIRECTORY* exports = (const IMAGE_EXPORT_DIRECTORY*)(base + dir->VirtualAddress);
++	const DWORD* names = (const DWORD*)(base + exports->AddressOfNames);
++	for (DWORD i = 0; i < exports->NumberOfNames; ++i) {
++		if (visit != NULL) visit((const char*)(base + names[i]), context);
++	}
++	return exports->NumberOfNames;
++}
++
++static int VisitExport(const char* name, void* context) {
++	const KytyGpuApi* api = (const KytyGpuApi*)context;
++	if (strcmp(name, "KytyGpuGetApi") == 0) return 0;
++	CHECK(api->find_nid(name) != NULL, "export %s is not in the NID table", name);
++	return 0;
++}
++
++int main(int argc, char** argv) {
++	if (argc < 2) {
++		printf("usage: %s <kyty_gpu.dll> [<libwinpthread-1.dll to load first>]\n", argv[0]);
++		return 2;
++	}
++	if (argc >= 3) {
++		HMODULE pthread = LoadLibraryA(argv[2]);
++		CHECK(pthread != NULL, "preloading %s failed (%lu)", argv[2], GetLastError());
++		printf("preloaded %s\n", argv[2]);
++	}
++	HMODULE dll = LoadLibraryA(argv[1]);
++	if (dll == NULL) {
++		printf("FAIL: LoadLibrary(%s) failed with error %lu\n", argv[1], GetLastError());
++		return 1;
++	}
++	if (argc >= 3) {
++		char loaded[MAX_PATH] = {0};
++		GetModuleFileNameA(GetModuleHandleA("libwinpthread-1.dll"), loaded, MAX_PATH);
++		printf("libwinpthread-1.dll in the process: %s\n", loaded);
++	}
++
++	KytyGpuGetApiFn get_api = (KytyGpuGetApiFn)(void*)GetProcAddress(dll, "KytyGpuGetApi");
++	CHECK(get_api != NULL, "KytyGpuGetApi is not exported");
++	if (get_api == NULL) return 1;
++	CHECK(get_api((KYTY_GPU_ABI_VERSION_MAJOR + 1u) << 16u) == NULL, "an unsupported major version was accepted");
++	const KytyGpuApi* api = get_api(KYTY_GPU_ABI_VERSION);
++	CHECK(api != NULL, "KytyGpuGetApi(%#x) returned null", KYTY_GPU_ABI_VERSION);
++	if (api == NULL) return 1;
++	CHECK(api->struct_size == sizeof(KytyGpuApi), "KytyGpuApi is %u bytes in the DLL, %zu here", api->struct_size, sizeof(KytyGpuApi));
++	CHECK(api->abi_version == KYTY_GPU_ABI_VERSION, "DLL ABI %#x, header %#x", api->abi_version, KYTY_GPU_ABI_VERSION);
++	printf("kyty_gpu %s, ABI %u.%u\n", api->build, api->abi_version >> 16u, api->abi_version & 0xffffu);
++
++	const uint32_t count = api->nid_count();
++	CHECK(count == 82, "%u NIDs in the table, expected the 82 graphics imports of AstroBot.exe", count);
++	uint32_t per_library[3] = {0, 0, 0};
++	for (uint32_t i = 0; i < count; ++i) {
++		const KytyGpuNidInfo* info = api->nid_info(i);
++		CHECK(info != NULL && info->nid != NULL, "entry %u is empty", i);
++		if (info == NULL) continue;
++		CHECK(GetProcAddress(dll, info->nid) != NULL, "%s (%s) is not exported", info->nid, info->function);
++		CHECK(info->bound == 0, "%s is bound before init", info->nid);
++		per_library[strcmp(info->library, "libSceAgc.prx") == 0 ? 0 : strcmp(info->library, "libSceAgcDriver.prx") == 0 ? 1 : 2]++;
++	}
++	CHECK(per_library[0] == 65 && per_library[1] == 6 && per_library[2] == 11, "per library %u/%u/%u, expected 65/6/11", per_library[0], per_library[1], per_library[2]);
++	CHECK(api->nid_info(count) == NULL, "nid_info past the end is not null");
++	CHECK(api->find_nid("UglJIZjGssM") != NULL && api->find_nid("notAnExport") == NULL, "find_nid");
++	CHECK(CountExports(dll, VisitExport, (void*)api) == count + 1, "the DLL exports %zu names, expected %u NIDs + KytyGpuGetApi", CountExports(dll, NULL, NULL), count);
++
++	KytyGpuHostCallbacks host;
++	memset(&host, 0, sizeof(host));
++	host.struct_size = sizeof(host);
++	host.abi_version = (KYTY_GPU_ABI_VERSION_MAJOR + 1u) << 16u;
++	host.user = &g_record;
++	host.log = HostLog;
++	host.add_gpu_event = HostAddGpuEvent;
++	CHECK(api->init(&host) == KYTY_GPU_E_VERSION, "init accepted a host of another major version");
++	host.abi_version = KYTY_GPU_ABI_VERSION;
++	host.struct_size = 8;
++	CHECK(api->init(&host) == KYTY_GPU_E_VERSION, "init accepted a truncated callback struct");
++	host.struct_size = sizeof(host);
++	const int init = api->init(&host);
++	CHECK(init == KYTY_GPU_OK, "init returned %d", init);
++	CHECK(api->init(&host) == KYTY_GPU_E_STATE, "a second init was accepted");
++	uint32_t bound = 0;
++	for (uint32_t i = 0; i < count; ++i) bound += api->nid_info(i)->bound != 0;
++	CHECK(bound == count, "%u of %u exports bound after init", bound, count);
++
++	AddEqEventFn add_eq = (AddEqEventFn)(void*)GetProcAddress(dll, "w2rJhmD+dsE");
++	int marker = 0;
++	const int added = add_eq(0x123456789abcLL, 7, &marker);
++	CHECK(added == 42 && g_record.calls == 1 && g_record.equeue == 0x123456789abcLL && g_record.kind == KYTY_GPU_EVENT_EOP_INTERRUPT && g_record.ident == 7 && g_record.udata == &marker,
++	      "sceAgcDriverAddEqEvent through the thunk: result %d, %d calls, eq %llx kind %u ident %lld udata %p",
++	      added, g_record.calls, (long long)g_record.equeue, g_record.kind, (long long)g_record.ident, g_record.udata);
++	AddEqEventFn add_flip = (AddEqEventFn)(void*)GetProcAddress(dll, "HXzjK9yI30k");
++	CHECK(add_flip(-5, 1, NULL) == 42 && g_record.calls == 2 && g_record.kind == KYTY_GPU_EVENT_FLIP && g_record.equeue == -5 && g_record.ident == 1, "sceVideoOutAddFlipEvent through the thunk");
++
++	RegisterOwnerFn register_owner = (RegisterOwnerFn)(void*)GetProcAddress(dll, "X-Nm5KLREeg");
++	uint32_t owner = 0xdeadbeefu;
++	const int registered = register_owner(&owner, "test");
++	CHECK((uint32_t)registered == 0x8A6C9018u && owner == 0xdeadbeefu, "sceAgcDriverRegisterOwner returned %#x and wrote %#x", (uint32_t)registered, owner);
++	NopGetSizeFn nop_size = (NopGetSizeFn)(void*)GetProcAddress(dll, "t7PlZ9nt5Lc");
++	const uint32_t nop_bytes = nop_size(16);
++	CHECK(nop_bytes == 64, "sceAgcCbNopGetSize(16) returned %u, expected 64 bytes as AnyPS5 and Kyty both compute", nop_bytes);
++	TrinityFn trinity = (TrinityFn)(void*)GetProcAddress(dll, "BfBDZGbti7A");
++	uint8_t trinity_mode = 0xaa;
++	trinity(&trinity_mode);
++	CHECK(trinity_mode == 0 || trinity_mode == 1, "sceAgcGetIsTrinityMode wrote %u", trinity_mode);
++	printf("sceAgcCbNopGetSize(16) = %u, sceAgcGetIsTrinityMode = %u\n", nop_bytes, trinity_mode);
++
++	KytyGpuPacket packet = {NULL, 0, 0, {0, 0, 0}};
++	CHECK(api->submit_dcb(&packet) == KYTY_GPU_E_STATE, "submit_dcb before start_graphics was accepted");
++	CHECK(api->start_graphics() == KYTY_GPU_E_NOT_IMPLEMENTED, "start_graphics did not report it is not implemented yet");
++	CHECK(api->register_memory(0x10000, 0x1000, KYTY_GPU_MEMORY_GPU_READ, NULL) == KYTY_GPU_E_NOT_IMPLEMENTED, "register_memory did not report it is not implemented yet");
++	api->shutdown();
++
++	printf("%d checks, %d failed\n", g_checks, g_failures);
++	return g_failures == 0 ? 0 : 1;
++}
+diff --git a/tools/hybrid/build_kyty_gpu.py b/tools/hybrid/build_kyty_gpu.py
+new file mode 100644
+index 00000000..afd7f505
+--- /dev/null
++++ b/tools/hybrid/build_kyty_gpu.py
+@@ -0,0 +1,97 @@
++"""Build kyty_gpu.dll from an existing kyty_emulator build without rebuilding it.
++
++Reads the kyty_emulator compile flags, object list and link libraries from <kyty build>/build.ninja,
++compiles only src/hybrid/kytyGpuBridge.cpp with those flags, and links the emulator's objects
++(minus main.cpp.obj) with it into <out>/kyty_gpu.dll using src/hybrid/kyty_gpu.def. The emulator
++build directory is only read. Runs inside the Visual Studio x64 environment (vcvars64.bat).
++
++Usage: python tools/hybrid/build_kyty_gpu.py <kyty build dir> <out dir>
++"""
++
++import pathlib
++import re
++import subprocess
++import sys
++
++ROOT = pathlib.Path(__file__).resolve().parents[2]
++VCVARS = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
++LLVM = pathlib.Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin")
++
++
++def vs_environment():
++    output = subprocess.run(f'cmd /s /c ""{VCVARS}" >nul && set"', capture_output=True, text=True, shell=True, check=True).stdout
++    env = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
++    if "INCLUDE" not in env or "LIB" not in env:
++        sys.exit("vcvars64.bat did not provide INCLUDE and LIB")
++    return env
++
++
++def ninja_block(text, header):
++    start = text.find(header)
++    if start < 0:
++        sys.exit(f"build.ninja has no '{header}'")
++    end = text.find("\n\n", start)
++    return text[start:end]
++
++
++def variables(block):
++    values = {}
++    for line in block.splitlines()[1:]:
++        match = re.match(r"\s+(\w+) = (.*)", line)
++        if match:
++            values[match.group(1)] = match.group(2)
++    return values
++
++
++def ninja_paths(text):
++    return [part.replace("$:", ":").replace("$ ", " ") for part in re.split(r"(?<!\$) ", text) if part]
++
++
++def main():
++    if len(sys.argv) != 3:
++        sys.exit(__doc__)
++    build = pathlib.Path(sys.argv[1]).resolve()
++    out = pathlib.Path(sys.argv[2]).resolve()
++    out.mkdir(parents=True, exist_ok=True)
++    ninja = (build / "build.ninja").read_text(encoding="utf-8", errors="replace")
++
++    compile_block = variables(ninja_block(ninja, "build CMakeFiles\\kyty_emulator.dir\\src\\libs\\agc.cpp.obj:"))
++    link_header = ninja_block(ninja, "build kyty_emulator.exe:")
++    link_vars = variables(link_header)
++    inputs = link_header.splitlines()[0].split(":", 1)[1].split("|")[0]
++    objects = [p for p in ninja_paths(inputs)[1:] if p.endswith(".obj") and not p.endswith("main.cpp.obj")]
++    libraries = ninja_paths(link_vars["LINK_LIBRARIES"])
++
++    env = vs_environment()
++    bridge_obj = out / "kytyGpuBridge.obj"
++    compile_cmd = [str(LLVM / "clang-cl.exe"), "/nologo", "/c"] + compile_block["DEFINES"].split() + compile_block["FLAGS"].split()
++    compile_cmd += [f"/DKYTY_GPU_BUILD_ID={compile_block.get('CONFIG', 'Release')}"]
++    for quoted, plain, system in re.findall(r'-I"([^"]+)"|-I(\S+)|-imsvc(\S+)', compile_block["INCLUDES"]):
++        if system:
++            compile_cmd.append("/imsvc" + system.replace("$:", ":"))
++        else:
++            compile_cmd.append("/I" + (quoted or plain).replace("$:", ":"))
++    compile_cmd += [f"/Fo{bridge_obj}", str(ROOT / "src/hybrid/kytyGpuBridge.cpp")]
++    print("compile:", " ".join(compile_cmd[:3]), "...", flush=True)
++    subprocess.run(compile_cmd, cwd=build, env=env, check=True)
++
++    response = out / "kyty_gpu.link.rsp"
++    lines = ["/NOLOGO", "/DLL", "/MACHINE:X64", "/INCREMENTAL:NO", "/DEBUG:FULL", "/OPT:REF", "/OPT:ICF",
++             f"/OUT:{out / 'kyty_gpu.dll'}", f"/IMPLIB:{out / 'kyty_gpu.lib'}", f"/PDB:{out / 'kyty_gpu.pdb'}",
++             f"/DEF:{ROOT / 'src/hybrid/kyty_gpu.def'}", f'"{bridge_obj}"']
++    lines += [f'"{build / o}"' for o in objects]
++    for library in libraries:
++        path = pathlib.Path(library)
++        lines.append(f'"{path if path.is_absolute() or len(path.parts) == 1 else build / path}"')
++    response.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"link: {len(objects)} emulator objects + bridge, {len(libraries)} libraries", flush=True)
++    subprocess.run([str(LLVM / "lld-link.exe"), f"@{response}"], cwd=build, env=env, check=True)
++    winpthread = ROOT / "3rdparty/winpthread/bin/libwinpthread-1.dll"
++    target = out / "libwinpthread-1.dll"
++    if winpthread.exists() and not target.exists():
++        target.write_bytes(winpthread.read_bytes())
++    print(f"built {out / 'kyty_gpu.dll'}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/hybrid/gen_kyty_gpu_exports.py b/tools/hybrid/gen_kyty_gpu_exports.py
+new file mode 100644
+index 00000000..bcb59099
+--- /dev/null
++++ b/tools/hybrid/gen_kyty_gpu_exports.py
+@@ -0,0 +1,80 @@
++"""Generate kyty_gpu.dll's NID export table for AstroHybrid.
++
++Inputs: the AnyPS5 relink registry of AstroBot.exe (every NID the game imports, with the prx it
++imports it from) and Kyty's HLE registrations (LIB_FUNC lines in src/libs). Outputs:
++  src/hybrid/kytyGpuNids.inc  KYTY_GPU_NID(index, "nid", "library", "function", binding) rows
++  src/hybrid/kyty_gpu.def     the DLL's exports: KytyGpuGetApi and one thunk per NID
++
++Usage: python tools/hybrid/gen_kyty_gpu_exports.py <AstroBot.registry.json>
++"""
++
++import collections
++import json
++import pathlib
++import re
++import sys
++
++ROOT = pathlib.Path(__file__).resolve().parents[2]
++LIBRARIES = ("libSceAgc.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx")
++KYTY_SOURCES = ("src/libs/libAgcDriver.cpp", "src/libs/libVideoOut.cpp")
++
++# Argument layouts compared with AnyPS5's declarations (Submit/include/Dcb.hpp, Acb.hpp,
++# Resource/src/Registration.cpp): same Packet struct, same return values.
++VERIFIED = {
++    "UglJIZjGssM",  # sceAgcDriverSubmitDcb(const Packet*)
++    "AhGvpITrf4M",  # sceAgcDriverAgrSubmitDcb(const Packet*)
++    "gSRnr79F8tQ",  # sceAgcDriverSubmitAcb(uint32_t queue, const Packet*)
++    "X-Nm5KLREeg",  # sceAgcDriverRegisterOwner: both return 0x8A6C9018 and write nothing
++    "W5z4eZrjEas",  # sceAgcDriverRegisterResource: same
++}
++# Take an event queue handle from AnyPS5's libkernel: implemented by the bridge.
++BRIDGE = {
++    "w2rJhmD+dsE": "BridgeAgcDriverAddEqEvent",
++    "HXzjK9yI30k": "BridgeVideoOutAddFlipEvent",
++}
++
++
++def kyty_functions():
++    found = {}
++    for source in KYTY_SOURCES:
++        for line in (ROOT / source).read_text(encoding="utf-8", errors="replace").splitlines():
++            match = re.search(r'LIB_FUNC\("([^"]+)",\s*([\w:]+)\)', line)
++            if match:
++                found.setdefault(match.group(1), match.group(2).split("::")[-1])
++    return found
++
++
++def main():
++    if len(sys.argv) != 2:
++        sys.exit(__doc__)
++    registry = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
++    imported = collections.defaultdict(set)
++    for entry in registry:
++        if entry["library"] in LIBRARIES:
++            imported[entry["library"]].add(entry["nid"].split("#")[0])
++    kyty = kyty_functions()
++    rows = []
++    for library in LIBRARIES:
++        for nid in sorted(imported[library]):
++            if nid in BRIDGE:
++                rows.append((nid, library, BRIDGE[nid], "KYTY_GPU_BINDING_BRIDGE"))
++            elif nid in kyty:
++                binding = "KYTY_GPU_BINDING_KYTY_VERIFIED" if nid in VERIFIED else "KYTY_GPU_BINDING_KYTY"
++                rows.append((nid, library, kyty[nid], binding))
++            else:
++                sys.exit(f"{library} {nid}: imported by the game, but Kyty has no implementation")
++    for nid in rows:
++        if re.fullmatch(r"[A-Za-z0-9+\-]{11}", nid[0]) is None:
++            sys.exit(f"{nid[0]}: not an 11-character NID")
++    inc = ["// Generated by tools/hybrid/gen_kyty_gpu_exports.py from AstroBot.registry.json. Do not edit."]
++    inc += [f'KYTY_GPU_NID({i}, "{nid}", "{library}", "{function}", {binding})' for i, (nid, library, function, binding) in enumerate(rows)]
++    (ROOT / "src/hybrid/kytyGpuNids.inc").write_text("\n".join(inc) + "\n", encoding="utf-8")
++    exports = ["LIBRARY kyty_gpu", "EXPORTS", "    KytyGpuGetApi"]
++    exports += [f'    "{nid}"=kyty_gpu_nid_{i}' for i, (nid, *_rest) in enumerate(rows)]
++    (ROOT / "src/hybrid/kyty_gpu.def").write_text("\n".join(exports) + "\n", encoding="ascii")
++    counts = collections.Counter(binding for *_rest, binding in rows)
++    print(f"{len(rows)} NIDs: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.55.0.windows.5
+

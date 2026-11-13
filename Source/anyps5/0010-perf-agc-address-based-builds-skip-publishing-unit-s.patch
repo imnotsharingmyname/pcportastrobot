@@ -1,0 +1,50 @@
+From 2da75848ba195261ffce94883bbce46777fdf55d Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 29 Oct 2026 22:46:53 +0000
+Subject: [PATCH 10/26] perf(agc): address-based builds skip publishing unit
+ shadows over their heaps
+
+APS5_BDA_NO_SHADOW_PUBLISH=1: UploadFinish no longer publishes the unit shadows over the whole
+registered heaps an address-based build maps. Those slabs hold storage-image results, and such
+shaders do not read texture memory through pointers, the same rule that already exempts the heaps
+from pending-image stores; every other consumer still publishes through FlushPending.
+
+Astro Bot world map: published 3.95 -> 0.61 GiB per 10 s (the address reason, ~27 MiB per particle
+build, disappears), shadow-publish 5.1 -> 0 ms and GPU busy 60 -> 56 ms per frame, presents
+122 -> 128-130 per 10 s; screenshots correct.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp     | 3 ++-
+ docs/dev/ENVIRONMENT.md                                        | 1 +
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+index 4be4adb24b..7b1f60a12b 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+@@ -5632,7 +5632,8 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
+         copyRegion(region, addressable);
+         if (profile) copyUs += microsecondsSince(copyStart);
+     }
+-    if (heapsEnd > heapsBegin) StorageTexture::PublishShadowsOnly(heapsBegin, static_cast<std::size_t>(heapsEnd - heapsBegin), PublishScope::Whole, "address-based heaps");
++    static const bool heapPublish = std::getenv("APS5_BDA_NO_SHADOW_PUBLISH") == nullptr;
++    if (heapPublish && heapsEnd > heapsBegin) StorageTexture::PublishShadowsOnly(heapsBegin, static_cast<std::size_t>(heapsEnd - heapsBegin), PublishScope::Whole, "address-based heaps");
+     if (!gpuCopies.empty()) recordGpuCopies(gpuCopies, addressable);
+     takeHeapReferences();
+     ResidentBuffer::FlushChanged(context);
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index 784b1f6f96..978953b3eb 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -97,6 +97,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_BARRIER_VALIDATE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | counts the barriers a hazard-tracking validator would emit and skip, by class and hazard kind |
+ | `APS5_BATCH_CAP` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Synchronization/DeferredLabels.cpp` | 64 | recorded work since the last submit at which a label batch, flush or reap is forced (0 disables the cap) |
+ | `APS5_BDA_FLUSH` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | also flushes pending storage results over address-based shader regions, which are otherwise exempt |
++| `APS5_BDA_NO_SHADOW_PUBLISH` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | an address-based build no longer publishes the unit shadows over the whole registered heaps it maps (they hold storage-image results, which such shaders do not read through pointers, the rule that already exempts those heaps from pending-image stores) |
+ | `APS5_BDA_STAGING_MIN_THREADS` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 512 | smallest dispatch, in threads, whose address-based build stages its written elements device-local; an indirect dispatch always does |
+ | `APS5_BDA_TABLE_CACHE_ENTRIES` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/BdaResources.cpp` | 8 | number of recently used BDA page tables kept in the cache, clamped to 1..64 (1 is the previous behaviour) |
+ | `APS5_BLOCK_WRITEBACK_EACH` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | stores the touched units only on every write-back instead of widening repeated partial stores |
+-- 
+2.55.0.windows.5
+

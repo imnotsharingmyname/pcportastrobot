@@ -1,0 +1,137 @@
+From 8b676a3eaf2c4c30dcfcccdf1a0a3f8e11bdc553 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 22:39:47 +0000
+Subject: [PATCH 09/35] chore(hybrid): snapshot Claude milestone 4 build work
+
+---
+ src/hybrid/kytyGpuBridge.cpp   | 31 +++++++++++++++++++++++++++++--
+ tools/hybrid/build_kyty_gpu.py | 21 ++++++++++++++++-----
+ 2 files changed, 45 insertions(+), 7 deletions(-)
+
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 5d8208f6..e55a6dcd 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -99,7 +99,7 @@ void Log(int level, const char* format, ...) {
+ extern "C" {
+ 
+ // One slot per export; the thunks read them with a RIP-relative indirect jump.
+-void* g_kyty_gpu_slots[g_row_count];
++__attribute__((used)) void* g_kyty_gpu_slots[g_row_count];
+ 
+ [[noreturn]] void KytyGpuUnboundNid(uint32_t index) {
+ 	const char* nid      = index < g_row_count ? g_rows[index].nid : "?";
+@@ -437,6 +437,30 @@ uint32_t EnvironmentSize(const char* name, uint32_t fallback) {
+ 	return value > 0 && value <= 7680 ? static_cast<uint32_t>(value) : fallback;
+ }
+ 
++// kyty_emulator takes these from its command line; the AstroHybrid launcher's choice matches the
++// Kyty launcher's (Immediate presentation, Performance shader optimization, 60 Hz vblank).
++Config::PresentMode PresentModeFromEnvironment() {
++	const char* text = std::getenv("KYTY_GPU_PRESENT_MODE");
++	if (text != nullptr && std::strcmp(text, "Fifo") == 0) {
++		return Config::PresentMode::Fifo;
++	}
++	if (text != nullptr && std::strcmp(text, "Mailbox") == 0) {
++		return Config::PresentMode::Mailbox;
++	}
++	return Config::PresentMode::Immediate;
++}
++
++Config::ShaderOptimizationType ShaderOptimizationFromEnvironment() {
++	const char* text = std::getenv("KYTY_GPU_SHADER_OPTIMIZATION");
++	if (text != nullptr && std::strcmp(text, "None") == 0) {
++		return Config::ShaderOptimizationType::None;
++	}
++	if (text != nullptr && std::strcmp(text, "Size") == 0) {
++		return Config::ShaderOptimizationType::Size;
++	}
++	return Config::ShaderOptimizationType::Performance;
++}
++
+ void RendererThread() {
+ 	Common::InitializeThreads();
+ 	{
+@@ -444,6 +468,9 @@ void RendererThread() {
+ 		Config::ConfigOptions options {};
+ 		options.screen_width  = EnvironmentSize("KYTY_GPU_WIDTH", options.screen_width);
+ 		options.screen_height = EnvironmentSize("KYTY_GPU_HEIGHT", options.screen_height);
++		options.present_mode  = PresentModeFromEnvironment();
++		options.shader_optimization_type = ShaderOptimizationFromEnvironment();
++		options.vblank_frequency         = EnvironmentSize("KYTY_GPU_VBLANK_HZ", 60);
+ 		subsystems.Initialize<Config::Lifecycle>();
+ 		Config::Load(options);
+ 		subsystems.Initialize<Log::Lifecycle>();
+@@ -641,7 +668,7 @@ const KytyGpuApi g_api = {
+ 
+ // Game code reached an export no host has bound yet: AstroBot.exe loads the shims and calls
+ // straight in. Find the host module, bind the exports and start the renderer, once.
+-extern "C" void* KytyGpuLazyResolve(uint32_t index) {
++extern "C" __attribute__((used)) void* KytyGpuLazyResolve(uint32_t index) {
+ 	if (index >= g_row_count) {
+ 		KytyGpuUnboundNid(index);
+ 	}
+diff --git a/tools/hybrid/build_kyty_gpu.py b/tools/hybrid/build_kyty_gpu.py
+index 1b032f91..3cfed8b9 100644
+--- a/tools/hybrid/build_kyty_gpu.py
++++ b/tools/hybrid/build_kyty_gpu.py
+@@ -18,7 +18,14 @@ VCVARS = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Aux
+ # Kyty core sources the hybrid branch changes: compiled here with kyty_emulator's flags, their
+ # objects replace the emulator's in the link (the emulator build directory stays as it is).
+ HYBRID_SOURCES = ("src/kernel/memory.cpp",)
+-LLVM = pathlib.Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin")
++LLVM_DEFAULT = pathlib.Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin")
++
++
++def cache_value(build, name):
++    for line in (build / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace").splitlines():
++        if line.startswith(name + ":"):
++            return line.split("=", 1)[1]
++    return None
+ 
+ 
+ def vs_environment():
+@@ -65,9 +72,13 @@ def main():
+     objects = [p for p in ninja_paths(inputs)[1:] if p.endswith(".obj") and not p.endswith("main.cpp.obj")]
+     libraries = ninja_paths(link_vars["LINK_LIBRARIES"])
+ 
++    compiler = cache_value(build, "CMAKE_CXX_COMPILER")
++    llvm = pathlib.Path(compiler).parent if compiler else LLVM_DEFAULT
++    source_root = pathlib.Path(cache_value(build, "CMAKE_HOME_DIRECTORY") or ROOT)
++    print(f"toolchain {llvm}, sources {source_root}", flush=True)
+     env = vs_environment()
+     bridge_obj = out / "kytyGpuBridge.obj"
+-    compile_cmd = [str(LLVM / "clang-cl.exe"), "/nologo", "/c"] + compile_block["DEFINES"].split() + compile_block["FLAGS"].split()
++    compile_cmd = [str(llvm / "clang-cl.exe"), "/nologo", "/c"] + compile_block["DEFINES"].split() + compile_block["FLAGS"].split()
+     compile_cmd += [f"/DKYTY_GPU_BUILD_ID={compile_block.get('CONFIG', 'Release')}"]
+     for quoted, plain, system in re.findall(r'-I"([^"]+)"|-I(\S+)|-imsvc(\S+)', compile_block["INCLUDES"]):
+         if system:
+@@ -75,14 +86,14 @@ def main():
+         else:
+             compile_cmd.append("/I" + (quoted or plain).replace("$:", ":"))
+     print("compile: src/hybrid/kytyGpuBridge.cpp", flush=True)
+-    subprocess.run(compile_cmd + [f"/Fo{bridge_obj}", str(ROOT / "src/hybrid/kytyGpuBridge.cpp")], cwd=build, env=env, check=True)
++    subprocess.run(compile_cmd + [f"/Fo{bridge_obj}", str(source_root / "src/hybrid/kytyGpuBridge.cpp")], cwd=build, env=env, check=True)
+     for source in HYBRID_SOURCES:
+         replaced = "CMakeFiles\\kyty_emulator.dir\\" + source.replace("/", "\\") + ".obj"
+         if replaced not in objects:
+             sys.exit(f"{source}: no kyty_emulator object to replace")
+         own = out / (pathlib.Path(source).name + ".hybrid.obj")
+         print(f"compile: {source} (hybrid change, replaces {replaced})", flush=True)
+-        subprocess.run(compile_cmd + [f"/Fo{own}", str(ROOT / source)], cwd=build, env=env, check=True)
++        subprocess.run(compile_cmd + [f"/Fo{own}", str(source_root / source)], cwd=build, env=env, check=True)
+         objects[objects.index(replaced)] = str(own)
+ 
+     response = out / "kyty_gpu.link.rsp"
+@@ -95,7 +106,7 @@ def main():
+         lines.append(f'"{path if path.is_absolute() or len(path.parts) == 1 else build / path}"')
+     response.write_text("\n".join(lines) + "\n", encoding="utf-8")
+     print(f"link: {len(objects)} emulator objects + bridge, {len(libraries)} libraries", flush=True)
+-    subprocess.run([str(LLVM / "lld-link.exe"), f"@{response}"], cwd=build, env=env, check=True)
++    subprocess.run([str(llvm / "lld-link.exe"), f"@{response}"], cwd=build, env=env, check=True)
+     winpthread = ROOT / "3rdparty/winpthread/bin/libwinpthread-1.dll"
+     target = out / "libwinpthread-1.dll"
+     if winpthread.exists() and not target.exists():
+-- 
+2.55.0.windows.5
+

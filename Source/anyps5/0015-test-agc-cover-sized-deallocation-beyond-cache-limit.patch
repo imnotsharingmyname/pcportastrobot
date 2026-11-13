@@ -1,0 +1,25 @@
+From 3a298ddb078776ab673e3c433e9e005d404e8630 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 30 Oct 2026 03:43:55 +0000
+Subject: [PATCH 15/26] test(agc): cover sized deallocation beyond cache limits
+
+---
+ core/libs/prx/libSceAgcDriver/tests/HostAllocator.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/tests/HostAllocator.cpp b/core/libs/prx/libSceAgcDriver/tests/HostAllocator.cpp
+index 43c38ce262..9768efe16f 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/HostAllocator.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/HostAllocator.cpp
+@@ -61,7 +61,7 @@ void SizedDeletesKeepTheirClass() {
+             ::operator delete(block, size);
+         }
+     }
+-    for (std::size_t size = 1; size <= 1024; ++size) {
++    for (std::size_t size = 1; size <= 4096; ++size) {
+         auto* block = static_cast<unsigned char*>(::operator new(size));
+         FillAndVerify(block, size, 3);
+         ::operator delete(block, size);
+-- 
+2.55.0.windows.5
+

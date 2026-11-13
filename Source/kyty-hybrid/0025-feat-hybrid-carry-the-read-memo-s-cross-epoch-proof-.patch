@@ -1,0 +1,123 @@
+From 00409cbd4f5666d1da718fbbc8e779e091588e5e Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 12 Nov 2026 19:56:22 +0000
+Subject: [PATCH 25/35] feat(hybrid): carry the read memo's cross-epoch proof
+ by its signature
+
+With ASTROHYBRID_COMMIT_EPOCH_FASTPATH, a cached read memo whose locked
+cross-epoch check passed is marked clean; later epochs accept it while
+the range signature is unchanged instead of taking the region locks
+again. verify runs the locked query for every such acceptance.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../host_gpu/renderer/cache/bufferCache.cpp   | 51 ++++++++++++++++---
+ .../host_gpu/renderer/cache/bufferCache.h     | 10 ++++
+ 2 files changed, 55 insertions(+), 6 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+index ccec8ed9..13dabc7b 100644
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -3891,14 +3891,19 @@ void BufferCache::PrintWrittenEpochSummary() {
+ 	}
+ 	const double lookups = static_cast<double>(std::max<uint64_t>(1, totals.lookups));
+ 	std::printf("CommitEpochFast 10s: written bindings %llu, accepted %llu (%.1f%%), records %llu | "
+-	            "verify %llu checks, %llu mismatches, %llu races\n",
++	            "verify %llu checks, %llu mismatches, %llu races | read cross-epoch from clean memo "
++	            "%llu, verify %llu checks, %llu mismatches, %llu races\n",
+ 	            static_cast<unsigned long long>(totals.lookups),
+ 	            static_cast<unsigned long long>(totals.hits),
+ 	            100.0 * static_cast<double>(totals.hits) / lookups,
+ 	            static_cast<unsigned long long>(totals.records),
+ 	            static_cast<unsigned long long>(totals.verify_checks),
+ 	            static_cast<unsigned long long>(totals.verify_mismatches),
+-	            static_cast<unsigned long long>(totals.verify_races));
++	            static_cast<unsigned long long>(totals.verify_races),
++	            static_cast<unsigned long long>(totals.read_fast),
++	            static_cast<unsigned long long>(totals.read_verify_checks),
++	            static_cast<unsigned long long>(totals.read_verify_mismatches),
++	            static_cast<unsigned long long>(totals.read_verify_races));
+ 	std::fflush(stdout);
+ 	totals            = {};
+ 	totals.printed_ns = now;
+@@ -4059,10 +4064,44 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBindingMemo(uint64_t vaddr,
+ 			// changed its bits yet.
+ 			MemoryTracker::DirtyState relaxed;
+ 			bool                     cpu_only = false;
+-			cross = !stream && m_binding_memo_cross &&
+-			        QueryUploadSnapshot(m_memory_tracker, vaddr, size, relaxed, cpu_only) &&
+-			        !relaxed.cpu && !m_memory_tracker.IsRegionCpuModified(vaddr, size) &&
+-			        m_memory_tracker.RangeSignature(vaddr, size) == before;
++			// ASTROHYBRID_COMMIT_EPOCH_FASTPATH (BindingMemo::clean): the signature equals
++			// memo.signature (checked above), under which the locked query below once passed.
++			const bool fast = !stream && m_binding_memo_cross && memo.clean &&
++			                  m_written_epoch_mode != 0;
++			if (fast && m_written_epoch_mode == 1) {
++				cross = true;
++				m_written_epoch_totals.read_fast++;
++			} else {
++				cross = !stream && m_binding_memo_cross &&
++				        QueryUploadSnapshot(m_memory_tracker, vaddr, size, relaxed, cpu_only) &&
++				        !relaxed.cpu && !m_memory_tracker.IsRegionCpuModified(vaddr, size) &&
++				        m_memory_tracker.RangeSignature(vaddr, size) == before;
++				if (fast) {
++					auto& totals = m_written_epoch_totals;
++					totals.read_fast++;
++					totals.read_verify_checks++;
++					if (!cross) {
++						if (m_memory_tracker.RangeSignature(vaddr, size) != before) {
++							totals.read_verify_races++;
++						} else {
++							totals.read_verify_mismatches++;
++							static std::atomic<uint32_t> logged {0};
++							if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
++								std::printf("CommitEpochFastVerify: a clean read memo has CPU-dirty "
++								            "pages: addr=0x%016" PRIx64 " size=0x%" PRIx64 "\n",
++								            vaddr, size);
++								std::fflush(stdout);
++							}
++							if (m_written_epoch_mode == 3) {
++								EXIT("CommitEpochFastVerify: a clean read memo has CPU-dirty pages\n");
++							}
++						}
++					}
++				}
++				if (cross && m_written_epoch_mode != 0) {
++					memo.clean = true;
++				}
++			}
+ 			if (!cross) {
+ 				if (stats != nullptr) {
+ 					stats->epoch++;
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.h b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+index 1ce38202..6c2192a7 100644
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.h
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+@@ -498,6 +498,12 @@ private:
+ 		uint64_t        vaddr     = 0;
+ 		uint32_t        size      = 0;
+ 		BindingMemoKind kind      = BindingMemoKind::Empty;
++		// ASTROHYBRID_COMMIT_EPOCH_FASTPATH: a cached memo recorded while no page of the range
++		// was CPU-dirty or hot, with `signature` read before and after that check. While the
++		// signature still holds no page has turned CPU-dirty since (every such transition advances
++		// a region serial first), which is what the cross-epoch locked query establishes, so a
++		// cross-epoch hit is accepted from the signature alone. verify runs the locked query too.
++		bool            clean     = false;
+ 		uint64_t        epoch     = 0;
+ 		uint64_t        signature = 0;
+ 		uint64_t        guard     = 0; // stream: tick; cached: buffer structure epoch
+@@ -860,6 +866,10 @@ private:
+ 		uint64_t verify_checks     = 0;
+ 		uint64_t verify_mismatches = 0;
+ 		uint64_t verify_races      = 0;
++		uint64_t read_fast              = 0; // cross-epoch read hits taken from BindingMemo::clean
++		uint64_t read_verify_checks     = 0;
++		uint64_t read_verify_mismatches = 0;
++		uint64_t read_verify_races      = 0;
+ 		int64_t  printed_ns        = 0;
+ 	};
+ 	std::unique_ptr<WrittenEpochMemo[]> m_written_epoch;
+-- 
+2.55.0.windows.5
+

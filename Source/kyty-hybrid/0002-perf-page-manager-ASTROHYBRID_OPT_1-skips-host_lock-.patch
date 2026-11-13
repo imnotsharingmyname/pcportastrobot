@@ -1,0 +1,155 @@
+From 3b269db5fe81c14ced764e8ae8435c4a68704ab0 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 18:09:39 +0000
+Subject: [PATCH 02/35] perf(page manager): ASTROHYBRID_OPT_1 skips host_lock
+ for settled deferred spans
+
+ApplySpan took the region host_lock before checking whether any page
+needed a host call, so a write fault whose pages another thread had
+already unprotected queued behind every in-flight VirtualProtect of the
+4 MiB region (~147 us of ~180 us per fault on a Ryzen 5 5500, at 0.57
+host calls per fault). Check under the counts lock first: no pending
+page and recorded protection equal to the counts means the host already
+matches, so return without host_lock. Off by default; verify mode keeps
+the original path. The texture memo default moves to ASTROHYBRID_OPT_2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/astroHybrid.h                      | 34 +++++++++++++++++++
+ src/graphics/host_gpu/pageManager.cpp         | 31 +++++++++++++++++
+ .../renderer/pipeline/textureBindingMemo.cpp  | 16 ++-------
+ 3 files changed, 68 insertions(+), 13 deletions(-)
+ create mode 100644 src/common/astroHybrid.h
+
+diff --git a/src/common/astroHybrid.h b/src/common/astroHybrid.h
+new file mode 100644
+index 00000000..b2b4815e
+--- /dev/null
++++ b/src/common/astroHybrid.h
+@@ -0,0 +1,34 @@
++#ifndef EMULATOR_SRC_COMMON_ASTROHYBRID_H_
++#define EMULATOR_SRC_COMMON_ASTROHYBRID_H_
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++// AstroHybrid experimental switches (startup, each default 0 = the original Kyty behaviour).
++//   ASTROHYBRID_OPT_1=1  PageManager::ApplySpan skips the region host_lock when the span is already
++//                        settled (pageManager.cpp).
++//   ASTROHYBRID_OPT_2=1  TextureBindingMemo defaults to 32768 entries (textureBindingMemo.cpp).
++namespace AstroHybrid {
++
++[[nodiscard]] inline bool ReadSwitch(const char* name, const char* what) {
++	const auto* value = std::getenv(name);
++	const bool  on    = value != nullptr && std::strcmp(value, "1") == 0;
++	std::printf("AstroHybrid: %s=%d (%s)\n", name, on ? 1 : 0, what);
++	std::fflush(stdout);
++	return on;
++}
++
++[[nodiscard]] inline bool Opt1() {
++	static const bool on = ReadSwitch("ASTROHYBRID_OPT_1", "deferred unprotect skips host_lock when settled");
++	return on;
++}
++
++[[nodiscard]] inline bool Opt2() {
++	static const bool on = ReadSwitch("ASTROHYBRID_OPT_2", "texture binding memo default 32768 entries");
++	return on;
++}
++
++} // namespace AstroHybrid
++
++#endif // EMULATOR_SRC_COMMON_ASTROHYBRID_H_
+diff --git a/src/graphics/host_gpu/pageManager.cpp b/src/graphics/host_gpu/pageManager.cpp
+index 2dc23aba..f43c4c91 100644
+--- a/src/graphics/host_gpu/pageManager.cpp
++++ b/src/graphics/host_gpu/pageManager.cpp
+@@ -1,6 +1,7 @@
+ #include "graphics/host_gpu/pageManager.h"
+ 
+ #include "common/alignment.h"
++#include "common/astroHybrid.h"
+ #include "common/liveSwitch.h"
+ #include "common/profiler.h"
+ #include "common/virtualMemory.h"
+@@ -639,7 +640,37 @@ struct PageManager::Impl {
+ 	// Brings the host protection of pages [first, last) to what their counts ask, calling the
+ 	// host only for the runs whose recorded protection differs (a run may bridge pages already at
+ 	// its level). Takes both locks itself. Returns the host calls made.
++	// ASTROHYBRID_OPT_1: is [first, last) already settled? Under `lock` only (never held across a host
++	// call): no page pending and every page's recorded protection is what its counts ask. `applied`
++	// is written only after the host call it records has returned (ProtectRun, ProtectRuns), so a
++	// settled span is on the host as recorded and ApplySpan would make no call; any racing change of
++	// the counts is applied by the thread making it, which holds host_lock and reads them afterwards.
++	// Lets a write fault whose pages another thread's fault already made writable return without
++	// queueing behind every in-flight VirtualProtect of the 4 MiB region (Sky Garden on a Ryzen 5 5500:
++	// ~147 us of a fault's ~180 us was that wait, at 0.57 host calls per fault).
++	bool SpanSettled(Region& region, size_t first, size_t last) noexcept {
++		SpinGuard counts(region.lock);
++		if (region.pending_count != 0) {
++			return false;
++		}
++		for (size_t page = first; page < last; page++) {
++			if (ToLevel(region.pages[page].Perms()) != region.applied[page]) {
++				return false;
++			}
++		}
++		return true;
++	}
++
+ 	uint32_t ApplySpan(Region& region, uint64_t base_addr, size_t first, size_t last) noexcept {
++		if (AstroHybrid::Opt1() && GetDeferMode() != DeferMode::Verify && SpanSettled(region, first, last)) {
++			static std::atomic<uint64_t> skipped {0};
++			const auto                   count = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
++			if ((count & 0xfffu) == 0) {
++				std::printf("AstroHybrid OPT_1: %" PRIu64 " settled spans skipped host_lock\n", count);
++				std::fflush(stdout);
++			}
++			return 0;
++		}
+ 		SpinGuard host(region.host_lock, FaultCost::Split::HostLock);
+ 		RunList   runs;
+ 		uint32_t  calls = 0;
+diff --git a/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp b/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
+index 34e04b54..06e738e9 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
+@@ -1,5 +1,6 @@
+ #include "graphics/host_gpu/renderer/pipeline/textureBindingMemo.h"
+ 
++#include "common/astroHybrid.h"
+ #include "common/assert.h"
+ #include "common/onceValue.h"
+ #include "common/profiler.h"
+@@ -112,25 +113,14 @@ void TextureBindingMemo::ReportRevalidateMismatch() {
+ 	}
+ }
+ 
+-// ASTROHYBRID_OPT_1=1 (startup, default 0): the memo defaults to 32768 entries (~31 MiB host RAM,
++// ASTROHYBRID_OPT_2=1 (startup, default 0): the memo defaults to 32768 entries (~31 MiB host RAM,
+ // no VRAM) instead of 4096. Sky Garden binds more distinct textures per frame than 4096 entries
+ // hold, so run-start draws (~24% of draws, ~18 us each against ~5 us for a continuation) resolve
+ // their ~11 textures from scratch every frame. An explicit KYTY_TEXTURE_MEMO_SLOTS still wins.
+ // =0 or unset: the original default (4096).
+-static bool AstroHybridOpt1() {
+-	static const bool enabled = [] {
+-		const auto* value = std::getenv("ASTROHYBRID_OPT_1");
+-		const bool  on    = value != nullptr && std::strcmp(value, "1") == 0;
+-		std::printf("AstroHybrid: ASTROHYBRID_OPT_1=%d (texture binding memo default %u entries)\n", on ? 1 : 0,
+-		            on ? 32768u : 4096u);
+-		return on;
+-	}();
+-	return enabled;
+-}
+-
+ uint32_t TextureBindingMemo::SlotCount() {
+ 	static const uint32_t slots = [] {
+-		const uint32_t fallback = AstroHybridOpt1() ? 32768u : 4096u;
++		const uint32_t fallback = AstroHybrid::Opt2() ? 32768u : 4096u;
+ 		const auto*    value    = std::getenv("KYTY_TEXTURE_MEMO_SLOTS");
+ 		const auto     count = value != nullptr && value[0] != '\0' ? std::strtoul(value, nullptr, 10) : 0ul;
+ 		return count >= 64 && count <= (1ul << 22u) ? static_cast<uint32_t>(count) : fallback;
+-- 
+2.55.0.windows.5
+

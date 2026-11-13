@@ -1,0 +1,42 @@
+From ee2229e5ee347c0628f74f1a173a03917497ca41 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 22:11:28 +0000
+Subject: [PATCH 08/35] test(hybrid): refresh GPU loader expectations
+
+---
+ tests/hybrid/kytyGpuLoadTest.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/tests/hybrid/kytyGpuLoadTest.c b/tests/hybrid/kytyGpuLoadTest.c
+index 45baf0d9..b508ffb6 100644
+--- a/tests/hybrid/kytyGpuLoadTest.c
++++ b/tests/hybrid/kytyGpuLoadTest.c
+@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
+ 	}
+ 
+ 	const uint32_t count = api->nid_count();
+-	CHECK(count == 97, "%u NIDs in the table, expected 97 (82 graphics imports of AstroBot.exe, 2 imported by AnyPS5 modules, 13 libkernel direct-memory)", count);
++	CHECK(count == 101, "%u NIDs in the table, expected 101 (82 graphics imports of AstroBot.exe, 2 imported by AnyPS5 modules, 17 libkernel memory exports)", count);
+ 	uint32_t per_library[4] = {0, 0, 0, 0};
+ 	for (uint32_t i = 0; i < count; ++i) {
+ 		const KytyGpuNidInfo* info = api->nid_info(i);
+@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
+ 		CHECK(info->bound == 0, "%s is bound before init", info->nid);
+ 		per_library[strcmp(info->library, "libSceAgc.prx") == 0 ? 0 : strcmp(info->library, "libSceAgcDriver.prx") == 0 ? 1 : strcmp(info->library, "libSceVideoOut.prx") == 0 ? 2 : 3]++;
+ 	}
+-	CHECK(per_library[0] == 66 && per_library[1] == 7 && per_library[2] == 11 && per_library[3] == 13, "per library %u/%u/%u/%u, expected 66/7/11/13", per_library[0], per_library[1], per_library[2], per_library[3]);
++	CHECK(per_library[0] == 66 && per_library[1] == 7 && per_library[2] == 11 && per_library[3] == 17, "per library %u/%u/%u/%u, expected 66/7/11/17", per_library[0], per_library[1], per_library[2], per_library[3]);
+ 	CHECK(api->nid_info(count) == NULL, "nid_info past the end is not null");
+ 	CHECK(api->find_nid("UglJIZjGssM") != NULL && api->find_nid("notAnExport") == NULL, "find_nid");
+ 	CHECK(CountExports(dll, VisitExport, (void*)api) == count + 1, "the DLL exports %zu names, expected %u NIDs + KytyGpuGetApi", CountExports(dll, NULL, NULL), count);
+@@ -198,6 +198,7 @@ int main(int argc, char** argv) {
+ 	host.struct_size = sizeof(host);
+ 	const int init = api->init(&host);
+ 	CHECK(init == KYTY_GPU_OK, "init returned %d", init);
++	if (init != KYTY_GPU_OK) return 1;
+ 	CHECK(api->init(&host) == KYTY_GPU_E_STATE, "a second init was accepted");
+ 	uint32_t bound = 0;
+ 	for (uint32_t i = 0; i < count; ++i) bound += api->nid_info(i)->bound != 0;
+-- 
+2.55.0.windows.5
+

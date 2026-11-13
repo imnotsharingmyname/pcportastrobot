@@ -1,0 +1,55 @@
+From 63cfc4fb921a732aa8dd5c635994f0f7401c8cb0 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 17:56:34 +0000
+Subject: [PATCH 01/35] perf(texture memo): ASTROHYBRID_OPT_1 raises the
+ binding memo default to 32768 entries
+
+Sky Garden binds more distinct textures per frame than 4096 memo entries
+hold, so run-start draws re-resolve their textures every frame. With
+ASTROHYBRID_OPT_1=1 the default is 32768 (~31 MiB host RAM, no VRAM);
+KYTY_TEXTURE_MEMO_SLOTS still overrides. Default off: original behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../renderer/pipeline/textureBindingMemo.cpp  | 23 ++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp b/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
+index 6058eb7a..34e04b54 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
+@@ -112,11 +112,28 @@ void TextureBindingMemo::ReportRevalidateMismatch() {
+ 	}
+ }
+ 
++// ASTROHYBRID_OPT_1=1 (startup, default 0): the memo defaults to 32768 entries (~31 MiB host RAM,
++// no VRAM) instead of 4096. Sky Garden binds more distinct textures per frame than 4096 entries
++// hold, so run-start draws (~24% of draws, ~18 us each against ~5 us for a continuation) resolve
++// their ~11 textures from scratch every frame. An explicit KYTY_TEXTURE_MEMO_SLOTS still wins.
++// =0 or unset: the original default (4096).
++static bool AstroHybridOpt1() {
++	static const bool enabled = [] {
++		const auto* value = std::getenv("ASTROHYBRID_OPT_1");
++		const bool  on    = value != nullptr && std::strcmp(value, "1") == 0;
++		std::printf("AstroHybrid: ASTROHYBRID_OPT_1=%d (texture binding memo default %u entries)\n", on ? 1 : 0,
++		            on ? 32768u : 4096u);
++		return on;
++	}();
++	return enabled;
++}
++
+ uint32_t TextureBindingMemo::SlotCount() {
+ 	static const uint32_t slots = [] {
+-		const auto* value = std::getenv("KYTY_TEXTURE_MEMO_SLOTS");
+-		const auto  count = value != nullptr && value[0] != '\0' ? std::strtoul(value, nullptr, 10) : 0ul;
+-		return count >= 64 && count <= (1ul << 22u) ? static_cast<uint32_t>(count) : 4096u;
++		const uint32_t fallback = AstroHybridOpt1() ? 32768u : 4096u;
++		const auto*    value    = std::getenv("KYTY_TEXTURE_MEMO_SLOTS");
++		const auto     count = value != nullptr && value[0] != '\0' ? std::strtoul(value, nullptr, 10) : 0ul;
++		return count >= 64 && count <= (1ul << 22u) ? static_cast<uint32_t>(count) : fallback;
+ 	}();
+ 	return slots;
+ }
+-- 
+2.55.0.windows.5
+

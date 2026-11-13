@@ -1,0 +1,28 @@
+From f00cefad17fe973a5571009cbfbe05e3403ef44a Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 12 Nov 2026 21:36:08 +0000
+Subject: [PATCH 29/35] docs(hybrid): DLSS needs the host's CUDA address window
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/host_gpu/renderer/dlss.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/graphics/host_gpu/renderer/dlss.h b/src/graphics/host_gpu/renderer/dlss.h
+index 31e311c7..62f20f52 100644
+--- a/src/graphics/host_gpu/renderer/dlss.h
++++ b/src/graphics/host_gpu/renderer/dlss.h
+@@ -23,6 +23,10 @@
+ // Anything missing or inconsistent (no NGX, DLSS unavailable, another size, no depth, the game
+ // not using motion vectors this frame) leaves the game's pass to run as before.
+ //
++// NGX on Vulkan needs VK_NVX_binary_import, whose CUDA backing reserves a 48 GiB window below
++// 1 TiB when the device is created. The PS5 guest arena fills that range unless the host leaves
++// it free: run with ASTROHYBRID_CUDA_HOLE=1 (AnyPS5 libc, 0xDC00000000-0xEC00000000), otherwise
++// device creation fails with the extension (ASTROHYBRID_DLSS_PROBE=1 reports it).
+ // Options: ASTROHYBRID_DLSS_QUALITY=quality|balanced|performance|dlaa (the DLSS preset family;
+ // default quality); ASTROHYBRID_DLSS_JITTER_SIGN=1|-1 (default 1); ASTROHYBRID_DLSS_DEPTH_INVERTED=1|0
+ // (default 1); ASTROHYBRID_DLSS_PATH: the folder holding nvngx_dlss.dll.
+-- 
+2.55.0.windows.5
+

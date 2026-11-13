@@ -1,0 +1,192 @@
+From 2619231e9f817464cd5c70a20c1ba0c9a697f3c2 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 29 Oct 2026 18:59:02 +0000
+Subject: [PATCH 05/26] perf(agc): plain GPU stores for GDS, sampled queue
+ choice, CPU write-back sync counter
+
+APS5_GDS_PLAIN_STORES=1 (with APS5_GDS_GPU_STORES) records a DMA_DATA store into GDS through the new
+VulkanDevice::WriteStoreOnGpu: a GPU store in queue order noted as a pending write, not a label, so a
+dispatch revalidating a GDS binding does not sync through the store's batch under the GPU lock. It
+falls back to WriteLabelOnGpu where a completion store, a pending label or a copied writer overlaps.
+APS5_SAMPLE_QUEUE=<hex> picks the queue worker APS5_SAMPLE_WORKER samples. APS5_PROFILE_DRAW prints
+[cpuwrite-sync]: the 64 KiB blocks whose pending CPU writes made CompletePendingCpuWrites sync.
+
+Astro Bot world map: syncs on the GDS block ~300 -> 0 per 10 s, committer GPU-lock waits
+~1500 -> 646 ms per 10 s, presents 101-103 -> 103-104 per 10 s; screenshot correct.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Execution/include/VulkanDevice.hpp        |  1 +
+ .../src/Driver/Packets/PacketMemory.cpp       | 10 ++++---
+ .../src/Driver/Queues/QueueWorker.cpp         |  6 ++++-
+ .../Execution/src/VulkanDevice.cpp            | 15 +++++++++++
+ .../Graphics/src/ShaderResources.cpp          | 27 ++++++++++++++++++-
+ docs/dev/ENVIRONMENT.md                       |  2 ++
+ 6 files changed, 56 insertions(+), 5 deletions(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp
+index 1b61253b6f..0c6268c0d4 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp
+@@ -130,6 +130,7 @@ public:
+     // `reapFirst` retires finished batches before the checks; a caller recording a group of labels
+     // under one lock passes it for the first label only.
+     int WriteLabelOnGpu(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue, bool reapFirst = true);
++    int WriteStoreOnGpu(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue);
+     bool AfterRecordedWork(std::function<void()> action, bool reapFirst);
+     // Pending-label table lookup and open-batch overlap test for WAIT_REG_MEM (see Recorder).
+     std::optional<Graphics::Recorder::LabelHit> PendingLabel(std::uint64_t address, std::size_t bytes, std::uint64_t afterStamp, Graphics::Recorder::LabelRefusal* refusal = nullptr) const;
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp
+index b9fc0c30a1..47a8ea111c 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp
+@@ -160,6 +160,9 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
+         bool drained = true;
+         int storeReason = -1;
+         bool storeResolved = false;
++        static const bool gdsStores = std::getenv("APS5_GDS_GPU_STORES") != nullptr;
++        static const bool gdsPlainStores = std::getenv("APS5_GDS_PLAIN_STORES") != nullptr;
++        bool gdsStore = false;
+         const auto copy = opcode == 0x50 ? Pm4::DecodeMemoryCopy(packet) : std::nullopt;
+         const auto copyBehindPendingSource = [&] {
+             if (!copy.has_value() || copy->bytes > gpuStoreLimit || !GuestMemory::Accessible(reinterpret_cast<const void*>(copy->source), copy->bytes) || !GuestMemory::Accessible(reinterpret_cast<const void*>(copy->destination), copy->bytes, true)) return false;
+@@ -178,7 +181,6 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
+             if (outcome.path != 1 && outcome.path != 3) throw std::runtime_error("AGC driver: a DMA_DATA copy of up to 64 KiB that GpuCopyPossible accepted took copy path " + std::to_string(outcome.path));
+             return true;
+         };
+-        static const bool gdsStores = std::getenv("APS5_GDS_GPU_STORES") != nullptr;
+         const auto resolveStore = [&]() -> std::optional<Pm4::StoreWrite> {
+             if (auto store = Pm4::ResolveStore(packet, queue, gpuStoreLimit)) return store;
+             if (!gdsStores || opcode != 0x50 || packet.size() < 7 || Pm4::DmaDestination(packet) != Pm4::DmaSelectGds) return std::nullopt;
+@@ -194,6 +196,7 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
+             } else {
+                 return std::nullopt;
+             }
++            gdsStore = true;
+             return Pm4::StoreWrite{Pm4::GdsAddress() + offset, {}, std::move(data)};
+         };
+         if (copyBehindPendingSource()) {
+@@ -217,9 +220,10 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
+ 
+                 recordDeferredLabels(localDevice.get(), submission.queue);
+                 const auto stamp = ++eventSerial;
+-                const auto reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(store->address, bytes, stamp, submission.queue) : 4;
++                const bool plain = gdsStore && gdsPlainStores;
++                const auto reason = localDevice == nullptr ? 4 : plain ? localDevice->WriteStoreOnGpu(store->address, bytes, stamp, submission.queue) : localDevice->WriteLabelOnGpu(store->address, bytes, stamp, submission.queue);
+                 storeReason = reason;
+-                if (reason == 0 || reason == 1 || reason == 5) noteLabelStore(store->address, bytes, stamp, submission.queue);
++                if (reason == 1 || reason == 5 || (reason == 0 && !plain)) noteLabelStore(store->address, bytes, stamp, submission.queue);
+                 if (reason == 0 || reason == 5) {
+                     if (reason == 0) ++storesOnGpu;
+                     else ++storesBehindCompletions;
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp
+index 34ca75b543..1d43105863 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp
+@@ -141,7 +141,11 @@ void Driver::run(std::uint32_t id) noexcept {
+     PinWorkerThread(role);
+ 
+     GuestMemory::TagGpuLockThread(id);
+-    if (id == 0) StartWorkerSampler();
++    static const std::uint32_t sampledQueue = [] {
++        const char* text = std::getenv("APS5_SAMPLE_QUEUE");
++        return text != nullptr ? static_cast<std::uint32_t>(std::strtoul(text, nullptr, 16)) : 0u;
++    }();
++    if (id == sampledQueue) StartWorkerSampler();
+     Submission submission;
+     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+     auto& costs = submissionCosts(id);
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+index 5391b5b56b..b1a4e31f28 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+@@ -2589,6 +2589,21 @@ int VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::by
+     return 0;
+ }
+ 
++int VulkanDevice::WriteStoreOnGpu(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue) {
++    if (!state->recorder || bytes.empty() || bytes.size() > 65536 || address % 4 != 0 || bytes.size() % 4 != 0) return 4;
++    auto& recorder = *state->recorder;
++    if (recorder.Idle()) return 1;
++    if (state->CopiedWriterOverlaps(address, bytes.size()) || (Graphics::Recorder::PendingCompletionStores() != 0 && recorder.CompletionLabelIn(address, bytes.size())) || recorder.PendingLabelIn(address, bytes.size())) return WriteLabelOnGpu(address, bytes, stamp, queue);
++    const auto context = graphicsContext();
++    const auto* import = Graphics::HostImportFor(context, address, bytes.size());
++    if (import == nullptr) return 3;
++    if (Graphics::AnyShadowedOverlaps(address, bytes.size())) Graphics::PublishShadow(address, bytes.size(), Graphics::PublishScope::PartialUnits, Graphics::PublishReason::Label);
++    recorder.RecordStore(import->buffer, Graphics::HostImportOffset(*import, address), bytes, address);
++    recorder.NotePendingWrite(address, bytes.size());
++    GuestMemory::MarkWritten(address, bytes.size());
++    return 0;
++}
++
+ bool VulkanDevice::AfterRecordedWork(std::function<void()> action, bool reapFirst) {
+     if (!state->recorder) return false;
+     if (reapFirst && OpportunisticReap()) state->recorder->Reap();
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+index b933593513..2a4eced112 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+@@ -41,6 +41,7 @@
+ #include <optional>
+ #include <set>
+ #include <string>
++#include <tuple>
+ #include <unordered_map>
+ #include <unordered_set>
+ #include <utility>
+@@ -3420,7 +3421,31 @@ bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std
+     const auto overlaps = [&](const auto& writers) {
+         return std::any_of(writers.begin(), writers.end(), [&](const auto& writer) { return writer->CopiedWritesOverlap(address, bytes); });
+     };
+-    if ((context.copiedWriters != nullptr && overlaps(*context.copiedWriters)) || overlaps(*drawWriters) || (labels && recorder->PendingLabelIn(address, bytes))) {
++    const bool dispatchWriter = context.copiedWriters != nullptr && overlaps(*context.copiedWriters);
++    const bool drawWriter = !dispatchWriter && overlaps(*drawWriters);
++    if (dispatchWriter || drawWriter || (labels && recorder->PendingLabelIn(address, bytes))) {
++        static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
++        if (profile) {
++            static AgcDriver::Mutex mutex;
++            static std::map<std::tuple<std::uint64_t, int>, std::uint64_t> counts;
++            static auto last = std::chrono::steady_clock::now();
++            std::lock_guard lock(mutex);
++            ++counts[{address & ~std::uint64_t{0xffff}, dispatchWriter ? 0 : drawWriter ? 1 : 2}];
++            if (std::chrono::steady_clock::now() - last >= std::chrono::seconds(10)) {
++                last = std::chrono::steady_clock::now();
++                std::vector<std::pair<std::tuple<std::uint64_t, int>, std::uint64_t>> sorted(counts.begin(), counts.end());
++                std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) { return left.second > right.second; });
++                std::string text;
++                for (std::size_t i = 0; i < sorted.size() && i < 10; ++i) {
++                    char item[96];
++                    static constexpr const char* kinds[] = {"dispatch", "draw", "label"};
++                    std::snprintf(item, sizeof(item), " 0x%llx %s x%llu", static_cast<unsigned long long>(std::get<0>(sorted[i].first)), kinds[std::get<1>(sorted[i].first)], static_cast<unsigned long long>(sorted[i].second));
++                    text += item;
++                }
++                std::fprintf(stderr, "[cpuwrite-sync] 10 s (64 KiB block, writer kind, count), GDS at 0x%llx:%s\n", static_cast<unsigned long long>(Pm4::GdsAddress()), text.c_str());
++                counts.clear();
++            }
++        }
+         Recorder::CountSync(4);
+         recorder->SyncThrough(address, bytes);
+         return true;
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index 01f8f9c418..f9e13d4ff7 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -173,6 +173,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_FRAME_CAPTURE_FRAMES` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/FrameRecorder.cpp` | 10 | number of frame boundaries the frame capture records |
+ | `APS5_FRAME_CAPTURE_TRIGGER` | string | `core/libs/prx/libSceAgcDriver/Execution/src/FrameRecorder.cpp` |  | file whose appearance starts the frame capture at the next frame boundary; a number in it replaces the frame count |
+ | `APS5_FULL_BARRIERS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | records every barrier instead of merging redundant ones |
++| `APS5_GDS_PLAIN_STORES` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp` |  | with APS5_GDS_GPU_STORES, records a GDS store as a plain GPU store noted as a pending write instead of a label, so dispatches binding GDS need no sync on it; falls back to the label path where a completion store or a copied writer overlaps |
+ | `APS5_GDS_GPU_STORES` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp` |  | records DMA_DATA stores into GDS (immediate or memory source, up to 64 KiB) as GPU stores in queue order instead of draining the device and storing on the CPU |
+ | `APS5_GPU_CHECKPOINTS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | attaches device diagnostic checkpoints through VK_NV_device_diagnostic_checkpoints, or buffer markers through VK_AMD_buffer_marker on a device without it |
+ | `APS5_GPU_COPY_MAX_KIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` | 1024 | size cap in KiB on a descriptor sub-range copied through the GPU path, larger ones staying on the CPU |
+@@ -395,6 +396,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_RESOURCE_CACHE_TABLE_ELEMENTS` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 65536 | number of image-table elements the shader-resource cache keeps (0 keeps the default) |
+ | `APS5_SAMPLE_COMMITTER` | string | `core/libs/prx/libSceAgcDriver/Execution/src/WorkerSampler.cpp` |  | samples queue 0's draw committer every millisecond and writes its stacks to a file (Windows only) |
+ | `APS5_SAMPLE_THREADS` | string | `core/libs/prx/libSceAgcDriver/Execution/src/WorkerSampler.cpp` |  | samples every thread of the process every 2 ms and writes each busy thread's hottest frames to a file (Windows only) |
++| `APS5_SAMPLE_QUEUE` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp` | 0 | hexadecimal id of the queue worker APS5_SAMPLE_WORKER samples |
+ | `APS5_SAMPLE_WORKER` | string | `core/libs/prx/libSceAgcDriver/Execution/src/WorkerSampler.cpp` |  | samples the calling queue worker every millisecond and writes its stacks to a file (Windows only) |
+ | `APS5_SHADOW_VERIFY` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/UnitShadow.cpp` |  | verifies that the shadow-published bytes equal the guest bytes |
+ | `APS5_SHARED_COLLECT_MEMO` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` |  | uses the tracker's shared collect-memo ring under its mutex instead of the per-thread ring |
+-- 
+2.55.0.windows.5
+

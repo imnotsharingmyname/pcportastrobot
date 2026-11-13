@@ -1,0 +1,356 @@
+From 14f88dca92d43be0461d7b53d2f53827fb65a914 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 29 Oct 2026 19:24:11 +0000
+Subject: [PATCH 06/26] perf(agc): bind GPU-produced draw buffers in place; CPU
+ access trap for staged results
+
+APS5_DRAW_SKIP_GPU_SNAPSHOTS=1: MarkDirectWrites records each range a dispatch wrote (in place or by
+GPU copy-back) with its write generation, and PrepareDrawBindings binds a draw's read-only buffer in
+place instead of copying a CPU snapshot of it when the range is such a GPU result and the CPU has not
+written it since.
+
+APS5_RESIDENT_TRAP=1 (measurement): RecordCopyBacks makes the copied-back pages of staged regions
+PAGE_NOACCESS through the new libc GuestArenaTrap exports; the crash handler restores a faulting page
+and counts the access by its first caller outside ucrtbase. On the Astro Bot world map no access came
+from game code; 85% came from Recorder::refreshDrawSnapshot and 12% from CompareSpansFrom.
+
+World map, same scene: presents 105-106 -> 107-111 per 10 s, GPU idle gaps 31 -> 25 ms per frame;
+screenshot correct.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Graphics/include/GuestBufferMemory.hpp    |   4 +
+ .../Graphics/src/GuestBufferMemory.cpp        |  83 ++++++++++++++
+ .../Graphics/src/ShaderResources.cpp          |   1 +
+ core/libs/prx/libc/include/GuestArena.hpp     |   5 +
+ core/libs/prx/libc/src/GuestArena.cpp         | 104 ++++++++++++++++++
+ .../src/specifics/windows/CrashReport.cpp     |  22 ++++
+ docs/dev/ENVIRONMENT.md                       |   3 +
+ 7 files changed, 222 insertions(+)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp
+index 1cc6a12123..e28ab6af98 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp
+@@ -295,6 +295,10 @@ private:
+     std::atomic<std::uint64_t> largest{0};
+ };
+ 
++void NoteGpuProduced(std::uint64_t begin, std::uint64_t end, std::uint64_t generation);
++bool GpuProducedUnchanged(std::uint64_t address, std::size_t bytes);
++bool SkipGpuProducedSnapshots();
++
+ class GuestBufferMemory {
+ public:
+     explicit GuestBufferMemory(const Context& context);
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+index 7a5e88d6b1..079cf5d8e3 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+@@ -5926,6 +5926,41 @@ void GuestBufferMemory::RecordCopyBacks(Recorder& recorder) {
+                 if (region.deviceLocal) Copies().stagedOutBytes.fetch_add(to - from, std::memory_order_relaxed);
+             }
+         }
++#ifdef _WIN32
++        static const bool trap = [] {
++            const char* text = std::getenv("APS5_RESIDENT_TRAP");
++            return text != nullptr && text[0] != '\0' && text[0] != '0';
++        }();
++        if (trap && region.deviceLocal) {
++            for (const auto& [begin, end] : merged) {
++                const auto from = std::max(begin, region.begin);
++                const auto to = std::min(end, region.end);
++                if (from < to) GuestArena::GuestArenaTrap_nid_postfix(from, static_cast<std::size_t>(to - from));
++            }
++            static std::atomic<std::int64_t> lastReport{0};
++            const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++            auto previous = lastReport.load(std::memory_order_relaxed);
++            if (now - previous >= 10 && lastReport.compare_exchange_strong(previous, now)) {
++                std::uint64_t armed = 0, gameFaults = 0, otherFaults = 0, skipped = 0;
++                GuestArena::GuestArenaTrapStats_nid_postfix(&armed, &gameFaults, &otherFaults, &skipped);
++                std::fprintf(stderr, "[resident-trap] cumulative: %llu pages armed, faults from game code %llu, from other code %llu, %llu skipped\n", static_cast<unsigned long long>(armed), static_cast<unsigned long long>(gameFaults), static_cast<unsigned long long>(otherFaults), static_cast<unsigned long long>(skipped));
++                std::array<std::uintptr_t, 12> sites{};
++                std::array<std::uint64_t, 12> siteCounts{};
++                const auto found = GuestArena::GuestArenaTrapSites_nid_postfix(sites.data(), siteCounts.data(), sites.size());
++                std::string text;
++                for (std::size_t i = 0; i < found; ++i) {
++                    HMODULE module = nullptr;
++                    char name[MAX_PATH] = "?";
++                    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(sites[i]), &module)) GetModuleFileNameA(module, name, sizeof(name));
++                    const char* base = std::strrchr(name, '\\');
++                    char item[160];
++                    std::snprintf(item, sizeof(item), " %s+0x%llx x%llu", base != nullptr ? base + 1 : name, static_cast<unsigned long long>(sites[i] - reinterpret_cast<std::uintptr_t>(module)), static_cast<unsigned long long>(siteCounts[i]));
++                    text += item;
++                }
++                std::fprintf(stderr, "[resident-trap] fault sites:%s\n", text.c_str());
++            }
++        }
++#endif
+         // Only once its copies are recorded: a throw above leaves the region counted by
+         // HasCopiedWrites, so the caller still registers the CPU write-back that stores the
+         // staging bytes, instead of losing the shader's results.
+@@ -6185,6 +6220,53 @@ bool GuestBufferMemory::CopiedWritesOverlap(std::uint64_t address, std::size_t b
+     return false;
+ }
+ 
++namespace {
++
++struct GpuProducedRanges {
++    AgcDriver::Mutex mutex;
++    std::map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> ranges;
++};
++
++GpuProducedRanges& gpuProduced() {
++    static GpuProducedRanges state;
++    return state;
++}
++
++}
++
++bool SkipGpuProducedSnapshots() {
++    static const bool enabled = [] {
++        const char* text = std::getenv("APS5_DRAW_SKIP_GPU_SNAPSHOTS");
++        return text != nullptr && text[0] != '0' && text[0] != 0;
++    }();
++    return enabled;
++}
++
++void NoteGpuProduced(std::uint64_t begin, std::uint64_t end, std::uint64_t generation) {
++    if (!SkipGpuProducedSnapshots() || begin >= end || generation == 0) return;
++    auto& state = gpuProduced();
++    std::lock_guard lock(state.mutex);
++    if (state.ranges.size() >= 65536) state.ranges.clear();
++    auto& entry = state.ranges[begin];
++    if (entry.first < end || entry.second < generation) entry = {std::max(entry.first, end), std::max(entry.second, generation)};
++}
++
++bool GpuProducedUnchanged(std::uint64_t address, std::size_t bytes) {
++    if (!SkipGpuProducedSnapshots() || bytes == 0) return false;
++    std::uint64_t generation = 0;
++    {
++        auto& state = gpuProduced();
++        std::lock_guard lock(state.mutex);
++        auto found = state.ranges.upper_bound(address);
++        if (found == state.ranges.begin()) return false;
++        --found;
++        if (found->second.first < address + bytes) return false;
++        generation = found->second.second;
++    }
++    GuestMemory::CollectWrites(address, bytes);
++    return GuestMemory::UnchangedSince(address, bytes, generation);
++}
++
+ void GuestBufferMemory::MarkDirectWrites() const {
+     // APS5_RESIDENT_STAGING: a staged region is kept only when nothing stored over it since its
+     // copy-in was recorded; checked before this use's own marks stamp it.
+@@ -6206,6 +6288,7 @@ void GuestBufferMemory::MarkDirectWrites() const {
+             const auto generation = GuestMemory::MarkPossiblyWritten(begin, static_cast<std::size_t>(end - begin));
+             if (generation != 0) directWritesGeneration = std::max(directWritesGeneration, generation);
+             if (region.residentCandidate && generation != 0) region.residentGeneration = std::max(region.residentGeneration, generation);
++            NoteGpuProduced(begin, end, generation);
+         }
+     }
+ }
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+index 2a4eced112..5d2fa882d0 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+@@ -5713,6 +5713,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
+             if (movedOnly || !item.guest || item.written || guestMemory.WritesOverlap(item.address, item.size)) continue;
+             const bool direct = std::any_of(reads.begin(), reads.end(), [&](const auto& range) { return item.address >= range.first && item.address < range.second && item.size <= range.second - item.address; });
+             if (!direct || recorder.PendingWriteOverlaps(item.address, item.size)) continue;
++            if (GpuProducedUnchanged(item.address, item.size)) continue;
+         }
+         const auto begin = address - item.adjustment;
+         const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(size, item.adjustment));
+diff --git a/core/libs/prx/libc/include/GuestArena.hpp b/core/libs/prx/libc/include/GuestArena.hpp
+index 49719e365b..a1c8d411a9 100644
+--- a/core/libs/prx/libc/include/GuestArena.hpp
++++ b/core/libs/prx/libc/include/GuestArena.hpp
+@@ -40,6 +40,11 @@ void GuestArenaSetAccessObserver_nid_postfix(void (*callback)(std::uintptr_t add
+ #ifdef _WIN32
+ bool GuestArenaHandleWrite_nid_postfix(std::uintptr_t address);
+ bool GuestArenaHandleRead_nid_postfix(std::uintptr_t address);
++void GuestArenaTrap_nid_postfix(std::uintptr_t address, std::size_t bytes);
++bool GuestArenaTrapArmed_nid_postfix(std::uintptr_t address);
++bool GuestArenaHandleTrap_nid_postfix(std::uintptr_t address, std::uintptr_t instruction);
++std::size_t GuestArenaTrapSites_nid_postfix(std::uintptr_t* instructions, std::uint64_t* counts, std::size_t capacity);
++void GuestArenaTrapStats_nid_postfix(std::uint64_t* armed, std::uint64_t* gameFaults, std::uint64_t* otherFaults, std::uint64_t* skipped);
+ void GuestArenaPinWritable_nid_postfix(const void* pointer, std::size_t bytes);
+ void GuestArenaUnpinWritable_nid_postfix(const void* pointer, std::size_t bytes);
+ bool GuestArenaProtection_nid_postfix(std::uintptr_t address, std::uint32_t* protection);
+diff --git a/core/libs/prx/libc/src/GuestArena.cpp b/core/libs/prx/libc/src/GuestArena.cpp
+index 65f574aded..d778c92ad8 100644
+--- a/core/libs/prx/libc/src/GuestArena.cpp
++++ b/core/libs/prx/libc/src/GuestArena.cpp
+@@ -421,6 +421,110 @@ bool GuestArenaHandleRead_nid_postfix(std::uintptr_t address) {
+     return WindowsMappings::Get().HandleRead(address);
+ }
+ 
++namespace {
++
++struct Traps {
++    std::mutex mutex;
++    std::map<std::uintptr_t, DWORD> pages;
++    std::atomic<std::uint64_t> armed{0};
++    std::atomic<std::uint64_t> gameFaults{0};
++    std::atomic<std::uint64_t> otherFaults{0};
++    std::atomic<std::uint64_t> skipped{0};
++    std::atomic<std::size_t> armedPages{0};
++    std::map<std::uintptr_t, std::uint64_t> sites;
++};
++
++Traps& traps() {
++    static Traps state;
++    return state;
++}
++
++bool inMainImage(std::uintptr_t instruction) {
++    static const std::pair<std::uintptr_t, std::uintptr_t> image = [] {
++        const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
++        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
++        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + static_cast<std::uintptr_t>(dos->e_lfanew));
++        return std::pair<std::uintptr_t, std::uintptr_t>{base, base + nt->OptionalHeader.SizeOfImage};
++    }();
++    return instruction >= image.first && instruction < image.second;
++}
++
++}
++
++void GuestArenaTrap_nid_postfix(std::uintptr_t address, std::size_t bytes) {
++    constexpr std::uintptr_t page = 4096;
++    constexpr std::size_t maxPages = 65536;
++    const auto first = (address + page - 1) & ~(page - 1);
++    const auto last = (address + bytes) & ~(page - 1);
++    if (first >= last) return;
++    auto& state = traps();
++    std::lock_guard lock(state.mutex);
++    for (auto cursor = first; cursor < last; cursor += page) {
++        if (state.pages.contains(cursor)) continue;
++        if (state.pages.size() >= maxPages) {
++            state.skipped.fetch_add(1, std::memory_order_relaxed);
++            return;
++        }
++        MEMORY_BASIC_INFORMATION info{};
++        if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT || info.Protect != PAGE_READWRITE) {
++            state.skipped.fetch_add(1, std::memory_order_relaxed);
++            continue;
++        }
++        DWORD previous = 0;
++        if (VirtualProtect(reinterpret_cast<void*>(cursor), page, PAGE_NOACCESS, &previous) == 0) {
++            state.skipped.fetch_add(1, std::memory_order_relaxed);
++            continue;
++        }
++        state.pages.emplace(cursor, previous);
++        state.armed.fetch_add(1, std::memory_order_relaxed);
++    }
++    state.armedPages.store(state.pages.size(), std::memory_order_relaxed);
++}
++
++bool GuestArenaTrapArmed_nid_postfix(std::uintptr_t address) {
++    auto& state = traps();
++    if (state.armedPages.load(std::memory_order_relaxed) == 0) return false;
++    std::lock_guard lock(state.mutex);
++    return state.pages.contains(address & ~std::uintptr_t{4095});
++}
++
++bool GuestArenaHandleTrap_nid_postfix(std::uintptr_t address, std::uintptr_t instruction) {
++    auto& state = traps();
++    if (state.armedPages.load(std::memory_order_relaxed) == 0) return false;
++    const auto page = address & ~std::uintptr_t{4095};
++    std::lock_guard lock(state.mutex);
++    const auto found = state.pages.find(page);
++    if (found == state.pages.end()) return false;
++    DWORD previous = 0;
++    if (VirtualProtect(reinterpret_cast<void*>(page), 4096, found->second, &previous) == 0) return false;
++    state.pages.erase(found);
++    state.armedPages.store(state.pages.size(), std::memory_order_relaxed);
++    (inMainImage(instruction) ? state.gameFaults : state.otherFaults).fetch_add(1, std::memory_order_relaxed);
++    ++state.sites[instruction];
++    return true;
++}
++
++std::size_t GuestArenaTrapSites_nid_postfix(std::uintptr_t* instructions, std::uint64_t* counts, std::size_t capacity) {
++    auto& state = traps();
++    std::lock_guard lock(state.mutex);
++    std::vector<std::pair<std::uintptr_t, std::uint64_t>> sorted(state.sites.begin(), state.sites.end());
++    std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) { return left.second > right.second; });
++    const auto count = std::min(capacity, sorted.size());
++    for (std::size_t i = 0; i < count; ++i) {
++        instructions[i] = sorted[i].first;
++        counts[i] = sorted[i].second;
++    }
++    return count;
++}
++
++void GuestArenaTrapStats_nid_postfix(std::uint64_t* armed, std::uint64_t* gameFaults, std::uint64_t* otherFaults, std::uint64_t* skipped) {
++    auto& state = traps();
++    *armed = state.armed.load(std::memory_order_relaxed);
++    *gameFaults = state.gameFaults.load(std::memory_order_relaxed);
++    *otherFaults = state.otherFaults.load(std::memory_order_relaxed);
++    *skipped = state.skipped.load(std::memory_order_relaxed);
++}
++
+ void GuestArenaPinWritable_nid_postfix(const void* pointer, std::size_t bytes) {
+     if (!Arena::Get().Contains(pointer, bytes)) return;
+     WindowsMappings::Get().Pin(reinterpret_cast<std::uintptr_t>(pointer), bytes);
+diff --git a/core/libs/prx/libc/src/specifics/windows/CrashReport.cpp b/core/libs/prx/libc/src/specifics/windows/CrashReport.cpp
+index 1d031c17a1..39c37a2741 100644
+--- a/core/libs/prx/libc/src/specifics/windows/CrashReport.cpp
++++ b/core/libs/prx/libc/src/specifics/windows/CrashReport.cpp
+@@ -350,9 +350,31 @@ bool HandleSse4a(EXCEPTION_POINTERS* info) {
+     return true;
+ }
+ 
++std::uintptr_t TrapCaller(const CONTEXT& faulting) {
++    static const auto runtime = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(L"ucrtbase.dll"));
++    CONTEXT context = faulting;
++    for (int depth = 0; depth < 6; ++depth) {
++        HMODULE module = nullptr;
++        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(context.Rip), &module)) break;
++        if (reinterpret_cast<std::uintptr_t>(module) != runtime) return context.Rip;
++        DWORD64 imageBase = 0;
++        const auto entry = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
++        if (entry == nullptr) {
++            context.Rip = *reinterpret_cast<const DWORD64*>(context.Rsp);
++            context.Rsp += 8;
++            continue;
++        }
++        void* handlerData = nullptr;
++        DWORD64 establisher = 0;
++        RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, entry, &context, &handlerData, &establisher, nullptr);
++    }
++    return faulting.Rip;
++}
++
+ LONG WINAPI ReportCrash(EXCEPTION_POINTERS* info) {
+     static std::atomic<bool> reported{false};
+     const auto* fault = info->ExceptionRecord;
++    if (fault->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && fault->NumberParameters >= 2 && GuestArena::GuestArenaTrapArmed_nid_postfix(fault->ExceptionInformation[1]) && GuestArena::GuestArenaHandleTrap_nid_postfix(fault->ExceptionInformation[1], TrapCaller(*info->ContextRecord))) return EXCEPTION_CONTINUE_EXECUTION;
+     if (fault->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && fault->NumberParameters >= 2 && fault->ExceptionInformation[0] == 1 && GuestArena::GuestArenaHandleWrite_nid_postfix(fault->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+     if (fault->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && fault->NumberParameters >= 2 && fault->ExceptionInformation[0] == 0 && GuestArena::GuestArenaHandleRead_nid_postfix(fault->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+     if (HandleWatch(info)) return EXCEPTION_CONTINUE_EXECUTION;
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index f9e13d4ff7..9ebfe46e10 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -140,6 +140,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_DRAW_INPUTS_IN_PLACE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | binds draw vertex and index ranges in place from host imports also with NVIDIA's Windows driver, which copies them by default |
+ | `APS5_DRAW_KEY_ALL_USER_WORDS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRegisterKey.cpp` |  | includes all 32 user words in a draw's register key instead of the used count |
+ | `APS5_DRAW_PIPELINE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | runs the second half of a pipelined draw on a draw finisher thread and keeps proofs for the collect epoch |
++| `APS5_DRAW_SKIP_GPU_SNAPSHOTS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | binds a draw's read-only buffer in place instead of snapshotting it when the range was last written by a dispatch (in place or by GPU copy-back) and the CPU has not written it since; an empty value or one starting with `0` leaves it off |
+ | `APS5_DRAW_SNAPSHOT_MAX_MIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 64 | upper bound in MiB on the snapshot bytes a draw's bindings may take |
+ | `APS5_DRAW_TRANSITIONS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | keeps the per-draw upload and download barriers and layout transitions instead of the lean recorded path |
+ | `APS5_DRAW_UPLOAD_MAX` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 4096 | largest draw snapshot in bytes copied into the per-recorder upload chunk; 0 turns the chunk off |
+@@ -392,6 +393,8 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_RELEASE_ON_UNLOCK` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | destroys deferred batches on the unlocking thread instead of a release thread |
+ | `APS5_RELEASE_QUEUE_MAX` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` | 256 | maximum deferred batches handed to the release thread before a thread destroys its own |
+ | `APS5_RELEASE_UNDER_LOCK` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | destroys deferred batches in finish() under the lock instead of on a release thread |
++| `APS5_RESIDENT_STAGING` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | keeps a staged dispatch region's device-local shadow between uses and skips its copy-in while the write tracker shows nothing stored over the range since its last copy-back; an empty value or `0` leaves it off |
++| `APS5_RESIDENT_TRAP` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | Windows measurement aid: makes the pages a staged dispatch copied back inaccessible and counts the CPU accesses that fault on them (game code or other code, with the top fault sites) in `[resident-trap]` lines; each faulting page is restored at once |
+ | `APS5_RESOURCE_CACHE_ENTRIES` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | adaptive | fixes the bound on the entries of the per-device shader-resource cache, which otherwise grows while evicted keys keep coming back and shrinks back to its base when few keys are in use; 0 keeps the adaptive bound |
+ | `APS5_RESOURCE_CACHE_TABLE_ELEMENTS` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 65536 | number of image-table elements the shader-resource cache keeps (0 keeps the default) |
+ | `APS5_SAMPLE_COMMITTER` | string | `core/libs/prx/libSceAgcDriver/Execution/src/WorkerSampler.cpp` |  | samples queue 0's draw committer every millisecond and writes its stacks to a file (Windows only) |
+-- 
+2.55.0.windows.5
+

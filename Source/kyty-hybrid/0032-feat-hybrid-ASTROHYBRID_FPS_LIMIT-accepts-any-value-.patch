@@ -1,0 +1,80 @@
+From af49c78c1a3cbd2a9a89ce612e6c1af278b75dcc Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 12 Nov 2026 23:14:46 +0000
+Subject: [PATCH 32/35] feat(hybrid): ASTROHYBRID_FPS_LIMIT accepts any value
+ from 10 to 240
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/presentation/videoOut.cpp | 27 +++++++++++++++++++++++---
+ 1 file changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 4b73fdb1..3f17232a 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -892,6 +892,13 @@ constexpr std::array<uint32_t, 10> FRAME_LIMITS {30, 35, 40, 45, 50, 55, 60, 90,
+ constexpr std::array<const char*, 10> FRAME_LIMIT_LABELS {"30 FPS", "35 FPS", "40 FPS", "45 FPS", "50 FPS",
+                                                         "55 FPS", "60 FPS", "90 FPS", "120 FPS", "No limit"};
+ 
++// ASTROHYBRID_FPS_LIMIT: one of the listed values, or any whole number of frames per second from 10
++// to 240 (the launcher's frame-generation target divides the on-screen rate by the multiplier, e.g.
++// 50 on screen with 2x = 25). Ctrl+F2 then cycles the listed values as before.
++constexpr uint32_t    FRAME_LIMIT_CUSTOM = 1000;
++std::atomic<uint32_t> g_custom_frame_limit {0};
++char                  g_custom_frame_limit_label[16] {};
++
+ std::atomic<uint32_t>& FrameLimitChoice() {
+ 	static std::atomic<uint32_t> choice {[] {
+ 		const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT");
+@@ -902,6 +909,14 @@ std::atomic<uint32_t>& FrameLimitChoice() {
+ 					return i;
+ 				}
+ 			}
++			char*      end    = nullptr;
++			const auto custom = std::strtoul(value, &end, 10);
++			if (end != value && *end == '\0' && custom >= 10 && custom <= 240) {
++				g_custom_frame_limit.store(static_cast<uint32_t>(custom), std::memory_order_relaxed);
++				std::snprintf(g_custom_frame_limit_label, sizeof(g_custom_frame_limit_label), "%lu FPS",
++				              custom);
++				return FRAME_LIMIT_CUSTOM;
++			}
+ 		}
+ 		return FRAME_LIMIT_DISABLED;
+ 	}()};
+@@ -987,7 +1002,9 @@ void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t l
+ 
+ const char* FrameLimitLabel() {
+ 	const auto choice = FrameLimitChoice().load(std::memory_order_relaxed);
+-	return choice == FRAME_LIMIT_DISABLED ? nullptr : FRAME_LIMIT_LABELS[choice];
++	return choice == FRAME_LIMIT_DISABLED ? nullptr
++	       : choice == FRAME_LIMIT_CUSTOM ? g_custom_frame_limit_label
++	                                      : FRAME_LIMIT_LABELS[choice];
+ }
+ 
+ bool CycleFrameLimit() {
+@@ -996,7 +1013,8 @@ bool CycleFrameLimit() {
+ 	if (choice == FRAME_LIMIT_DISABLED) {
+ 		return false;
+ 	}
+-	setting.store((choice + 1) % FRAME_LIMITS.size(), std::memory_order_relaxed);
++	setting.store(choice == FRAME_LIMIT_CUSTOM ? 0u : (choice + 1) % static_cast<uint32_t>(FRAME_LIMITS.size()),
++	              std::memory_order_relaxed);
+ 	return true;
+ }
+ 
+@@ -1061,7 +1079,10 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 			next_flip = 0;
+ 		}
+ 		const bool limit_enabled = choice != FRAME_LIMIT_DISABLED;
+-		const auto limit = limit_enabled ? FRAME_LIMITS[choice] : 0;
++		const auto limit = limit_enabled ? (choice == FRAME_LIMIT_CUSTOM
++		                                        ? g_custom_frame_limit.load(std::memory_order_relaxed)
++		                                        : FRAME_LIMITS[choice])
++		                                 : 0u;
+ 		const bool absolute = g_present_abs_vblank.On() ||
+ 		                      (limit_enabled && Config::GetPresentMode() == Config::PresentMode::Immediate);
+ 		bool       behind      = false; // a vblank deadline was missed: may present a blank frame
+-- 
+2.55.0.windows.5
+

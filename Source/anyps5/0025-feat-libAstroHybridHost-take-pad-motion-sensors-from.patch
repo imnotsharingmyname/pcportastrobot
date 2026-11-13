@@ -1,0 +1,95 @@
+From 672da4e7e999069909d73ab51dc53a371e67256d Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 12 Nov 2026 14:03:17 +0000
+Subject: [PATCH 25/26] feat(libAstroHybridHost): take pad motion sensors from
+ Kyty (ABI 1.5)
+
+---
+ core/libs/prx/libAstroHybridHost/Export.cpp | 33 +++++++++++++++++++--
+ 1 file changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/core/libs/prx/libAstroHybridHost/Export.cpp b/core/libs/prx/libAstroHybridHost/Export.cpp
+index 4dc649f966..b5551727b0 100644
+--- a/core/libs/prx/libAstroHybridHost/Export.cpp
++++ b/core/libs/prx/libAstroHybridHost/Export.cpp
+@@ -1,4 +1,6 @@
+ #include <algorithm>
++#include <array>
++#include <atomic>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstdio>
+@@ -15,7 +17,7 @@
+ 
+ namespace {
+ 
+-constexpr std::uint32_t KytyGpuAbiVersion = (1u << 16u) | 4u;
++constexpr std::uint32_t KytyGpuAbiVersion = (1u << 16u) | 5u;
+ 
+ struct PadTouch {
+     std::uint16_t x;
+@@ -37,6 +39,13 @@ struct PadState {
+ 
+ static_assert(sizeof(PadState) == 28);
+ 
++struct PadMotion {
++    float acceleration[3];
++    float angularVelocity[3];
++};
++
++static_assert(sizeof(PadMotion) == 24);
++
+ struct PadOutput {
+     std::uint32_t sequence;
+     std::uint8_t vibrationLarge;
+@@ -73,9 +82,10 @@ struct HostCallbacks {
+     void (*publishPad)(void* user, int port, const PadState* state);
+     void (*requestExit)(void* user, int code);
+     int (*fetchPadOutput)(void* user, int port, std::uint32_t* seen, PadOutput* out);
++    void (*publishPadMotion)(void* user, int port, const PadMotion* motion);
+ };
+ 
+-static_assert(sizeof(HostCallbacks) == 96);
++static_assert(sizeof(HostCallbacks) == 104);
+ 
+ struct Registration {
+     KernelEqueue eq;
+@@ -171,9 +181,26 @@ int DonateGuestRange(void*, std::uint64_t size, std::uint64_t* base) {
+     return 0;
+ }
+ 
++constexpr int MotionPorts = 4;
++std::array<PadMotion, MotionPorts> g_padMotion{};
++std::array<std::atomic<bool>, MotionPorts> g_padMotionValid{};
++
++void PublishPadMotion(void*, int port, const PadMotion* motion) {
++    if (motion == nullptr || port < 0 || port >= MotionPorts) return;
++    g_padMotion[port] = *motion;
++    g_padMotionValid[port].store(true, std::memory_order_release);
++}
++
+ void PublishPad(void*, int port, const PadState* state) {
+     if (state == nullptr) return;
+     PadInputState input{};
++    if (port >= 0 && port < MotionPorts && g_padMotionValid[port].load(std::memory_order_acquire)) {
++        input.hasMotion = true;
++        for (std::size_t i = 0; i < 3; ++i) {
++            input.accel[i] = g_padMotion[port].acceleration[i];
++            input.gyro[i] = g_padMotion[port].angularVelocity[i];
++        }
++    }
+     input.buttons = state->buttons;
+     for (std::size_t i = 0; i < input.sticks.size(); ++i) input.sticks[i] = state->sticks[i];
+     input.analogButtonsL2 = state->l2;
+@@ -210,7 +237,7 @@ int FetchPadOutput(void*, int port, std::uint32_t* seen, PadOutput* out) {
+     return 1;
+ }
+ 
+-const HostCallbacks g_callbacks{sizeof(HostCallbacks), KytyGpuAbiVersion, nullptr, Log, AddGpuEvent, DeleteGpuEvent, DeliverEvent, nullptr, nullptr, DonateGuestRange, PublishPad, RequestExit, FetchPadOutput};
++const HostCallbacks g_callbacks{sizeof(HostCallbacks), KytyGpuAbiVersion, nullptr, Log, AddGpuEvent, DeleteGpuEvent, DeliverEvent, nullptr, nullptr, DonateGuestRange, PublishPad, RequestExit, FetchPadOutput, PublishPadMotion};
+ 
+ float g_reportedToneMapPeak = 0.0f;
+ 
+-- 
+2.55.0.windows.5
+

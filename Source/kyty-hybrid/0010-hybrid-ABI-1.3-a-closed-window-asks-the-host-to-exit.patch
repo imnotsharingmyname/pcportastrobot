@@ -1,0 +1,97 @@
+From 3ad22e355715d97d0205c4eed257cbfc796d7181 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Sat, 7 Nov 2026 01:01:32 +0000
+Subject: [PATCH 10/35] hybrid: ABI 1.3, a closed window asks the host to exit
+ instead of tearing the renderer down
+
+Closing Kyty's window ended WindowRun and destroyed the subsystems while the game kept
+submitting, which aborted in graphicsRun.cpp (!m_accepting). The renderer now calls the new
+request_exit host callback and keeps running until the host calls shutdown.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/hybrid/kytyGpuApi.h        |  8 +++++++-
+ src/hybrid/kytyGpuBridge.cpp   | 13 +++++++++++++
+ tests/hybrid/kytyGpuTestHost.c |  2 +-
+ 3 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/src/hybrid/kytyGpuApi.h b/src/hybrid/kytyGpuApi.h
+index 13db78a9..722904ef 100644
+--- a/src/hybrid/kytyGpuApi.h
++++ b/src/hybrid/kytyGpuApi.h
+@@ -21,7 +21,7 @@ extern "C" {
+ #endif
+ 
+ #define KYTY_GPU_ABI_VERSION_MAJOR 1u
+-#define KYTY_GPU_ABI_VERSION_MINOR 2u
++#define KYTY_GPU_ABI_VERSION_MINOR 3u
+ #define KYTY_GPU_ABI_VERSION ((KYTY_GPU_ABI_VERSION_MAJOR << 16u) | KYTY_GPU_ABI_VERSION_MINOR)
+ 
+ #if defined(_WIN32)
+@@ -123,6 +123,12 @@ typedef struct KytyGpuHostCallbacks {
+ 	/* ABI 1.2. Kyty owns the window, so it reads the keyboard and the gamepads; the game reads pads
+ 	 * through the host's pad library. The DLL publishes each pad's state here, about every 4 ms. */
+ 	void (*publish_pad)(void* user, int port, const KytyGpuPadState* state);
++
++	/* ABI 1.3. The player closed Kyty's window: the host ends the process its usual way (AnyPS5:
++	 * LibcRequestExit, as its own window does). Kyty's renderer keeps running meanwhile, because the
++	 * game may still submit work while it shuts down. May be null: then the window close is ignored
++	 * until the host calls shutdown. */
++	void (*request_exit)(void* user, int code);
+ } KytyGpuHostCallbacks;
+ 
+ /* The host module kyty_gpu.dll looks for when game code reaches an export before any host called
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index e55a6dcd..90da1800 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -405,6 +405,7 @@ int ApiInit(const KytyGpuHostCallbacks* host) {
+ // frames and pumps SDL events until shutdown posts SDL_EVENT_QUIT. The subsystems are destroyed on
+ // the same thread, in reverse order, when the loop returns.
+ std::thread             g_renderer_thread;
++std::atomic<bool>       g_shutdown_requested {false};
+ std::mutex              g_renderer_mutex;
+ std::condition_variable g_renderer_ready;
+ int                     g_renderer_result = 1;
+@@ -486,6 +487,17 @@ void RendererThread() {
+ 		}
+ 		g_renderer_ready.notify_all();
+ 		Libs::Graphics::WindowRun();
++		if (!g_shutdown_requested.load(std::memory_order_acquire)) {
++			if (g_host.request_exit != nullptr) {
++				Log(0, "renderer: the window was closed, asking the host to exit");
++				g_host.request_exit(g_host.user, 0);
++			} else {
++				Log(1, "renderer: the window was closed; the host has no request_exit, waiting for shutdown");
++			}
++			while (!g_shutdown_requested.load(std::memory_order_acquire)) {
++				std::this_thread::sleep_for(std::chrono::milliseconds(100));
++			}
++		}
+ 		Log(0, "renderer: window loop ended, shutting the subsystems down");
+ 	}
+ 	Log(0, "renderer: stopped");
+@@ -561,6 +573,7 @@ int ApiStartGraphics() {
+ 
+ void ApiShutdown() {
+ 	std::lock_guard lock(g_lifecycle);
++	g_shutdown_requested.store(true, std::memory_order_release);
+ 	if (g_state.load() == State::Graphics) {
+ 		SDL_Event quit {};
+ 		quit.type = SDL_EVENT_QUIT;
+diff --git a/tests/hybrid/kytyGpuTestHost.c b/tests/hybrid/kytyGpuTestHost.c
+index b715921a..1d492afc 100644
+--- a/tests/hybrid/kytyGpuTestHost.c
++++ b/tests/hybrid/kytyGpuTestHost.c
+@@ -43,7 +43,7 @@ static void HostDeliver(void* user, uint32_t kind, int64_t ident, uint64_t data)
+ }
+ 
+ static KytyGpuHostCallbacks g_callbacks = {
+-    sizeof(KytyGpuHostCallbacks), KYTY_GPU_ABI_VERSION, NULL, HostLog, HostAdd, HostDelete, HostDeliver, NULL, NULL, NULL, NULL,
++    sizeof(KytyGpuHostCallbacks), KYTY_GPU_ABI_VERSION, NULL, HostLog, HostAdd, HostDelete, HostDeliver, NULL, NULL, NULL, NULL, NULL,
+ };
+ 
+ __declspec(dllexport) const KytyGpuHostCallbacks* AstroHybridHostCallbacks_nid_no_patch(void) {
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,354 @@
+From 970e98d1a495cea8b2e06401dd402516f0c02573 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 12 Nov 2026 20:37:38 +0000
+Subject: [PATCH 27/35] feat(hybrid): pass trace and targeted shader dump
+ diagnostics
+
+ASTROHYBRID_PASS_TRACE=<s> traces three frames of draws and dispatches
+(shader hashes, bound images, render targets); ASTROHYBRID_PASS_TRACE_CB
+adds one shader's buffer words; ASTROHYBRID_SHADER_DUMP writes the guest
+code and RDNA2 disassembly of listed shaders. All off by default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/host_gpu/renderer/passTrace.h    | 83 +++++++++++++++++++
+ .../renderer/pipeline/descriptors.cpp         | 70 ++++++++++++++++
+ .../host_gpu/renderer/pipeline/descriptors.h  |  5 ++
+ .../renderer/pipeline/pipelineCache.cpp       | 50 ++++++++++-
+ .../host_gpu/renderer/renderCompute.cpp       |  9 ++
+ src/graphics/presentation/videoOut.cpp        |  2 +
+ 6 files changed, 217 insertions(+), 2 deletions(-)
+ create mode 100644 src/graphics/host_gpu/renderer/passTrace.h
+
+diff --git a/src/graphics/host_gpu/renderer/passTrace.h b/src/graphics/host_gpu/renderer/passTrace.h
+new file mode 100644
+index 00000000..d7ce291f
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/passTrace.h
+@@ -0,0 +1,83 @@
++#ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PASSTRACE_H_
++#define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PASSTRACE_H_
++
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++
++// ASTROHYBRID_PASS_TRACE=<seconds> (diagnostic, default off): starting that many seconds after the
++// first traced pass, the next 3 guest flips are traced to stdout: every draw's and dispatch's
++// shader stages (shader hash), the images each stage binds (sampled T / storage S: guest address,
++// Vulkan format, extent) and every draw's colour targets (RT), one "PassTrace" line per pass, and a
++// "PassTrace flip" line per flip. Used to find the game's depth, motion vectors and resolve pass
++// for DLSS. Run with KYTY_DRAW_RUN=0 so every draw resolves its own images.
++namespace Libs::Graphics::PassTrace {
++
++namespace Detail {
++inline std::atomic<int> g_state {0}; // 0 unset, 1 waiting, 2 tracing, 3 done / off
++inline std::atomic<int64_t> g_start_ns {0};
++inline std::atomic<uint32_t> g_flips {0};
++inline std::atomic<uint64_t> g_seq {0};
++inline int64_t NowNs() {
++	return std::chrono::duration_cast<std::chrono::nanoseconds>(
++	           std::chrono::steady_clock::now().time_since_epoch())
++	    .count();
++}
++} // namespace Detail
++
++// Whether this pass is traced (GPU thread).
++[[nodiscard]] inline bool Active() {
++	using namespace Detail;
++	auto state = g_state.load(std::memory_order_relaxed);
++	if (state == 2) {
++		return true;
++	}
++	if (state == 3) {
++		return false;
++	}
++	if (state == 0) {
++		const char* value = std::getenv("ASTROHYBRID_PASS_TRACE");
++		if (value == nullptr || value[0] == '\0' || value[0] == '0') {
++			g_state.store(3, std::memory_order_relaxed);
++			return false;
++		}
++		g_start_ns.store(NowNs() + static_cast<int64_t>(std::strtoll(value, nullptr, 10)) * 1'000'000'000LL,
++		                 std::memory_order_relaxed);
++		g_state.store(1, std::memory_order_relaxed);
++		return false;
++	}
++	return false;
++}
++
++// A guest flip was reserved (any thread): starts tracing when due, stops after 3 flips.
++inline void NoteFlip() {
++	using namespace Detail;
++	auto state = g_state.load(std::memory_order_relaxed);
++	if (state == 0) {
++		(void)Active();
++		state = g_state.load(std::memory_order_relaxed);
++	}
++	if (state == 1 && NowNs() >= g_start_ns.load(std::memory_order_relaxed)) {
++		g_state.store(2, std::memory_order_relaxed);
++		std::printf("PassTrace flip start\n");
++		return;
++	}
++	if (state == 2) {
++		const auto flips = g_flips.fetch_add(1, std::memory_order_relaxed) + 1;
++		std::printf("PassTrace flip %u\n", flips);
++		if (flips >= 3) {
++			g_state.store(3, std::memory_order_relaxed);
++			std::fflush(stdout);
++		}
++	}
++}
++
++[[nodiscard]] inline uint64_t NextSeq() {
++	return Detail::g_seq.fetch_add(1, std::memory_order_relaxed);
++}
++
++} // namespace Libs::Graphics::PassTrace
++
++#endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PASSTRACE_H_
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+index 089d4522..1115eb46 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+@@ -24,6 +24,7 @@
+ #include "graphics/host_gpu/graphicContext.h"
+ #include "graphics/host_gpu/hostMemory.h"
+ #include "graphics/host_gpu/renderer/colorRenderTarget.h"
++#include "graphics/host_gpu/renderer/passTrace.h"
+ #include "graphics/host_gpu/renderer/cache/bufferLookupStats.h"
+ #include "graphics/host_gpu/renderer/cpCommit.h"
+ #include "graphics/host_gpu/renderer/debug.h"
+@@ -2075,6 +2076,72 @@ static const std::vector<GuestRange>* ResolveWrittenRanges(RenderContext&
+ 	return narrowed ? &scratch.ranges : nullptr;
+ }
+ 
++void TracePass(TextureCache& cache, const char* kind, std::span<PreparedBindings* const> stages,
++               std::span<const RenderColorInfo> colors) {
++	std::string line;
++	char        part[256];
++	std::snprintf(part, sizeof(part), "PassTrace %llu %s",
++	              static_cast<unsigned long long>(PassTrace::NextSeq()), kind);
++	line += part;
++	const auto image_text = [&](char tag, ImageId id) {
++		if (!id) {
++			line += " -";
++			return;
++		}
++		const auto& image = cache.GetImage(id);
++		std::snprintf(part, sizeof(part), " %c:%llx:%s:%ux%u%s", tag,
++		              static_cast<unsigned long long>(image.info.data.address),
++		              vk::to_string(image.info.pixel_format).c_str(), image.info.extent.width,
++		              image.info.extent.height, image.info.IsDepth() ? ":depth" : "");
++		line += part;
++	};
++	for (auto* stage: stages) {
++		if (stage == nullptr || stage->runtime == nullptr || !*stage->runtime) {
++			continue;
++		}
++		const auto& program = *stage->runtime->program;
++		std::snprintf(part, sizeof(part), " | st%d %016llx", static_cast<int>(program.stage),
++		              static_cast<unsigned long long>(program.shader_hash));
++		line += part;
++		for (const auto& binding: stage->images) {
++			image_text(binding.desc.type == TextureCache::BindingType::Storage ? 'S' : 'T',
++			           binding.image_id);
++		}
++		// ASTROHYBRID_PASS_TRACE_CB=<hex hash>: that shader's buffers, first 24 dwords each.
++		static const uint64_t cb_hash = [] {
++			const char* value = std::getenv("ASTROHYBRID_PASS_TRACE_CB");
++			return value != nullptr ? std::strtoull(value, nullptr, 16) : uint64_t {0};
++		}();
++		if (cb_hash != 0 && program.shader_hash == cb_hash) {
++			for (const auto& source: stage->buffer_sources) {
++				if (source.address == 0 || source.size < 4) {
++					continue;
++				}
++				std::snprintf(part, sizeof(part), " | B:%llx:%llu",
++				              static_cast<unsigned long long>(source.address),
++				              static_cast<unsigned long long>(source.size));
++				line += part;
++				const auto* words = reinterpret_cast<const uint32_t*>(source.address);
++				const auto  count = std::min<uint64_t>(24, source.size / 4);
++				for (uint64_t i = 0; i < count; i++) {
++					float value = 0;
++					std::memcpy(&value, &words[i], 4);
++					std::snprintf(part, sizeof(part), " [%llu]%08x=%g", static_cast<unsigned long long>(i * 4),
++					              words[i], static_cast<double>(value));
++					line += part;
++				}
++			}
++		}
++	}
++	if (!colors.empty()) {
++		line += " | RT";
++		for (const auto& color: colors) {
++			image_text('C', color.image_id);
++		}
++	}
++	std::printf("%s\n", line.c_str());
++}
++
+ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
+ 	KYTY_PROFILER_FUNCTION();
+ 	auto* pass = CpGaps::CurrentDrawPassSample();
+@@ -2416,6 +2483,9 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const>
+ 			BindRenderTarget(target.image_id);
+ 		}
+ 	}
++	if (PassTrace::Active()) [[unlikely]] {
++		TracePass(cache, "draw", stages, colors);
++	}
+ 	CommitStats::StepMark(CommitStats::Step::Images);
+ 	CommitStats::Mark(CommitStats::Phase::RebindImages);
+ 	// Discovery can read back PS5 metadata and submit the scheduler. Reserve draw buffers only
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.h b/src/graphics/host_gpu/renderer/pipeline/descriptors.h
+index a84b52f5..810269d2 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptors.h
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.h
+@@ -146,6 +146,11 @@ bool ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
+                             const ShaderTextureResource& descriptor, uint64_t size,
+                             bool fatal = true);
+ 
++struct RenderColorInfo;
++// ASTROHYBRID_PASS_TRACE (passTrace.h): one line for a traced draw or dispatch.
++void TracePass(TextureCache& cache, const char* kind, std::span<PreparedBindings* const> stages,
++               std::span<const RenderColorInfo> colors);
++
+ } // namespace Libs::Graphics
+ 
+ #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DESCRIPTORS_H_
+diff --git a/src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp b/src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
+index 9f87d1cc..e1cf54f2 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
+@@ -986,6 +986,50 @@ private:
+ 	bool m_recordable = false;
+ };
+ 
++// ASTROHYBRID_SHADER_DUMP=<hex hash>,<hex hash>,... (diagnostic, default off): the guest code and
++// its RDNA2 disassembly of those shaders are written to ASTROHYBRID_SHADER_DUMP_DIR (default
++// E:/AstroHybrid-Work/shaderdump) when they are compiled (run with KYTY_PROGRAM_CACHE=0 so they are).
++static bool AstroShaderDumpWanted(uint64_t shader_hash) {
++	static const std::vector<uint64_t> hashes = [] {
++		std::vector<uint64_t> list;
++		const char* value = std::getenv("ASTROHYBRID_SHADER_DUMP");
++		while (value != nullptr && *value != '\0') {
++			char* end = nullptr;
++			const auto hash = std::strtoull(value, &end, 16);
++			if (end == value) {
++				break;
++			}
++			list.push_back(hash);
++			value = *end == ',' ? end + 1 : end;
++		}
++		return list;
++	}();
++	return std::find(hashes.begin(), hashes.end(), shader_hash) != hashes.end();
++}
++
++static void AstroShaderDump(const char* stage_name, uint64_t shader_hash,
++                            std::span<const uint32_t> code, const std::string& decoded_dump) {
++	if (!AstroShaderDumpWanted(shader_hash)) {
++		return;
++	}
++	const char* dir_value = std::getenv("ASTROHYBRID_SHADER_DUMP_DIR");
++	const std::filesystem::path dir = dir_value != nullptr ? dir_value : "E:/AstroHybrid-Work/shaderdump";
++	std::error_code error;
++	std::filesystem::create_directories(dir, error);
++	const auto base = dir / fmt::format("{}_{:016x}", stage_name, shader_hash);
++	if (auto* file = std::fopen((base.string() + ".bin").c_str(), "wb"); file != nullptr) {
++		std::fwrite(code.data(), 1, code.size_bytes(), file);
++		std::fclose(file);
++	}
++	if (auto* file = std::fopen((base.string() + ".rdna2.txt").c_str(), "wb"); file != nullptr) {
++		std::fwrite(decoded_dump.data(), 1, decoded_dump.size(), file);
++		std::fclose(file);
++	}
++	std::printf("AstroShaderDump: %s %016llx -> %s\n", stage_name,
++	            static_cast<unsigned long long>(shader_hash), base.string().c_str());
++	std::fflush(stdout);
++}
++
+ void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
+                      const std::vector<uint32_t>& spirv) {
+ 	if (!Config::GraphicsDebugDumpEnabled()) {
+@@ -1868,6 +1912,7 @@ struct PipelineCache::ProgramCache {
+ 		DumpMatchedShaderInputs(params, options, stage_name, static_state,
+ 		                        push_data_start_dword, result.spirv, result.ir_dump);
+ 		DumpShaderOriginal(stage_name, options.shader_hash, params.code, result.decoded_dump);
++		AstroShaderDump(stage_name, options.shader_hash, params.code, result.decoded_dump);
+ 		return {.spirv       = std::move(result.spirv),
+ 		        .spirv_plain = std::move(result.spirv_plain),
+ 		        .info        = std::move(result.program).TakeCompiledInfo()};
+@@ -2835,8 +2880,9 @@ struct PipelineCache::ProgramCache {
+ 		options.shader_hash = params.hash;
+ 		options.user_data   = runtime.user_data;
+ 		options.back_code      = params.back_code;
+-		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+-		options.early_dump  = options.dump_ir;
++		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent ||
++		                      AstroShaderDumpWanted(params.hash);
++		options.early_dump  = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+ 		options.dump_label  = label;
+ 		options.input_info  = stage_input;
+ 		options.plain_mip_stats_variant =
+diff --git a/src/graphics/host_gpu/renderer/renderCompute.cpp b/src/graphics/host_gpu/renderer/renderCompute.cpp
+index 6423f4b2..94444cce 100644
+--- a/src/graphics/host_gpu/renderer/renderCompute.cpp
++++ b/src/graphics/host_gpu/renderer/renderCompute.cpp
+@@ -17,6 +17,7 @@
+ #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
+ #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
+ #include "graphics/host_gpu/renderer/image/imageInfo.h"
++#include "graphics/host_gpu/renderer/passTrace.h"
+ #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+ #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+ #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+@@ -535,6 +536,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
+ 	}
+ 	CpGaps::Phase(CpGaps::Cat::DispatchRebind);
+ 	RebindImages(bindings);
++	if (PassTrace::Active()) [[unlikely]] {
++		PreparedBindings* traced = &bindings;
++		TracePass(m_context.GetTextureCache(), "dispatch", std::span<PreparedBindings* const>(&traced, 1), {});
++	}
+ 	BindComputeLds(input_info, bindings, input_info.workgroup_counts);
+ 	m_rebind_epoch = m_context.GetBufferCache().UnregisterEpoch();
+ 	RebindBuffers(bindings);
+@@ -818,6 +823,10 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
+ 	CpGaps::Phase(CpGaps::Cat::DispatchRebind);
+ 	BindComputeLds(input_info, bindings, nullptr);
+ 	RebindImages(bindings);
++	if (PassTrace::Active()) [[unlikely]] {
++		PreparedBindings* traced = &bindings;
++		TracePass(m_context.GetTextureCache(), "dispatch", std::span<PreparedBindings* const>(&traced, 1), {});
++	}
+ 	// Acquiring arguments can merge cache buffers; finalize shader bindings afterward.
+ 	m_rebind_epoch = m_context.GetBufferCache().UnregisterEpoch();
+ 	auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 396c4901..4b73fdb1 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -33,6 +33,7 @@
+ #include "graphics/presentation/performanceOverlay.h"
+ #include "graphics/presentation/presenter.h"
+ #include "graphics/presentation/window/lowLatency.h"
++#include "graphics/host_gpu/renderer/passTrace.h"
+ #include "graphics/presentation/renderDoc.h"
+ #include "kernel/eventQueueFilters.h"
+ #include "kernel/pthread.h"
+@@ -1243,6 +1244,7 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
+ 	r.submit_ptc = LibKernel::KernelGetProcessTimeCounter();
+ 	r.source     = source;
+ 	r.state      = RequestState::Reserved;
++	Graphics::PassTrace::NoteFlip();
+ 	r.latency_frame = source == FlipRequestSource::GpuEop ? Graphics::LowLatency::OnGpuFlipReserved()
+ 	                                                      : Graphics::LowLatency::TakeCpuFlipFrame();
+ 	if (cfg.slave_count != 0) {
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,150 @@
+From 9696e74ac8b252dcb130ae106aeeced41fbddeba Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Wed, 28 Oct 2026 22:51:46 +0000
+Subject: [PATCH 02/26] feat(agc): APS5_TRACE_MARKERS prints PUSH_MARKER paths
+ with draw and dispatch counts per frame
+
+---
+ .../src/Driver/Packets/PacketExecution.cpp    | 94 +++++++++++++++++++
+ docs/dev/ENVIRONMENT.md                       |  1 +
+ 2 files changed, 95 insertions(+)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp
+index db1978a17e..436106cce9 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp
+@@ -15,11 +15,17 @@
+ #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
+ #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+ #include <atomic>
++#include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <functional>
++#include <map>
++#include <mutex>
++#include <optional>
+ #include <shared_mutex>
++#include <string>
+ #include <utility>
++#include <vector>
+ 
+ namespace AgcDriver::DriverDetail {
+ 
+@@ -27,6 +33,93 @@ namespace {
+ 
+ constexpr std::uint32_t eopSelfSignalFlipLimit = 4;
+ 
++struct MarkerWindow {
++    double startSeconds = 0;
++    std::uint64_t frames = 0;
++};
++
++const std::optional<MarkerWindow>& markerWindow() {
++    static const std::optional<MarkerWindow> window = []() -> std::optional<MarkerWindow> {
++        const char* text = std::getenv("APS5_TRACE_MARKERS");
++        if (text == nullptr || *text == '\0') return std::nullopt;
++        char* end = nullptr;
++        MarkerWindow parsed;
++        parsed.startSeconds = std::strtod(text, &end);
++        parsed.frames = end != nullptr && *end == ':' ? std::strtoull(end + 1, nullptr, 10) : 1;
++        return parsed;
++    }();
++    return window;
++}
++
++struct MarkerTrace {
++    std::mutex mutex;
++    std::map<std::uint32_t, std::vector<std::string>> stacks;
++    std::vector<std::string> order;
++    std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> counts;
++    std::uint64_t printed = 0;
++    std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
++};
++
++MarkerTrace& markerTrace() {
++    static MarkerTrace trace;
++    return trace;
++}
++
++std::string markerText(std::span<const std::uint32_t> packet) {
++    std::string text;
++    for (std::size_t word = 1; word < packet.size(); ++word) {
++        for (std::uint32_t byte = 0; byte < 4u; ++byte) {
++            const auto character = static_cast<char>((packet[word] >> (byte * 8u)) & 0xffu);
++            if (character == '\0') return text;
++            text += character;
++        }
++    }
++    return text;
++}
++
++void noteMarkerPacket(std::uint32_t queueId, std::uint32_t header, std::span<const std::uint32_t> packet, std::uint32_t opcode) {
++    const auto& window = markerWindow();
++    if (!window.has_value()) return;
++    auto& trace = markerTrace();
++    std::lock_guard lock(trace.mutex);
++    if (trace.printed >= window->frames) return;
++    auto& stack = trace.stacks[queueId];
++    const auto custom = opcode == 0x10 ? (header >> 2u) & 0x3fu : 0u;
++    if (custom == 0x0b) {
++        stack.push_back(markerText(packet));
++        return;
++    }
++    if (custom == 0x0c) {
++        if (!stack.empty()) stack.pop_back();
++        return;
++    }
++    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - trace.begin).count();
++    if (elapsed < window->startSeconds) return;
++    if (header == FlipPacketHeader) {
++        if (trace.order.empty()) return;
++        std::string report = "[markers] frame " + std::to_string(trace.printed) + " at " + std::to_string(static_cast<int>(elapsed)) + " s (path: draws/dispatches)\n";
++        for (const auto& path : trace.order) {
++            const auto& [draws, dispatches] = trace.counts[path];
++            report += "[markers]   " + path + ": " + std::to_string(draws) + "/" + std::to_string(dispatches) + "\n";
++        }
++        std::fputs(report.c_str(), stderr);
++        trace.order.clear();
++        trace.counts.clear();
++        ++trace.printed;
++        return;
++    }
++    const bool draw = Pm4::DrawOpcode(opcode);
++    const bool dispatch = opcode == 0x15 || opcode == 0x16;
++    if (!draw && !dispatch) return;
++    char queueName[16];
++    std::snprintf(queueName, sizeof(queueName), "q0x%x", queueId);
++    std::string path = queueName;
++    for (const auto& name : stack) path += " / " + name;
++    auto [entry, inserted] = trace.counts.try_emplace(path);
++    if (inserted) trace.order.push_back(path);
++    ++(draw ? entry->second.first : entry->second.second);
++}
++
+ bool orderedFills() {
+     static const bool ordered = std::getenv("APS5_PIPELINE_DRAIN_FILLS") == nullptr;
+     return ordered;
+@@ -259,6 +352,7 @@ void Driver::execute(const Submission& submission) {
+         const auto count = Pm4::PacketWords(header);
+         const auto packet = std::span(submission.commands).subspan(cursor, count);
+         const auto opcode = (header >> 8u) & 0xffu;
++        noteMarkerPacket(submission.queue, header, packet, opcode);
+         auto nextCursor = cursor + count;
+         const bool predicated = Pm4::Predicated(header) && queue.predication.operation != 0;
+         if (submission.queue == 0 && DrawFinisher::Busy() && !keepsDrawFinisher(header, opcode)) {
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index 7fdf700a1a..4ecd22d7d4 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -72,6 +72,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | Name | Kind | Source | Default | Description |
+ |------|------|--------|---------|-------------|
+ | `APS5_TRACE_LABEL` | integer | `core/libs/prx/libSceAgc/Cb/src/Sync.cpp`, `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Synchronization/LabelHistory.cpp` | 0 | hex guest address; logs a matching RELEASE_MEM when recorded, and nearby RELEASE_MEM, WRITE_DATA, COPY_DATA, DMA_DATA and WAIT_REG_MEM packets when executed |
++| `APS5_TRACE_MARKERS` | string | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp` |  | `<start seconds>:<frames>`; from that many seconds after the first packet, prints for each of the next frames the title's PUSH_MARKER paths per queue with their draw and dispatch counts |
+ 
+ ### libSceAgcDriver
+ 
+-- 
+2.55.0.windows.5
+

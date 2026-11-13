@@ -1,0 +1,683 @@
+From 910826e4858624d05074c4cb03c02263ca0486ad Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Thu, 12 Nov 2026 20:20:55 +0000
+Subject: [PATCH 26/35] feat(hybrid): opt-in NVIDIA low-latency mode through
+ VK_NV_low_latency2
+
+ASTROHYBRID_LOW_LATENCY=1|measure (default off). Enables the extension
+and present IDs when the device reports both, sets the swapchain's
+low-latency sleep mode, ends each guest frame at the DCB submission
+carrying its flip with the driver's latency sleep, numbers frames by
+flip so simulation, render-submit and present markers line up, and
+prints the driver's own per-frame reports every 10 s. measure keeps the
+markers and reports with the mode off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/presentation/videoOut.cpp        |  17 +-
+ .../presentation/window/lowLatency.cpp        | 386 ++++++++++++++++++
+ src/graphics/presentation/window/lowLatency.h |  63 +++
+ .../presentation/window/swapchain.cpp         |  13 +
+ .../presentation/window/vulkanWindow.cpp      |  17 +
+ src/libs/agc.cpp                              |   4 +
+ 6 files changed, 497 insertions(+), 3 deletions(-)
+ create mode 100644 src/graphics/presentation/window/lowLatency.cpp
+ create mode 100644 src/graphics/presentation/window/lowLatency.h
+
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 6ef666c4..396c4901 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -32,6 +32,7 @@
+ #include "graphics/host_gpu/renderer/renderContext.h"
+ #include "graphics/presentation/performanceOverlay.h"
+ #include "graphics/presentation/presenter.h"
++#include "graphics/presentation/window/lowLatency.h"
+ #include "graphics/presentation/renderDoc.h"
+ #include "kernel/eventQueueFilters.h"
+ #include "kernel/pthread.h"
+@@ -257,6 +258,7 @@ private:
+ 		RequestState                state;
+ 		Graphics::Presenter::Frame* frame;
+ 		bool                        premultiplied_alpha;
++		uint64_t                    latency_frame; // ASTROHYBRID_LOW_LATENCY frame number
+ 	};
+ 
+ 	Graphics::Presenter& m_presenter;
+@@ -1241,6 +1243,8 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
+ 	r.submit_ptc = LibKernel::KernelGetProcessTimeCounter();
+ 	r.source     = source;
+ 	r.state      = RequestState::Reserved;
++	r.latency_frame = source == FlipRequestSource::GpuEop ? Graphics::LowLatency::OnGpuFlipReserved()
++	                                                      : Graphics::LowLatency::TakeCpuFlipFrame();
+ 	if (cfg.slave_count != 0) {
+ 		for (auto* queue: {&m_requests, &m_cpu_requests}) {
+ 			for (auto& slave: *queue) {
+@@ -1589,6 +1593,11 @@ bool FlipQueue::Flip(uint32_t micros) {
+ 			m_presenter.Discard(*hidden);
+ 		}
+ 		if (layer_count != 0) {
++			for (size_t i = 0; i < count; i++) {
++				if (requests[i].cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN) {
++					Graphics::LowLatency::SetNextPresentFrame(requests[i].latency_frame);
++				}
++			}
+ 			m_presenter.Present(std::span(layers.data(), layer_count));
+ 		}
+ 		pace_cost = pace_tick != 0 ? PaceLog::NowNs() - present_begin : 0;
+@@ -1980,9 +1989,10 @@ KYTY_SYSV_ABI int VideoOutUnregisterBuffers(int handle, int set_index) {
+ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg) {
+ 	PRINT_NAME();
+ 
+-	uint64_t  request_id = 0;
+-	const int result     = ReserveFlipRequest(DriverState(), handle, index, flip_mode, flip_arg,
+-	                                          FlipRequestSource::Cpu, request_id);
++	uint64_t   request_id    = 0;
++	const auto latency_frame = Graphics::LowLatency::BeginCpuFlip();
++	const int  result        = ReserveFlipRequest(DriverState(), handle, index, flip_mode, flip_arg,
++	                                              FlipRequestSource::Cpu, request_id);
+ 	if (result == VIDEO_OUT_ERROR_INVALID_FLIP_MODE) {
+ 		LOGF("\t unsupported flip_mode = %d\n", flip_mode);
+ 	}
+@@ -1990,6 +2000,7 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
+ 		return result;
+ 	}
+ 	g_video_out_driver->SubmitFlipPreparation(request_id);
++	Graphics::LowLatency::EndCpuFlip(latency_frame);
+ 
+ 	return OK;
+ }
+diff --git a/src/graphics/presentation/window/lowLatency.cpp b/src/graphics/presentation/window/lowLatency.cpp
+new file mode 100644
+index 00000000..fe23dea6
+--- /dev/null
++++ b/src/graphics/presentation/window/lowLatency.cpp
+@@ -0,0 +1,386 @@
++#include "graphics/presentation/window/lowLatency.h"
++
++#include "graphics/host_gpu/vulkanCommon.h"
++
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <vector>
++
++namespace Libs::Graphics::LowLatency {
++
++namespace {
++
++struct State {
++	std::atomic<bool>          enabled {false};
++	VkDevice                   device = VK_NULL_HANDLE;
++	PFN_vkSetLatencySleepModeNV set_sleep_mode = nullptr;
++	PFN_vkLatencySleepNV        sleep          = nullptr;
++	PFN_vkSetLatencyMarkerNV    marker         = nullptr;
++	PFN_vkGetLatencyTimingsNV   timings        = nullptr;
++	VkSemaphore                 semaphore      = VK_NULL_HANDLE;
++	std::atomic<uint64_t>       semaphore_value {0};
++	std::mutex                  mutex; // the swapchain's calls (externally synchronized)
++	VkSwapchainKHR              swapchain = VK_NULL_HANDLE;
++	bool                        sleep_on  = false; // mode 1: the driver's sleep is called
++	VkSwapchainLatencyCreateInfoNV create_info {};
++	// Guest frames: flips set since the last accounted submission; frames ended.
++	std::atomic<uint64_t> flips_set {0};
++	std::atomic<uint64_t> flips_accounted {0};
++	std::atomic<uint64_t> guest_frame {0};
++	std::atomic<uint64_t> gpu_frame {0};
++	// Presenter.
++	uint64_t next_present_frame = 0;
++	uint64_t last_present_id    = 0;
++	int64_t  report_ns          = 0;
++	// Statistics (any thread).
++	std::atomic<uint64_t> sleeps {0};
++	std::atomic<uint64_t> sleep_us {0};
++	std::atomic<uint64_t> sleep_timeouts {0};
++	std::atomic<uint64_t> presents_with_id {0};
++};
++
++State& Get() {
++	static State state;
++	return state;
++}
++
++int64_t NowNs() {
++	return std::chrono::duration_cast<std::chrono::nanoseconds>(
++	           std::chrono::steady_clock::now().time_since_epoch())
++	    .count();
++}
++
++void MarkLocked(State& s, uint64_t frame, VkLatencyMarkerNV marker) {
++	if (s.swapchain == VK_NULL_HANDLE || frame == 0) {
++		return;
++	}
++	VkSetLatencyMarkerInfoNV info {};
++	info.sType     = VK_STRUCTURE_TYPE_SET_LATENCY_MARKER_INFO_NV;
++	info.presentID = frame;
++	info.marker    = marker;
++	s.marker(s.device, s.swapchain, &info);
++}
++
++void Mark(uint64_t frame, VkLatencyMarkerNV marker) {
++	auto&                       s = Get();
++	std::lock_guard<std::mutex> lock(s.mutex);
++	MarkLocked(s, frame, marker);
++}
++
++// The end of guest frame `frame`: its marker, the driver's sleep, the next frame's start.
++void EndGuestFrame(uint64_t frame) {
++	auto& s = Get();
++	Mark(frame, VK_LATENCY_MARKER_SIMULATION_END_NV);
++	uint64_t value = 0;
++	{
++		std::lock_guard<std::mutex> lock(s.mutex);
++		if (s.swapchain != VK_NULL_HANDLE && s.sleep_on) {
++			value = s.semaphore_value.fetch_add(1, std::memory_order_relaxed) + 1;
++			VkLatencySleepInfoNV info {};
++			info.sType           = VK_STRUCTURE_TYPE_LATENCY_SLEEP_INFO_NV;
++			info.signalSemaphore = s.semaphore;
++			info.value           = value;
++			if (s.sleep(s.device, s.swapchain, &info) != VK_SUCCESS) {
++				value = 0;
++			}
++		}
++	}
++	if (value != 0) {
++		const auto      start = NowNs();
++		VkSemaphoreWaitInfo wait {};
++		wait.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
++		wait.semaphoreCount = 1;
++		wait.pSemaphores    = &s.semaphore;
++		wait.pValues        = &value;
++		// Bounded: a frame is never held longer than 100 ms by the sleep.
++		const auto result =
++		    VULKAN_HPP_DEFAULT_DISPATCHER.vkWaitSemaphores(s.device, &wait, 100'000'000ull);
++		if (result == VK_TIMEOUT) {
++			s.sleep_timeouts.fetch_add(1, std::memory_order_relaxed);
++		}
++		s.sleeps.fetch_add(1, std::memory_order_relaxed);
++		s.sleep_us.fetch_add(static_cast<uint64_t>((NowNs() - start) / 1000),
++		                     std::memory_order_relaxed);
++	}
++	Mark(frame + 1, VK_LATENCY_MARKER_SIMULATION_START_NV);
++}
++
++void Report(State& s) {
++	// Called with s.mutex held, from the presenter.
++	const auto now = NowNs();
++	if (s.report_ns == 0) {
++		s.report_ns = now;
++		return;
++	}
++	if (now - s.report_ns < 10'000'000'000LL) {
++		return;
++	}
++	s.report_ns = now;
++	VkGetLatencyMarkerInfoNV query {};
++	query.sType = VK_STRUCTURE_TYPE_GET_LATENCY_MARKER_INFO_NV;
++	s.timings(s.device, s.swapchain, &query);
++	std::vector<VkLatencyTimingsFrameReportNV> reports(query.timingCount);
++	for (auto& report: reports) {
++		report       = {};
++		report.sType = VK_STRUCTURE_TYPE_LATENCY_TIMINGS_FRAME_REPORT_NV;
++	}
++	query.pTimings = reports.data();
++	if (!reports.empty()) {
++		s.timings(s.device, s.swapchain, &query);
++	}
++	uint64_t filled = 0, total = 0, sim = 0, queue = 0, gpu = 0;
++	uint64_t with_present = 0, with_gpu = 0;
++	for (uint32_t i = 0; i < query.timingCount; i++) {
++		const auto& r = reports[i];
++		with_present += r.presentEndTimeUs != 0 ? 1u : 0u;
++		with_gpu += r.gpuRenderEndTimeUs != 0 ? 1u : 0u;
++		if (r.simStartTimeUs == 0 || r.gpuRenderEndTimeUs < r.simStartTimeUs) {
++			continue;
++		}
++		filled++;
++		total += r.gpuRenderEndTimeUs - r.simStartTimeUs;
++		if (r.simEndTimeUs >= r.simStartTimeUs) {
++			sim += r.simEndTimeUs - r.simStartTimeUs;
++		}
++		if (r.gpuRenderStartTimeUs >= r.presentEndTimeUs && r.presentEndTimeUs != 0) {
++			queue += r.gpuRenderStartTimeUs - r.presentEndTimeUs;
++		}
++		if (r.gpuRenderEndTimeUs >= r.gpuRenderStartTimeUs && r.gpuRenderStartTimeUs != 0) {
++			gpu += r.gpuRenderEndTimeUs - r.gpuRenderStartTimeUs;
++		}
++	}
++	const auto sleeps = s.sleeps.exchange(0, std::memory_order_relaxed);
++	const auto sleep_us = s.sleep_us.exchange(0, std::memory_order_relaxed);
++	const double d = static_cast<double>(filled == 0 ? 1 : filled);
++	std::printf("LowLatency 10s: driver reports %u (present times %llu, GPU times %llu, full %llu), "
++	            "sim start -> GPU end "
++	            "%.2f ms, guest frame %.2f ms, present -> GPU start %.2f ms, GPU %.2f ms | sleeps "
++	            "%llu avg %.2f ms, %llu timeouts | presents with ID %llu | flip packets %llu, frames guest %llu CP %llu\n",
++	            query.timingCount, static_cast<unsigned long long>(with_present),
++	            static_cast<unsigned long long>(with_gpu), static_cast<unsigned long long>(filled),
++	            static_cast<double>(total) / d / 1000.0, static_cast<double>(sim) / d / 1000.0,
++	            static_cast<double>(queue) / d / 1000.0, static_cast<double>(gpu) / d / 1000.0,
++	            static_cast<unsigned long long>(sleeps),
++	            sleeps == 0 ? 0.0 : static_cast<double>(sleep_us) / static_cast<double>(sleeps) / 1000.0,
++	            static_cast<unsigned long long>(s.sleep_timeouts.exchange(0)),
++	            static_cast<unsigned long long>(s.presents_with_id.exchange(0)),
++	            static_cast<unsigned long long>(s.flips_set.load()),
++	            static_cast<unsigned long long>(s.guest_frame.load()),
++	            static_cast<unsigned long long>(s.gpu_frame.load()));
++	std::fflush(stdout);
++}
++
++} // namespace
++
++// 0 off, 1 on, 2 measure (markers and driver reports, low-latency mode off).
++static int Mode() {
++	static const int mode = [] {
++		const char* value = std::getenv("ASTROHYBRID_LOW_LATENCY");
++		if (value == nullptr) {
++			return 0;
++		}
++		if (std::strcmp(value, "1") == 0) {
++			return 1;
++		}
++		return std::strcmp(value, "measure") == 0 ? 2 : 0;
++	}();
++	return mode;
++}
++
++bool Requested() {
++	return Mode() != 0;
++}
++
++bool WantExtensions(bool has_low_latency2, bool has_present_id) {
++	if (!Requested()) {
++		return false;
++	}
++	if (!has_low_latency2 || !has_present_id) {
++		std::printf("LowLatency: requested but unavailable (VK_NV_low_latency2 %d, VK_KHR_present_id "
++		            "%d): off\n",
++		            has_low_latency2 ? 1 : 0, has_present_id ? 1 : 0);
++		return false;
++	}
++	return true;
++}
++
++void OnDeviceCreated(VkDevice device) {
++	auto& s = Get();
++	const auto get = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
++	s.device         = device;
++	s.set_sleep_mode = reinterpret_cast<PFN_vkSetLatencySleepModeNV>(get(device, "vkSetLatencySleepModeNV"));
++	s.sleep          = reinterpret_cast<PFN_vkLatencySleepNV>(get(device, "vkLatencySleepNV"));
++	s.marker         = reinterpret_cast<PFN_vkSetLatencyMarkerNV>(get(device, "vkSetLatencyMarkerNV"));
++	s.timings        = reinterpret_cast<PFN_vkGetLatencyTimingsNV>(get(device, "vkGetLatencyTimingsNV"));
++	if (s.set_sleep_mode == nullptr || s.sleep == nullptr || s.marker == nullptr ||
++	    s.timings == nullptr) {
++		std::printf("LowLatency: VK_NV_low_latency2 entry points missing: off\n");
++		return;
++	}
++	VkSemaphoreTypeCreateInfo type {};
++	type.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
++	type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
++	type.initialValue  = 0;
++	VkSemaphoreCreateInfo create {};
++	create.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
++	create.pNext = &type;
++	if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateSemaphore(device, &create, nullptr, &s.semaphore) !=
++	    VK_SUCCESS) {
++		std::printf("LowLatency: timeline semaphore creation failed: off\n");
++		return;
++	}
++	s.create_info.sType             = VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV;
++	s.create_info.latencyModeEnable = VK_TRUE;
++	s.enabled.store(true, std::memory_order_release);
++	std::printf("LowLatency: VK_NV_low_latency2 enabled on the device\n");
++	std::fflush(stdout);
++}
++
++bool Enabled() {
++	return Get().enabled.load(std::memory_order_acquire);
++}
++
++const void* SwapchainCreateNext(const void* next) {
++	auto& s = Get();
++	if (!Enabled()) {
++		return next;
++	}
++	s.create_info.pNext = next;
++	return &s.create_info;
++}
++
++void OnSwapchainCreated(VkSwapchainKHR swapchain) {
++	auto& s = Get();
++	if (!Enabled()) {
++		return;
++	}
++	std::lock_guard<std::mutex> lock(s.mutex);
++	VkLatencySleepModeInfoNV mode {};
++	mode.sType             = VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV;
++	mode.lowLatencyMode    = Mode() == 1 ? VK_TRUE : VK_FALSE;
++	mode.lowLatencyBoost   = Mode() == 1 ? VK_TRUE : VK_FALSE;
++	mode.minimumIntervalUs = 0;
++	const auto result = s.set_sleep_mode(s.device, swapchain, &mode);
++	std::printf("LowLatency: swapchain sleep mode %s -> %s\n",
++	            Mode() == 1 ? "on (boost)" : "off (measure only)",
++	            result == VK_SUCCESS ? "ok" : "failed");
++	std::fflush(stdout);
++	s.swapchain       = result == VK_SUCCESS ? swapchain : VK_NULL_HANDLE;
++	s.sleep_on        = Mode() == 1;
++	s.last_present_id = 0;
++}
++
++void OnSwapchainDestroyed(VkSwapchainKHR swapchain) {
++	auto& s = Get();
++	if (!Enabled()) {
++		return;
++	}
++	std::lock_guard<std::mutex> lock(s.mutex);
++	if (s.swapchain == swapchain) {
++		s.swapchain = VK_NULL_HANDLE;
++	}
++}
++
++void NoteFlipPacket() {
++	if (Enabled()) {
++		Get().flips_set.fetch_add(1, std::memory_order_acq_rel);
++	}
++}
++
++void AfterDcbSubmit() {
++	if (!Enabled()) {
++		return;
++	}
++	auto&      s   = Get();
++	const auto set = s.flips_set.load(std::memory_order_acquire);
++	auto       old = s.flips_accounted.load(std::memory_order_acquire);
++	if (set == old || !s.flips_accounted.compare_exchange_strong(old, set)) {
++		return;
++	}
++	// One frame per flip packet submitted (a submission normally carries one).
++	uint64_t frame = 0;
++	for (uint64_t i = old; i < set; i++) {
++		frame = s.guest_frame.fetch_add(1, std::memory_order_acq_rel) + 1;
++	}
++	EndGuestFrame(frame);
++}
++
++namespace {
++thread_local uint64_t t_cpu_flip_frame = 0;
++} // namespace
++
++uint64_t BeginCpuFlip() {
++	if (!Enabled()) {
++		return 0;
++	}
++	t_cpu_flip_frame = Get().guest_frame.fetch_add(1, std::memory_order_acq_rel) + 1;
++	return t_cpu_flip_frame;
++}
++
++uint64_t TakeCpuFlipFrame() {
++	const auto frame = t_cpu_flip_frame;
++	t_cpu_flip_frame = 0;
++	return frame;
++}
++
++void EndCpuFlip(uint64_t frame) {
++	if (Enabled() && frame != 0) {
++		EndGuestFrame(frame);
++	}
++}
++
++uint64_t OnGpuFlipReserved() {
++	if (!Enabled()) {
++		return 0;
++	}
++	auto&      s     = Get();
++	const auto frame = s.gpu_frame.fetch_add(1, std::memory_order_acq_rel) + 1;
++	std::lock_guard<std::mutex> lock(s.mutex);
++	MarkLocked(s, frame, VK_LATENCY_MARKER_RENDERSUBMIT_END_NV);
++	MarkLocked(s, frame + 1, VK_LATENCY_MARKER_RENDERSUBMIT_START_NV);
++	return frame;
++}
++
++void SetNextPresentFrame(uint64_t frame) {
++	if (Enabled()) {
++		Get().next_present_frame = frame;
++	}
++}
++
++uint64_t BeginPresent(VkSwapchainKHR swapchain) {
++	if (!Enabled()) {
++		return 0;
++	}
++	auto& s = Get();
++	s.mutex.lock();
++	if (s.swapchain != swapchain) {
++		return 0;
++	}
++	const auto frame     = s.next_present_frame;
++	s.next_present_frame = 0;
++	if (frame == 0 || frame <= s.last_present_id) {
++		return 0;
++	}
++	s.last_present_id = frame;
++	MarkLocked(s, frame, VK_LATENCY_MARKER_PRESENT_START_NV);
++	s.presents_with_id.fetch_add(1, std::memory_order_relaxed);
++	return frame;
++}
++
++void EndPresent(VkSwapchainKHR swapchain, uint64_t present_id) {
++	if (!Enabled()) {
++		return;
++	}
++	auto& s = Get();
++	if (s.swapchain == swapchain) {
++		MarkLocked(s, present_id, VK_LATENCY_MARKER_PRESENT_END_NV);
++		Report(s);
++	}
++	s.mutex.unlock();
++}
++
++} // namespace Libs::Graphics::LowLatency
+diff --git a/src/graphics/presentation/window/lowLatency.h b/src/graphics/presentation/window/lowLatency.h
+new file mode 100644
+index 00000000..c30fd2b8
+--- /dev/null
++++ b/src/graphics/presentation/window/lowLatency.h
+@@ -0,0 +1,63 @@
++#ifndef EMULATOR_SRC_GRAPHICS_PRESENTATION_WINDOW_LOWLATENCY_H_
++#define EMULATOR_SRC_GRAPHICS_PRESENTATION_WINDOW_LOWLATENCY_H_
++
++#include <cstdint>
++
++#include <vulkan/vulkan_core.h>
++
++// ASTROHYBRID_LOW_LATENCY=1 (default 0; "measure": markers and driver reports with the
++// low-latency mode and its sleep off, for comparison): NVIDIA low-latency mode through VK_NV_low_latency2 (the
++// Vulkan side of Reflex), driven by Kyty itself. Enabled only when the device reports both
++// VK_NV_low_latency2 and VK_KHR_present_id with its presentId feature; otherwise the switch is
++// ignored and logged as unavailable.
++//
++// Frames are numbered by guest flips, in the order the guest issues them:
++//  - guest render thread: a DCB submission that carries a flip packet (AgcDcbSetFlip since the
++//    previous submission), or a CPU flip (sceVideoOutSubmitFlip), ends frame N
++//    (SIMULATION_END N); the thread then calls vkLatencySleepNV and waits for its semaphore
++//    (bounded), which is where the driver holds back the start of the next frame, and marks
++//    SIMULATION_START N+1;
++//  - command processor: reserving the N-th GPU flip marks RENDERSUBMIT_END N and
++//    RENDERSUBMIT_START N+1 (the CP translates and submits the frame's work up to its flip);
++//  - presenter: the presented flip's frame number is the present ID (VkPresentIdKHR) and
++//    PRESENT_START / PRESENT_END frame the vkQueuePresentKHR call. A present without a new frame
++//    (a repeat at vblank) carries no ID.
++// Every 10 s the presenter reads the driver's own per-frame reports (vkGetLatencyTimingsNV) and
++// prints "LowLatency 10s: ..."; reports with filled timestamps are the proof the driver is acting
++// on the markers. Calls naming the swapchain are serialized by one mutex (also held around
++// vkQueuePresentKHR), as the swapchain is externally synchronized.
++namespace Libs::Graphics::LowLatency {
++
++// The environment switch (read once).
++[[nodiscard]] bool Requested();
++// Device creation: whether to add the two extensions (both present in `available`).
++[[nodiscard]] bool WantExtensions(bool has_low_latency2, bool has_present_id);
++// After vkCreateDevice with them and presentId enabled.
++void OnDeviceCreated(VkDevice device);
++[[nodiscard]] bool Enabled();
++// Swapchain creation: the pNext to chain into VkSwapchainCreateInfoKHR (nullptr when disabled).
++[[nodiscard]] const void* SwapchainCreateNext(const void* next);
++void OnSwapchainCreated(VkSwapchainKHR swapchain);
++void OnSwapchainDestroyed(VkSwapchainKHR swapchain);
++
++// Guest side.
++void NoteFlipPacket();      // AgcDcbSetFlip (any thread)
++void AfterDcbSubmit();      // the bridge's DCB submission returned (guest thread)
++// sceVideoOutSubmitFlip (guest thread): Begin numbers the frame before its reservation (the
++// reservation takes the number with TakeCpuFlipFrame), End ends it once the flip is queued.
++[[nodiscard]] uint64_t BeginCpuFlip();
++[[nodiscard]] uint64_t TakeCpuFlipFrame();
++void                   EndCpuFlip(uint64_t frame);
++// Command processor: a GPU flip was reserved; returns its frame number (0 when disabled).
++[[nodiscard]] uint64_t OnGpuFlipReserved();
++
++// Presenter.
++void SetNextPresentFrame(uint64_t frame);
++// Around vkQueuePresentKHR (present thread): Begin returns the present ID to chain (0: none) and
++// takes the swapchain mutex; End marks PRESENT_END and releases it.
++[[nodiscard]] uint64_t BeginPresent(VkSwapchainKHR swapchain);
++void EndPresent(VkSwapchainKHR swapchain, uint64_t present_id);
++
++} // namespace Libs::Graphics::LowLatency
++
++#endif // EMULATOR_SRC_GRAPHICS_PRESENTATION_WINDOW_LOWLATENCY_H_
+diff --git a/src/graphics/presentation/window/swapchain.cpp b/src/graphics/presentation/window/swapchain.cpp
+index 2cf0c4f5..caa9055e 100644
+--- a/src/graphics/presentation/window/swapchain.cpp
++++ b/src/graphics/presentation/window/swapchain.cpp
+@@ -12,6 +12,7 @@
+ #include "graphics/host_gpu/renderer/render.h"
+ #include "graphics/host_gpu/renderer/renderContext.h"
+ #include "graphics/host_gpu/vulkanCommon.h"
++#include "graphics/presentation/window/lowLatency.h"
+ #include "graphics/presentation/openxrHeadset.h"
+ #include "graphics/presentation/performanceOverlay.h"
+ #include "graphics/presentation/presenter.h"
+@@ -524,9 +525,11 @@ void Swapchain::Create() {
+ 		create_info.presentMode = vk::PresentModeKHR::eFifo;
+ 	}
+ 	create_info.clipped = VK_TRUE;
++	create_info.pNext   = LowLatency::SwapchainCreateNext(create_info.pNext);
+ 	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
+ 	                     "vkCreateSwapchainKHR");
+ 	EXIT_IF(m_handle == nullptr);
++	LowLatency::OnSwapchainCreated(static_cast<VkSwapchainKHR>(m_handle));
+ 	LOGF("Vulkan presentation: %s\n", m_hdr_active ? "HDR10 (PQ)" : "SDR");
+ 
+ 	m_images = EnumerateVulkan<vk::Image>(
+@@ -622,6 +625,7 @@ void Swapchain::Destroy() {
+ 		}
+ 	}
+ 	if (m_handle != nullptr) {
++		LowLatency::OnSwapchainDestroyed(static_cast<VkSwapchainKHR>(m_handle));
+ 		graphics.device.destroySwapchainKHR(m_handle, nullptr);
+ 	}
+ 
+@@ -1197,6 +1201,14 @@ Swapchain::Status Swapchain::Present() {
+ 	present.waitSemaphoreCount = 1;
+ 
+ 	vk::Result result;
++	// ASTROHYBRID_LOW_LATENCY (lowLatency.h): the presented flip's frame number as present ID.
++	const auto            latency_id = LowLatency::BeginPresent(static_cast<VkSwapchainKHR>(m_handle));
++	vk::PresentIdKHR      present_id {};
++	if (latency_id != 0) {
++		present_id.swapchainCount = 1;
++		present_id.pPresentIds    = &latency_id;
++		present.pNext             = &present_id;
++	}
+ 	{
+ 		// The blit this present waits for goes ahead of game batches still waiting for their
+ 		// texture copies: the present never waits for them, nor for a signal not yet submitted.
+@@ -1204,6 +1216,7 @@ Swapchain::Status Swapchain::Present() {
+ 		m_window.graphic_ctx.submission_queue.DrainReadyForPresentLocked();
+ 		result = m_window.graphic_ctx.queue.presentKHR(&present);
+ 	}
++	LowLatency::EndPresent(static_cast<VkSwapchainKHR>(m_handle), latency_id);
+ 	switch (result) {
+ 		case vk::Result::eSuccess: break;
+ 		case vk::Result::eSuboptimalKHR:
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index 7a5413db..afe22daf 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -31,6 +31,7 @@
+ #include "graphics/presentation/systemOverlay.h"
+ #include "graphics/presentation/videoOut.h"
+ #include "graphics/presentation/window.h"
++#include "graphics/presentation/window/lowLatency.h"
+ #include "graphics/presentation/window/windowInternal.h"
+ #include "graphics/shader/recompiler/CodegenOptions.h"
+ #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+@@ -1447,6 +1448,12 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 		conditional_rendering.pNext = const_cast<void*>(create_info.pNext);
+ 		create_info.pNext = &conditional_rendering;
+ 	}
++	vk::PhysicalDevicePresentIdFeaturesKHR present_id {};
++	if (HasExtension(device_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
++		present_id.presentId = VK_TRUE;
++		present_id.pNext     = const_cast<void*>(create_info.pNext);
++		create_info.pNext    = &present_id;
++	}
+ 	create_info.pQueueCreateInfos       = queue_create_infos.data();
+ 	create_info.queueCreateInfoCount    = queue_create_count;
+ 	create_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
+@@ -2117,6 +2124,13 @@ void WindowContext::CreateVulkan() {
+ 				device_extensions.push_back(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+ 			}
+ 		}
++		// ASTROHYBRID_LOW_LATENCY (lowLatency.h): VK_NV_low_latency2 with present IDs.
++		if (LowLatency::WantExtensions(
++		        HasExtension(available_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME),
++		        HasExtension(available_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME))) {
++			device_extensions.push_back(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
++			device_extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
++		}
+ 		// Graphics pipeline libraries (KYTY_PIPELINE_LIBRARY, pipeline/pipelineLibrary.h): only
+ 		// enabled when requested, so the default device is unchanged.
+ 		if (PipelineLibraryRequested() &&
+@@ -2146,6 +2160,9 @@ void WindowContext::CreateVulkan() {
+ 		EXIT("Could not create device");
+ 	}
+ 	VULKAN_HPP_DEFAULT_DISPATCHER.init(graphic_ctx.device);
++	if (HasExtension(device_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME)) {
++		LowLatency::OnDeviceCreated(static_cast<VkDevice>(graphic_ctx.device));
++	}
+ 	// Diagnostic only (KYTY_GPU_OP_PROFILE / KYTY_GPU_OP_COUNTERS): wraps dispatcher entries.
+ 	GpuOpProfiler::InstallHooks(graphic_ctx);
+ 	// KYTY_CP_RECORDER_VERIFY ownership hooks wrap the GpuOpProfiler's.
+diff --git a/src/libs/agc.cpp b/src/libs/agc.cpp
+index cfbf72df..827ef3ca 100644
+--- a/src/libs/agc.cpp
++++ b/src/libs/agc.cpp
+@@ -1,3 +1,4 @@
++#include "graphics/presentation/window/lowLatency.h"
+ #include "libs/agc.h"
+ 
+ #include "common/assert.h"
+@@ -4224,6 +4225,7 @@ uint32_t* KYTY_SYSV_ABI AgcDcbSetFlip(CommandBuffer* buf, uint32_t video_out_han
+                                       int32_t display_buffer_index, uint32_t flip_mode,
+                                       int64_t flip_arg) {
+ 	PRINT_NAME();
++	Graphics::LowLatency::NoteFlipPacket();
+ 
+ 	AgcTrace("\t video_out_handle     = %" PRIu32 "\n"
+ 	     "\t display_buffer_index = %" PRId32 "\n"
+@@ -4326,6 +4328,8 @@ static void submit_dcb(uint32_t* dcb, uint32_t size_in_dwords) {
+ 	GraphicsDbgDumpDcb("d", size_in_dwords, dcb);
+ 	EXIT_IF(g_renderer == nullptr);
+ 	g_renderer->GetGpu().Submit(std::span {dcb, size_in_dwords}, {});
++	// ASTROHYBRID_LOW_LATENCY: a submission carrying a flip ends the guest frame (lowLatency.h).
++	Graphics::LowLatency::AfterDcbSubmit();
+ }
+ 
+ int KYTY_SYSV_ABI AgcDriverSubmitDcb(const Packet* packet) {
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,136 @@
+From 0872512f9c7555794432958ca1a108a116ae481e Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Sun, 8 Nov 2026 20:08:47 +0000
+Subject: [PATCH 19/35] feat(hybrid): opt-in real-time game step
+ (ASTROHYBRID_GAME_SPEED)
+
+Astro Bot advances 1/FrameRate per frame from one global, so below 60 FPS it
+plays in slow motion. With the switch on, each present writes the measured
+frame rate there (clamped 20..120).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/presentation/videoOut.cpp | 84 +++++++++++++++++++++++++-
+ 1 file changed, 83 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 4b705e04..c78125c8 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -1,6 +1,13 @@
+ #include "graphics/presentation/videoOut.h"
+ 
+ #include "common/abi.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
+ #include "common/assert.h"
+ #include "common/common.h"
+ #include "common/cpuPlacement.h"
+@@ -898,6 +905,75 @@ std::atomic<uint32_t>& FrameLimitChoice() {
+ 	return choice;
+ }
+ 
++struct GameStep {
++	double*   fps   = nullptr;
++	float*    dt    = nullptr;
++	uint64_t* us    = nullptr;
++	bool      ready = false;
++	bool      dead  = false;
++	double    ema   = 0.0;
++	uint64_t  last  = 0;
++};
++
++// ASTROHYBRID_GAME_SPEED=1 (default off): Astro Bot advances a fixed 1/FrameRate per frame from one
++// global (eboot 0x8ff0040: f64 frame rate, f32 1/rate, u64 microseconds per frame; image +0x400000),
++// so below 60 FPS the game runs in slow motion (30 FPS = half speed). With the switch on, every
++// present writes the measured frame rate there (the limit itself when the cadence holds it), clamped
++// to 20..120. ASTROHYBRID_GAME_STEP_ADDR overrides the address; the block is checked first.
++void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t limit) {
++	static const bool enabled = [] {
++		const char* value = std::getenv("ASTROHYBRID_GAME_SPEED");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	if (!enabled || step.dead) {
++		return;
++	}
++	if (!step.ready) {
++		const char* custom = std::getenv("ASTROHYBRID_GAME_STEP_ADDR");
++		const auto  addr   = custom != nullptr ? std::strtoull(custom, nullptr, 0) : 0x93F0040ull;
++		MEMORY_BASIC_INFORMATION info {};
++		if (VirtualQuery(reinterpret_cast<void*>(addr), &info, sizeof(info)) != sizeof(info) ||
++		    info.State != MEM_COMMIT || (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) == 0) {
++			step.dead = true;
++			std::printf("Game speed: no frame-rate block at 0x%llx, switch ignored\n", static_cast<unsigned long long>(addr));
++			return;
++		}
++		auto* fps = reinterpret_cast<double*>(addr);
++		auto* dt  = reinterpret_cast<float*>(addr + 8);
++		if (!(*fps >= 10.0 && *fps <= 240.0) || std::abs(*dt * *fps - 1.0) > 1e-3) {
++			step.dead = true;
++			std::printf("Game speed: 0x%llx does not hold a frame rate (%g, %g), switch ignored\n",
++			       static_cast<unsigned long long>(addr), *fps, static_cast<double>(*dt));
++			return;
++		}
++		step.fps   = fps;
++		step.dt    = dt;
++		step.us    = reinterpret_cast<uint64_t*>(addr + 16);
++		step.ready = true;
++		std::printf("Game speed: frame-rate block at 0x%llx (game rate %g), real-time step on\n",
++		       static_cast<unsigned long long>(addr), *fps);
++	}
++	if (step.last != 0 && now > step.last) {
++		const double rate = static_cast<double>(frequency) / static_cast<double>(now - step.last);
++		step.ema          = step.ema == 0.0 ? rate : step.ema + (rate - step.ema) * 0.2;
++	}
++	step.last = now;
++	if (step.ema == 0.0) {
++		return;
++	}
++	double rate = step.ema;
++	if (limit != 0 && std::abs(rate - limit) <= limit * 0.04) {
++		rate = limit;
++	}
++	rate = std::clamp(rate, 20.0, 120.0);
++	if (std::abs(rate - *step.fps) < 0.25) {
++		return;
++	}
++	*step.fps = rate;
++	*step.dt  = static_cast<float>(1.0 / rate);
++	*step.us  = static_cast<uint64_t>(1000000.0 / rate);
++}
++
+ } // namespace
+ 
+ const char* FrameLimitLabel() {
+@@ -943,9 +1019,14 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 	uint32_t previous_limit = FRAME_LIMIT_DISABLED;
+ 	uint64_t next_flip = 0;
+ 
++	GameStep game_step;
+ 	const auto flip = [&](uint32_t limit) {
+ 		if (limit == 0) {
+-			return m_flip_queue.Flip(0);
++			const bool flipped = m_flip_queue.Flip(0);
++			if (flipped) {
++				UpdateGameStep(game_step, Common::Timer::QueryPerformanceCounter(), frequency, 0);
++			}
++			return flipped;
+ 		}
+ 		const auto now = Common::Timer::QueryPerformanceCounter();
+ 		if (now < next_flip || !m_flip_queue.Flip(0)) {
+@@ -956,6 +1037,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 		const bool on_cadence = g_frame_limit_pacing.On() && next_flip != 0 &&
+ 		                        now - next_flip <= frequency / 1000;
+ 		next_flip = (on_cadence ? next_flip : now) + (frequency + limit - 1) / limit;
++		UpdateGameStep(game_step, now, frequency, limit);
+ 		return true;
+ 	};
+ 
+-- 
+2.55.0.windows.5
+

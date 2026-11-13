@@ -1,0 +1,191 @@
+From b6ac01cdb4cfc2d4844c45af50da21716e47785c Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 21:10:23 +0000
+Subject: [PATCH 07/35] feat(hybrid): relay Kyty's window input to the host pad
+ library (milestone 3)
+
+Kyty owns the window, so it reads the keyboard and the gamepads; a relay
+thread reads Kyty's pad state every 4 ms and publishes it through the new
+ABI 1.2 host callback publish_pad. AstroBot.exe in Build\RunHybrid: key
+presses leave the title screen, reach the galaxy map and the intro; Sky
+Garden renders correctly (run-20261106-205252, 210356, 210705).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/hybrid/kytyGpuApi.h        | 26 ++++++++++++++-
+ src/hybrid/kytyGpuBridge.cpp   | 59 ++++++++++++++++++++++++++++++++++
+ tests/hybrid/kytyGpuTestHost.c |  2 +-
+ 3 files changed, 85 insertions(+), 2 deletions(-)
+
+diff --git a/src/hybrid/kytyGpuApi.h b/src/hybrid/kytyGpuApi.h
+index a1a8d609..13db78a9 100644
+--- a/src/hybrid/kytyGpuApi.h
++++ b/src/hybrid/kytyGpuApi.h
+@@ -21,7 +21,7 @@ extern "C" {
+ #endif
+ 
+ #define KYTY_GPU_ABI_VERSION_MAJOR 1u
+-#define KYTY_GPU_ABI_VERSION_MINOR 1u
++#define KYTY_GPU_ABI_VERSION_MINOR 2u
+ #define KYTY_GPU_ABI_VERSION ((KYTY_GPU_ABI_VERSION_MAJOR << 16u) | KYTY_GPU_ABI_VERSION_MINOR)
+ 
+ #if defined(_WIN32)
+@@ -69,6 +69,25 @@ typedef struct KytyGpuNidInfo {
+ #define KYTY_GPU_EVENT_FLIP          2u /* ident: video out handle, data: flip argument */
+ #define KYTY_GPU_EVENT_VBLANK        3u /* ident: video out handle */
+ 
++/* ABI 1.2: one pad's state as Kyty's window reads it (keyboard and gamepads, SCE button bits). */
++typedef struct KytyGpuPadTouch {
++	uint16_t x;
++	uint16_t y;
++	uint8_t  id;
++	uint8_t  active;
++	uint8_t  reserved[2];
++} KytyGpuPadTouch;
++
++typedef struct KytyGpuPadState {
++	uint32_t        buttons;
++	uint8_t         sticks[4]; /* left x, left y, right x, right y; 128 is centred */
++	uint8_t         l2;
++	uint8_t         r2;
++	uint8_t         connected;
++	uint8_t         reserved;
++	KytyGpuPadTouch touch[2];
++} KytyGpuPadState;
++
+ typedef struct KytyGpuHostCallbacks {
+ 	uint32_t struct_size; /* sizeof(KytyGpuHostCallbacks) on the host */
+ 	uint32_t abi_version; /* KYTY_GPU_ABI_VERSION of the host */
+@@ -100,6 +119,10 @@ typedef struct KytyGpuHostCallbacks {
+ 	 * reserved placeholder (MEM_RESERVE_PLACEHOLDER) with its own boundaries, never MEM_FREE:
+ 	 * Kyty adopts it as it is. */
+ 	int (*donate_guest_range)(void* user, uint64_t size, uint64_t* base);
++
++	/* ABI 1.2. Kyty owns the window, so it reads the keyboard and the gamepads; the game reads pads
++	 * through the host's pad library. The DLL publishes each pad's state here, about every 4 ms. */
++	void (*publish_pad)(void* user, int port, const KytyGpuPadState* state);
+ } KytyGpuHostCallbacks;
+ 
+ /* The host module kyty_gpu.dll looks for when game code reaches an export before any host called
+@@ -151,6 +174,7 @@ typedef const KytyGpuApi* (*KytyGpuGetApiFn)(uint32_t abi_version);
+ #endif
+ 
+ #if defined(__cplusplus)
++static_assert(sizeof(KytyGpuPadState) == 28, "KytyGpuPadState layout");
+ static_assert(sizeof(KytyGpuPacket) == 16, "KytyGpuPacket layout");
+ static_assert(offsetof(KytyGpuPacket, dw_num) == 8, "KytyGpuPacket layout");
+ static_assert(offsetof(KytyGpuPacket, flags) == 12, "KytyGpuPacket layout");
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 68eb5862..5d8208f6 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -29,6 +29,7 @@
+ #include "kytyGitVersion.h"
+ #include "libs/agc.h"
+ #include "libs/controller.h"
++#include "libs/padData.h"
+ #include "loader/symbolDatabase.h"
+ #include "loader/timer.h"
+ 
+@@ -214,6 +215,52 @@ void Pump() {
+ 	}
+ }
+ 
++// Input. Kyty's window turns keyboard and gamepad events into Kyty pad state (the same path
++// kyty_emulator uses); the relay reads that state and publishes it to the host's pad library,
++// which the game reads.
++std::thread       g_relay;
++std::atomic<bool> g_relay_stop {false};
++
++void Relay() {
++	namespace Controller = Libs::Controller;
++	if (Controller::PadInit() != 0) {
++		Log(2, "input relay: Kyty's PadInit failed");
++		return;
++	}
++	const int user = Config::GetUserId();
++	int handle = Controller::PadOpen(user, 0, 0, nullptr);
++	if (handle < 0) {
++		handle = Controller::PadGetHandle(user, 0, 0);
++	}
++	if (handle < 0) {
++		Log(2, "input relay: Kyty opened no pad for user %d (0x%x)", user, static_cast<unsigned>(handle));
++		return;
++	}
++	Log(0, "input relay: Kyty pad %d for user %d -> host port 0", handle, user);
++	while (!g_relay_stop.load(std::memory_order_acquire)) {
++		Controller::PadData data {};
++		if (Controller::PadReadState(handle, &data) == 0) {
++			KytyGpuPadState state {};
++			state.buttons   = data.buttons;
++			state.sticks[0] = data.left_stick_x;
++			state.sticks[1] = data.left_stick_y;
++			state.sticks[2] = data.right_stick_x;
++			state.sticks[3] = data.right_stick_y;
++			state.l2        = data.analog_buttons_l2;
++			state.r2        = data.analog_buttons_r2;
++			state.connected = data.connected ? 1 : 0;
++			for (int i = 0; i < 2; ++i) {
++				state.touch[i].active = i < data.touch_data.touch_num ? 1 : 0;
++				state.touch[i].x      = data.touch_data.touch[i].x;
++				state.touch[i].y      = data.touch_data.touch[i].y;
++				state.touch[i].id     = data.touch_data.touch[i].id;
++			}
++			g_host.publish_pad(g_host.user, 0, &state);
++		}
++		std::this_thread::sleep_for(std::chrono::milliseconds(4));
++	}
++}
++
+ bool StartProxy() {
+ 	if (EventQueue::KernelCreateEqueue(&g_proxy, "AstroHybridProxy") != 0 ||
+ 	    EventQueue::KernelAddUserEvent(g_proxy, ProxyWakeId) != 0) {
+@@ -224,6 +271,14 @@ bool StartProxy() {
+ 	return true;
+ }
+ 
++void StopRelay() {
++	if (!g_relay.joinable()) {
++		return;
++	}
++	g_relay_stop.store(true, std::memory_order_release);
++	g_relay.join();
++}
++
+ void StopProxy() {
+ 	if (!g_pump.joinable()) {
+ 		return;
+@@ -462,6 +517,9 @@ int ApiStartGraphics() {
+ 	if (g_host.deliver_event != nullptr && !StartProxy()) {
+ 		return KYTY_GPU_E_STATE;
+ 	}
++	if (g_host.publish_pad != nullptr) {
++		g_relay = std::thread(Relay);
++	}
+ 	if (!Common::HostException::InstallFirstAccessHandler(BridgeGuestAccessFault)) {
+ 		Log(2, "start_graphics: Kyty's guest memory fault handler could not be installed");
+ 		return KYTY_GPU_E_STATE;
+@@ -483,6 +541,7 @@ void ApiShutdown() {
+ 			Log(2, "shutdown: SDL_PushEvent failed: %s", SDL_GetError());
+ 		}
+ 	}
++	StopRelay();
+ 	StopProxy();
+ 	if (g_renderer_thread.joinable()) {
+ 		g_renderer_thread.join();
+diff --git a/tests/hybrid/kytyGpuTestHost.c b/tests/hybrid/kytyGpuTestHost.c
+index 7c3a2e42..b715921a 100644
+--- a/tests/hybrid/kytyGpuTestHost.c
++++ b/tests/hybrid/kytyGpuTestHost.c
+@@ -43,7 +43,7 @@ static void HostDeliver(void* user, uint32_t kind, int64_t ident, uint64_t data)
+ }
+ 
+ static KytyGpuHostCallbacks g_callbacks = {
+-    sizeof(KytyGpuHostCallbacks), KYTY_GPU_ABI_VERSION, NULL, HostLog, HostAdd, HostDelete, HostDeliver, NULL, NULL, NULL,
++    sizeof(KytyGpuHostCallbacks), KYTY_GPU_ABI_VERSION, NULL, HostLog, HostAdd, HostDelete, HostDeliver, NULL, NULL, NULL, NULL,
+ };
+ 
+ __declspec(dllexport) const KytyGpuHostCallbacks* AstroHybridHostCallbacks_nid_no_patch(void) {
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,76 @@
+From 3ff5f802a3bcaebbf85b9c58c89f90426a88a49a Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Sun, 8 Nov 2026 01:46:15 +0000
+Subject: [PATCH 16/35] fix(hybrid): enable persistent graphics caches with a
+ title ID
+
+---
+ .../renderer/pipeline/pipelineCache.cpp       | 24 +++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp b/src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
+index 2d3d72c3..9f87d1cc 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
+@@ -181,6 +181,22 @@ std::string PipelineCacheTitleId() {
+ 	return title_id;
+ }
+ 
++// The hybrid renderer has no standalone loader metadata. This override identifies only
++// cache files; it does not imply that Kyty owns the title's filesystem or loader.
++std::string PipelineCacheFileTitleId() {
++	auto title_id = PipelineCacheTitleId();
++	if (!title_id.empty()) {
++		return title_id;
++	}
++	const auto* value = std::getenv("ASTROHYBRID_CACHE_TITLE_ID");
++	const std::string_view id = value != nullptr ? value : "";
++	if (id.size() != 9 || !id.starts_with("PPSA") ||
++	    !std::ranges::all_of(id.substr(4), [](char c) { return c >= '0' && c <= '9'; })) {
++		return {};
++	}
++	return std::string(id);
++}
++
+ // A hint, not a decoder: whether a code word is shaped like IMAGE_BVH_INTERSECT_RAY or
+ // IMAGE_BVH64_INTERSECT_RAY (MIMG family, opcode 0xe6/0xe7 with the opcode's top bit in bit 0). A
+ // literal can look like one; the only use is ordering the shader precompile replay.
+@@ -5373,7 +5389,7 @@ void PipelineCache::InitializePipelineJournal() {
+ 		std::filesystem::path path;
+ 		if (const auto* custom = std::getenv("KYTY_PIPELINE_JOURNAL_PATH"); custom != nullptr && *custom != '\0') {
+ 			path = custom;
+-		} else if (const auto title_id = PipelineCacheTitleId(); !title_id.empty()) {
++		} else if (const auto title_id = PipelineCacheFileTitleId(); !title_id.empty()) {
+ 			path = std::filesystem::path("_PipelineCache") / (title_id + ".pipelines.journal");
+ 		}
+ 		if (!path.empty()) {
+@@ -5835,7 +5851,7 @@ PipelineCache::~PipelineCache() {
+ }
+ 
+ void PipelineCache::InitializeDriverCache() {
+-	const auto title_id = PipelineCacheTitleId();
++	const auto title_id = PipelineCacheFileTitleId();
+ 	if (title_id.empty()) {
+ 		return;
+ 	}
+@@ -5920,7 +5936,7 @@ void PipelineCache::InitializeProgramDiskCache() {
+ 	    custom != nullptr && *custom != '\0') {
+ 		path = std::filesystem::path(custom);
+ 	} else {
+-		const auto title_id = PipelineCacheTitleId();
++		const auto title_id = PipelineCacheFileTitleId();
+ 		if (title_id.empty()) {
+ 			return;
+ 		}
+@@ -6216,7 +6232,7 @@ void PipelineCache::InitializeShaderPrecompile() {
+ 		    custom != nullptr && *custom != '\0') {
+ 			path = std::filesystem::path(custom);
+ 		} else {
+-			const auto title_id = PipelineCacheTitleId();
++			const auto title_id = PipelineCacheFileTitleId();
+ 			if (title_id.empty()) {
+ 				return;
+ 			}
+-- 
+2.55.0.windows.5
+

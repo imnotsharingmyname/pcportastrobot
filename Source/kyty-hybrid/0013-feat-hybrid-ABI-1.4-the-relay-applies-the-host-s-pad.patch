@@ -1,0 +1,175 @@
+From 57c22bd6c3a211329fe9732835141781158970b6 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Sat, 7 Nov 2026 23:46:03 +0000
+Subject: [PATCH 13/35] feat(hybrid): ABI 1.4, the relay applies the host's pad
+ output (rumble, light bar, trigger effects)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/hybrid/kytyGpuApi.h      | 26 +++++++++++++++-
+ src/hybrid/kytyGpuBridge.cpp | 60 +++++++++++++++++++++++++++++++++---
+ 2 files changed, 81 insertions(+), 5 deletions(-)
+
+diff --git a/src/hybrid/kytyGpuApi.h b/src/hybrid/kytyGpuApi.h
+index 722904ef..a1e1c261 100644
+--- a/src/hybrid/kytyGpuApi.h
++++ b/src/hybrid/kytyGpuApi.h
+@@ -21,7 +21,7 @@ extern "C" {
+ #endif
+ 
+ #define KYTY_GPU_ABI_VERSION_MAJOR 1u
+-#define KYTY_GPU_ABI_VERSION_MINOR 3u
++#define KYTY_GPU_ABI_VERSION_MINOR 4u
+ #define KYTY_GPU_ABI_VERSION ((KYTY_GPU_ABI_VERSION_MAJOR << 16u) | KYTY_GPU_ABI_VERSION_MINOR)
+ 
+ #if defined(_WIN32)
+@@ -88,6 +88,22 @@ typedef struct KytyGpuPadState {
+ 	KytyGpuPadTouch touch[2];
+ } KytyGpuPadState;
+ 
++/* ABI 1.4: what the game asked of a pad through the host's pad library: rumble (game and
++ * audio-driven), the light bar, and each trigger's last effect command as the game passed it to
++ * scePadSetTriggerEffect (56 bytes: mode, then its parameters at +8). */
++typedef struct KytyGpuPadOutput {
++	uint32_t sequence;
++	uint8_t  vibration_large;
++	uint8_t  vibration_small;
++	uint8_t  audio_vibration_large;
++	uint8_t  audio_vibration_small;
++	uint8_t  light_bar_valid;
++	uint8_t  light_bar[3];
++	uint8_t  trigger_set[2]; /* the game set a command for this trigger */
++	uint8_t  reserved[2];
++	uint8_t  trigger_command[2][56];
++} KytyGpuPadOutput;
++
+ typedef struct KytyGpuHostCallbacks {
+ 	uint32_t struct_size; /* sizeof(KytyGpuHostCallbacks) on the host */
+ 	uint32_t abi_version; /* KYTY_GPU_ABI_VERSION of the host */
+@@ -129,8 +145,16 @@ typedef struct KytyGpuHostCallbacks {
+ 	 * game may still submit work while it shuts down. May be null: then the window close is ignored
+ 	 * until the host calls shutdown. */
+ 	void (*request_exit)(void* user, int code);
++
++	/* ABI 1.4. The pad output the game requested since *seen: returns 1 and fills `out` (and
++	 * *seen) when it changed, 0 when not. Kyty owns the physical controller, so the DLL applies it
++	 * (rumble, light bar, DualSense trigger effects). May be null, as in a 1.3 host's table. */
++	int (*fetch_pad_output)(void* user, int port, uint32_t* seen, KytyGpuPadOutput* out);
+ } KytyGpuHostCallbacks;
+ 
++/* The callback table of a 1.3 host, the oldest the DLL accepts. */
++#define KYTY_GPU_HOST_CALLBACKS_SIZE_1_3 offsetof(KytyGpuHostCallbacks, fetch_pad_output)
++
+ /* The host module kyty_gpu.dll looks for when game code reaches an export before any host called
+  * init: LoadLibrary(KYTY_GPU_HOST_MODULE or "libAstroHybridHost.prx"), then this function. */
+ #define KYTY_GPU_HOST_MODULE_DEFAULT "libAstroHybridHost.prx"
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 90da1800..be1b565d 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -35,6 +35,7 @@
+ 
+ #include <SDL3/SDL.h>
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
+@@ -221,6 +222,51 @@ void Pump() {
+ std::thread       g_relay;
+ std::atomic<bool> g_relay_stop {false};
+ 
++// ABI 1.4: the game's pad requests reach the host's pad library; Kyty owns the controller, so the
++// relay applies them through Kyty's own pad functions, which scale them by the controller settings
++// and convert trigger effects for a DualSense. Only what changed is sent again.
++void ApplyPadOutput(int handle, uint32_t& seen, KytyGpuPadOutput& applied) {
++	namespace Controller = Libs::Controller;
++	if (g_host.fetch_pad_output == nullptr) {
++		return;
++	}
++	KytyGpuPadOutput out {};
++	if (g_host.fetch_pad_output(g_host.user, 0, &seen, &out) <= 0) {
++		return;
++	}
++	const uint8_t motor_large = std::max(out.vibration_large, out.audio_vibration_large);
++	const uint8_t motor_small = std::max(out.vibration_small, out.audio_vibration_small);
++	if (motor_large != std::max(applied.vibration_large, applied.audio_vibration_large) ||
++	    motor_small != std::max(applied.vibration_small, applied.audio_vibration_small) || applied.sequence == 0) {
++		const uint8_t vibration[2] = {motor_large, motor_small};
++		(void)Controller::PadSetVibration(handle, reinterpret_cast<const Controller::PadVibrationParam*>(vibration));
++	}
++	if (out.light_bar_valid != applied.light_bar_valid ||
++	    std::memcmp(out.light_bar, applied.light_bar, sizeof(out.light_bar)) != 0) {
++		if (out.light_bar_valid != 0) {
++			const uint8_t color[4] = {out.light_bar[0], out.light_bar[1], out.light_bar[2], 0};
++			(void)Controller::PadSetLightBar(handle, reinterpret_cast<const Controller::PadLightBarParam*>(color));
++		} else {
++			(void)Controller::PadResetLightBar(handle);
++		}
++	}
++	// scePadSetTriggerEffect's parameter: trigger mask, 7 bytes of padding, two 56-byte commands.
++	alignas(8) uint8_t param[120] {};
++	for (int trigger = 0; trigger < 2; ++trigger) {
++		if (out.trigger_set[trigger] != 0 &&
++		    (applied.trigger_set[trigger] == 0 ||
++		     std::memcmp(out.trigger_command[trigger], applied.trigger_command[trigger], 56) != 0)) {
++			param[0] |= static_cast<uint8_t>(1u << trigger);
++			std::memcpy(param + 8 + 56 * trigger, out.trigger_command[trigger], 56);
++		}
++	}
++	if (param[0] != 0) {
++		(void)Controller::PadSetTriggerEffect(handle, reinterpret_cast<const Controller::PadTriggerEffectParam*>(param));
++	}
++	out.sequence = out.sequence != 0 ? out.sequence : 1;
++	applied      = out;
++}
++
+ void Relay() {
+ 	namespace Controller = Libs::Controller;
+ 	if (Controller::PadInit() != 0) {
+@@ -236,7 +282,10 @@ void Relay() {
+ 		Log(2, "input relay: Kyty opened no pad for user %d (0x%x)", user, static_cast<unsigned>(handle));
+ 		return;
+ 	}
+-	Log(0, "input relay: Kyty pad %d for user %d -> host port 0", handle, user);
++	Log(0, "input relay: Kyty pad %d for user %d -> host port 0%s", handle, user,
++	    g_host.fetch_pad_output != nullptr ? ", rumble, light bar and trigger effects <- host" : "");
++	uint32_t         output_seen = 0;
++	KytyGpuPadOutput output_applied {};
+ 	while (!g_relay_stop.load(std::memory_order_acquire)) {
+ 		Controller::PadData data {};
+ 		if (Controller::PadReadState(handle, &data) == 0) {
+@@ -257,6 +306,7 @@ void Relay() {
+ 			}
+ 			g_host.publish_pad(g_host.user, 0, &state);
+ 		}
++		ApplyPadOutput(handle, output_seen, output_applied);
+ 		std::this_thread::sleep_for(std::chrono::milliseconds(4));
+ 	}
+ }
+@@ -353,17 +403,19 @@ int ApiInit(const KytyGpuHostCallbacks* host) {
+ 		return KYTY_GPU_E_ARGUMENT;
+ 	}
+ 	if ((host->abi_version >> 16u) != KYTY_GPU_ABI_VERSION_MAJOR ||
+-	    host->struct_size < sizeof(KytyGpuHostCallbacks)) {
++	    host->struct_size < KYTY_GPU_HOST_CALLBACKS_SIZE_1_3) {
+ 		Log(2, "init: host ABI %u.%u with %u-byte callbacks, this DLL needs %u.x and %zu bytes",
+ 		    host->abi_version >> 16u, host->abi_version & 0xffffu, host->struct_size,
+-		    KYTY_GPU_ABI_VERSION_MAJOR, sizeof(KytyGpuHostCallbacks));
++		    KYTY_GPU_ABI_VERSION_MAJOR, static_cast<size_t>(KYTY_GPU_HOST_CALLBACKS_SIZE_1_3));
+ 		return KYTY_GPU_E_VERSION;
+ 	}
+ 	std::lock_guard lock(g_lifecycle);
+ 	if (g_state.load() != State::Loaded) {
+ 		return KYTY_GPU_E_STATE;
+ 	}
+-	g_host = *host;
++	// A smaller (older) table leaves the fields it does not have null.
++	g_host = {};
++	std::memcpy(&g_host, host, std::min<size_t>(host->struct_size, sizeof(KytyGpuHostCallbacks)));
+ 
+ 	Loader::SymbolDatabase symbols;
+ 	Libs::InitAgcDriver_1(&symbols);
+-- 
+2.55.0.windows.5
+

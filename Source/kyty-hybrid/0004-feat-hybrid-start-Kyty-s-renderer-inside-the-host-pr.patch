@@ -1,0 +1,222 @@
+From 6551a90fb1475af755b0e9b76a3dcb6cb102e598 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 6 Nov 2026 20:20:56 +0000
+Subject: [PATCH 04/35] feat(hybrid): start Kyty's renderer inside the host
+ process (milestone 2a)
+
+start_graphics runs Kyty's subsystems in kyty_emulator's order (Config, Log,
+Timer, Pthread, Profiler, Memory, Controller, Graphics) on a renderer thread
+of its own, which becomes Kyty's main thread and runs the window loop;
+shutdown posts SDL_EVENT_QUIT and joins it. kytyGpuLoadTest --graphics: the
+renderer comes up in 860 ms (RTX 5060, Vulkan 1.4), runs, and stops in
+140 ms; 352 checks pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/hybrid/kytyGpuBridge.cpp   | 86 ++++++++++++++++++++++++++++++++--
+ tests/hybrid/kytyGpuLoadTest.c | 44 +++++++++++++----
+ 2 files changed, 118 insertions(+), 12 deletions(-)
+
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 6e54a300..b6da560a 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -14,16 +14,31 @@
+ #include "hybrid/kytyGpuApi.h"
+ 
+ #include "common/abi.h"
++#include "common/emulatorConfig.h"
++#include "common/logging/log.h"
++#include "common/profiler.h"
++#include "common/subsystems.h"
++#include "common/threads.h"
++#include "graphics/presentation/window.h"
++#include "kernel/memory.h"
++#include "kernel/pthread.h"
+ #include "kytyGitVersion.h"
+ #include "libs/agc.h"
++#include "libs/controller.h"
+ #include "loader/symbolDatabase.h"
++#include "loader/timer.h"
++
++#include <SDL3/SDL.h>
+ 
+ #include <atomic>
++#include <chrono>
++#include <condition_variable>
+ #include <cstdarg>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <mutex>
++#include <thread>
+ 
+ #if defined(_WIN32)
+ #include <windows.h>
+@@ -193,17 +208,82 @@ int ApiInit(const KytyGpuHostCallbacks* host) {
+ 	return KYTY_GPU_OK;
+ }
+ 
++// Kyty's renderer runs on a thread of its own inside the host process. That thread is Kyty's
++// "main thread": it brings the subsystems up in kyty_emulator's order (emulator.cpp Init, minus
++// the ones AnyPS5 keeps: network, file system, audio), then runs the window loop, which presents
++// frames and pumps SDL events until shutdown posts SDL_EVENT_QUIT. The subsystems are destroyed on
++// the same thread, in reverse order, when the loop returns.
++std::thread             g_renderer_thread;
++std::mutex              g_renderer_mutex;
++std::condition_variable g_renderer_ready;
++int                     g_renderer_result = 1;
++
++uint32_t EnvironmentSize(const char* name, uint32_t fallback) {
++	const char* text = std::getenv(name);
++	const long  value = text != nullptr ? std::strtol(text, nullptr, 10) : 0;
++	return value >= 320 && value <= 7680 ? static_cast<uint32_t>(value) : fallback;
++}
++
++void RendererThread() {
++	Common::InitializeThreads();
++	{
++		Common::Subsystems subsystems(true);
++		Config::ConfigOptions options {};
++		options.screen_width  = EnvironmentSize("KYTY_GPU_WIDTH", options.screen_width);
++		options.screen_height = EnvironmentSize("KYTY_GPU_HEIGHT", options.screen_height);
++		subsystems.Initialize<Config::Lifecycle>();
++		Config::Load(options);
++		subsystems.Initialize<Log::Lifecycle>();
++		subsystems.Initialize<Loader::Timer::Lifecycle>();
++		subsystems.Initialize<Libs::LibKernel::PthreadLifecycle>();
++		subsystems.Initialize<Profiler::Lifecycle>();
++		subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
++		subsystems.Initialize<Libs::Controller::Lifecycle>();
++		subsystems.Initialize<Libs::Graphics::Lifecycle>();
++		{
++			std::lock_guard lock(g_renderer_mutex);
++			g_renderer_result = 0;
++		}
++		g_renderer_ready.notify_all();
++		Libs::Graphics::WindowRun();
++		Log(0, "renderer: window loop ended, shutting the subsystems down");
++	}
++	Log(0, "renderer: stopped");
++}
++
+ int ApiStartGraphics() {
++	std::lock_guard lifecycle(g_lifecycle);
+ 	if (g_state.load() != State::Initialized) {
+ 		return KYTY_GPU_E_STATE;
+ 	}
+-	Log(2, "start_graphics: Kyty's renderer start-up inside the host process is milestone 2 "
+-	       "(Config/Log/Timer/Pthread/Memory/Graphics lifecycles, window thread, memory adapter)");
+-	return KYTY_GPU_E_NOT_IMPLEMENTED;
++	g_renderer_result = 1;
++	g_renderer_thread = std::thread(RendererThread);
++	std::unique_lock lock(g_renderer_mutex);
++	const auto started = std::chrono::steady_clock::now();
++	if (!g_renderer_ready.wait_for(lock, std::chrono::seconds(120), [] { return g_renderer_result == 0; })) {
++		Log(2, "start_graphics: Kyty's renderer did not come up within 120 s");
++		return KYTY_GPU_E_STATE;
++	}
++	g_state.store(State::Graphics);
++	Log(0, "start_graphics: Kyty renderer running (%lld ms)",
++	    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
++	                               std::chrono::steady_clock::now() - started)
++	                               .count()));
++	return KYTY_GPU_OK;
+ }
+ 
+ void ApiShutdown() {
+ 	std::lock_guard lock(g_lifecycle);
++	if (g_state.load() == State::Graphics) {
++		SDL_Event quit {};
++		quit.type = SDL_EVENT_QUIT;
++		if (!SDL_PushEvent(&quit)) {
++			Log(2, "shutdown: SDL_PushEvent failed: %s", SDL_GetError());
++		}
++	}
++	if (g_renderer_thread.joinable()) {
++		g_renderer_thread.join();
++	}
+ 	g_state.store(State::Stopped);
+ }
+ 
+diff --git a/tests/hybrid/kytyGpuLoadTest.c b/tests/hybrid/kytyGpuLoadTest.c
+index d9fab0ab..1a84eae9 100644
+--- a/tests/hybrid/kytyGpuLoadTest.c
++++ b/tests/hybrid/kytyGpuLoadTest.c
+@@ -10,7 +10,10 @@
+  *      exact arguments, Kyty functions return their AGC results
+  *   6. lifecycle errors: start_graphics is not implemented yet, submit before graphics is refused
+  *
+- * Usage: kytyGpuLoadTest <kyty_gpu.dll> [<libwinpthread-1.dll to load first>]
++ *   7. --graphics: start_graphics brings Kyty's renderer up on its own thread (window and Vulkan
++ *      device), DCB submission is accepted, shutdown stops the thread
++ *
++ * Usage: kytyGpuLoadTest <kyty_gpu.dll> [--preload <libwinpthread-1.dll>] [--graphics]
+  * Exit code 0 when every check passes. */
+ 
+ #include "../../src/hybrid/kytyGpuApi.h"
+@@ -87,20 +90,32 @@ static int VisitExport(const char* name, void* context) {
+ 
+ int main(int argc, char** argv) {
+ 	if (argc < 2) {
+-		printf("usage: %s <kyty_gpu.dll> [<libwinpthread-1.dll to load first>]\n", argv[0]);
++		printf("usage: %s <kyty_gpu.dll> [--preload <libwinpthread-1.dll>] [--graphics]\n", argv[0]);
+ 		return 2;
+ 	}
+-	if (argc >= 3) {
+-		HMODULE pthread = LoadLibraryA(argv[2]);
+-		CHECK(pthread != NULL, "preloading %s failed (%lu)", argv[2], GetLastError());
+-		printf("preloaded %s\n", argv[2]);
++	const char* preload = NULL;
++	int graphics = 0;
++	for (int i = 2; i < argc; ++i) {
++		if (strcmp(argv[i], "--preload") == 0 && i + 1 < argc) {
++			preload = argv[++i];
++		} else if (strcmp(argv[i], "--graphics") == 0) {
++			graphics = 1;
++		} else {
++			printf("unknown argument %s\n", argv[i]);
++			return 2;
++		}
++	}
++	if (preload != NULL) {
++		HMODULE pthread = LoadLibraryA(preload);
++		CHECK(pthread != NULL, "preloading %s failed (%lu)", preload, GetLastError());
++		printf("preloaded %s\n", preload);
+ 	}
+ 	HMODULE dll = LoadLibraryA(argv[1]);
+ 	if (dll == NULL) {
+ 		printf("FAIL: LoadLibrary(%s) failed with error %lu\n", argv[1], GetLastError());
+ 		return 1;
+ 	}
+-	if (argc >= 3) {
++	if (preload != NULL) {
+ 		char loaded[MAX_PATH] = {0};
+ 		GetModuleFileNameA(GetModuleHandleA("libwinpthread-1.dll"), loaded, MAX_PATH);
+ 		printf("libwinpthread-1.dll in the process: %s\n", loaded);
+@@ -176,9 +191,20 @@ int main(int argc, char** argv) {
+ 
+ 	KytyGpuPacket packet = {NULL, 0, 0, {0, 0, 0}};
+ 	CHECK(api->submit_dcb(&packet) == KYTY_GPU_E_STATE, "submit_dcb before start_graphics was accepted");
+-	CHECK(api->start_graphics() == KYTY_GPU_E_NOT_IMPLEMENTED, "start_graphics did not report it is not implemented yet");
+ 	CHECK(api->register_memory(0x10000, 0x1000, KYTY_GPU_MEMORY_GPU_READ, NULL) == KYTY_GPU_E_NOT_IMPLEMENTED, "register_memory did not report it is not implemented yet");
+-	api->shutdown();
++	if (graphics) {
++		const DWORD started = GetTickCount();
++		const int start = api->start_graphics();
++		CHECK(start == KYTY_GPU_OK, "start_graphics returned %d", start);
++		printf("start_graphics: %d after %lu ms\n", start, GetTickCount() - started);
++		CHECK(api->start_graphics() == KYTY_GPU_E_STATE, "a second start_graphics was accepted");
++		Sleep(3000);
++		const DWORD stopping = GetTickCount();
++		api->shutdown();
++		printf("shutdown: %lu ms\n", GetTickCount() - stopping);
++	} else {
++		api->shutdown();
++	}
+ 
+ 	printf("%d checks, %d failed\n", g_checks, g_failures);
+ 	return g_failures == 0 ? 0 : 1;
+-- 
+2.55.0.windows.5
+

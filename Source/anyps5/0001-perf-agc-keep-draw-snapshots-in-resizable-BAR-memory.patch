@@ -1,0 +1,543 @@
+From b951663db6d94c914ded13a5f41ef33b57087f9a Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Wed, 28 Oct 2026 21:05:53 +0000
+Subject: [PATCH 01/26] perf(agc): keep draw snapshots in resizable BAR memory
+ (PR #9712 applied locally)
+
+---
+ core/libs/prx/libSceAgcDriver/CMakeLists.txt  |  4 +-
+ .../Graphics/include/BufferPool.hpp           |  4 +-
+ .../Graphics/include/Context.hpp              | 63 ++++++++++++++-
+ .../Graphics/include/Resources.hpp            |  1 +
+ .../Graphics/src/BufferPool.cpp               | 16 ++--
+ .../prx/libSceAgcDriver/Graphics/src/Draw.cpp |  2 +-
+ .../libSceAgcDriver/Graphics/src/Recorder.cpp |  4 +-
+ .../Graphics/src/Resources.cpp                | 12 ++-
+ .../Graphics/src/ShaderResources.cpp          |  2 +-
+ .../prx/libSceAgcDriver/tests/BufferPool.cpp  | 80 ++++++++++++++++++-
+ .../prx/libSceAgcDriver/tests/Graphics.cpp    | 22 +++++
+ .../prx/libSceAgcDriver/tests/Recorder.cpp    | 15 ++++
+ docs/dev/ENVIRONMENT.md                       |  1 +
+ 13 files changed, 208 insertions(+), 18 deletions(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/CMakeLists.txt b/core/libs/prx/libSceAgcDriver/CMakeLists.txt
+index 8db10030ca..9e9dd05b06 100644
+--- a/core/libs/prx/libSceAgcDriver/CMakeLists.txt
++++ b/core/libs/prx/libSceAgcDriver/CMakeLists.txt
+@@ -1881,6 +1881,8 @@ if(BUILD_TESTING)
+     set_tests_properties(agc_draw_inputs_in_place PROPERTIES SKIP_RETURN_CODE 77)
+     add_test(NAME agc_draw_inputs_copied COMMAND agc_driver_recorder_tests --draw-inputs-copied-only)
+     set_tests_properties(agc_draw_inputs_copied PROPERTIES SKIP_RETURN_CODE 77)
++    add_test(NAME agc_draw_input_memory COMMAND agc_driver_recorder_tests --draw-input-memory-only)
++    set_tests_properties(agc_draw_input_memory PROPERTIES SKIP_RETURN_CODE 77)
+     add_test(NAME agc_resident_present COMMAND agc_driver_recorder_tests --resident-present-only)
+     set_tests_properties(agc_resident_present PROPERTIES SKIP_RETURN_CODE 77)
+     add_test(NAME agc_queued_write_groups COMMAND agc_driver_recorder_tests --queued-write-groups-only)
+@@ -1891,7 +1893,7 @@ if(BUILD_TESTING)
+     add_test(NAME agc_metadata_pass COMMAND agc_driver_recorder_tests --metadata-pass-only)
+     set_tests_properties(agc_metadata_pass PROPERTIES SKIP_RETURN_CODE 77)
+     if(WIN32)
+-        set_tests_properties(agc_recorder_read_list agc_host_import_unmap agc_parked_import_unmap agc_host_import_retirement agc_sparse_run_import agc_sparse_run_import_copied agc_unit_shadow agc_driver_recorder agc_idle_publish_wait agc_descriptor_pool_recycling agc_draw_snapshot_cap agc_draw_snapshot_epoch agc_multisample_guest_access agc_repeat_storage_guard agc_draw_inputs_in_place agc_draw_inputs_copied agc_resident_present agc_slice_dirty agc_queued_write_groups agc_metadata_pass agc_tiled_resolve PROPERTIES ENVIRONMENT_MODIFICATION
++        set_tests_properties(agc_recorder_read_list agc_host_import_unmap agc_parked_import_unmap agc_host_import_retirement agc_sparse_run_import agc_sparse_run_import_copied agc_unit_shadow agc_driver_recorder agc_idle_publish_wait agc_descriptor_pool_recycling agc_draw_snapshot_cap agc_draw_snapshot_epoch agc_multisample_guest_access agc_repeat_storage_guard agc_draw_inputs_in_place agc_draw_inputs_copied agc_draw_input_memory agc_resident_present agc_slice_dirty agc_queued_write_groups agc_metadata_pass agc_tiled_resolve PROPERTIES ENVIRONMENT_MODIFICATION
+             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+         add_test(NAME agc_host_import_second_mapping COMMAND agc_driver_recorder_tests --host-import-second-mapping-only)
+         set_tests_properties(agc_host_import_second_mapping PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT_MODIFICATION
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/BufferPool.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/BufferPool.hpp
+index fde185380f..fee645c1e5 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/BufferPool.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/BufferPool.hpp
+@@ -34,6 +34,7 @@ struct SlabSlot {
+     VkDeviceMemory memory;
+     VkDeviceSize offset;
+     void* mapping;
++    std::uint32_t memoryType = 0;
+ };
+ 
+ // Released buffer allocations kept for reuse, since creating, binding and mapping one costs tens of
+@@ -76,7 +77,7 @@ public:
+     VkDeviceSize ReclaimIdleDevice(VkDeviceSize bytes, std::chrono::steady_clock::time_point now);
+     static bool SlabEligible(std::size_t capacity, VkDeviceSize alignment, VkDeviceSize size, VkDeviceSize atom);
+     static VkDeviceSize SlabBlockBytes(std::size_t capacity);
+-    SlabSlot TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable);
++    SlabSlot TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable, std::optional<std::uint32_t> hostType = std::nullopt);
+     VkDeviceSize PutSlot(VkDeviceMemory memory, VkDeviceSize offset) noexcept;
+     std::size_t SlabBlocks();
+ 
+@@ -88,6 +89,7 @@ private:
+         std::vector<std::uint32_t> free;
+         std::uint32_t used = 0;
+         std::uint64_t slab = 0;
++        std::uint32_t memoryType = 0;
+     };
+     struct Slab {
+         std::vector<SlabBlock*> available;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp
+index e909c5a1ef..b0b982e7c4 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp
+@@ -10,6 +10,7 @@
+ #include <atomic>
+ #include <cstdint>
+ #include <cstdio>
++#include <cstdlib>
+ #include <functional>
+ #include <memory>
+ #include <mutex>
+@@ -151,6 +152,19 @@ inline std::uint64_t& DeviceProcLookups() {
+ 
+ inline constexpr std::size_t EmptyBufferBytes = 16;
+ 
++inline constexpr VkMemoryPropertyFlags HostBufferProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++inline constexpr VkMemoryPropertyFlags MappedDeviceProperties = HostBufferProperties | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++
++inline VkMemoryPropertyFlags SnapshotMemoryProperties(const VkPhysicalDeviceMemoryProperties& memory, bool disabled) {
++    constexpr VkDeviceSize ResizableBarBytes = VkDeviceSize{4} << 30u;
++    if (disabled) return HostBufferProperties;
++    for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
++        const auto& type = memory.memoryTypes[i];
++        if ((type.propertyFlags & MappedDeviceProperties) == MappedDeviceProperties && type.heapIndex < memory.memoryHeapCount && memory.memoryHeaps[type.heapIndex].size >= ResizableBarBytes) return MappedDeviceProperties;
++    }
++    return HostBufferProperties;
++}
++
+ struct Context {
+     VkDevice device;
+     VkPhysicalDevice physical;
+@@ -299,10 +313,20 @@ struct Context {
+         return Function<TFunction>(name);
+     }
+ 
+-    std::uint32_t MemoryType(std::uint32_t mask, VkMemoryPropertyFlags flags) const {
++    VkMemoryPropertyFlags SnapshotProperties() const {
++        static const bool disabled = std::getenv("APS5_NO_BAR_SNAPSHOTS") != nullptr;
++        return SnapshotMemoryProperties(memory, disabled);
++    }
++
++    std::optional<std::uint32_t> MatchingMemoryType(std::uint32_t mask, VkMemoryPropertyFlags flags) const {
+         for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+             if ((mask & (1u << i)) != 0 && (memory.memoryTypes[i].propertyFlags & flags) == flags) return i;
+         }
++        return std::nullopt;
++    }
++
++    std::uint32_t MemoryType(std::uint32_t mask, VkMemoryPropertyFlags flags) const {
++        if (const auto type = MatchingMemoryType(mask, flags)) return *type;
+         throw std::runtime_error("AGC graphics: required Vulkan memory type is unavailable");
+     }
+ 
+@@ -364,6 +388,43 @@ struct Context {
+         if (refused >= memory.memoryTypeCount || (memory.memoryHeaps[memory.memoryTypes[refused].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) return std::nullopt;
+         return HostMemoryType(mask);
+     }
++
++    VkMemoryPropertyFlags MappedBufferProperties(std::uint32_t mask, VkMemoryPropertyFlags flags, VkDeviceSize bytes) const {
++        if ((flags & MappedDeviceProperties) != MappedDeviceProperties) return flags;
++        const auto mapped = MatchingMemoryType(mask, flags);
++        if (!mapped) {
++            static std::atomic<std::uint64_t> placements{0};
++            const auto count = placements.fetch_add(1) + 1;
++            if (count <= 5 || (count & (count - 1)) == 0) std::fprintf(stderr, "[gpu] mapped buffer: none of the buffer's memory types (mask 0x%x) is mapped device-local, placed in host memory; %llu such allocations\n", mask, static_cast<unsigned long long>(count));
++            return HostBufferProperties;
++        }
++        if (memoryProperties2 == nullptr || physical == VK_NULL_HANDLE) return flags;
++        VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
++        VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
++        properties.pNext = &reported;
++        memoryProperties2(physical, &properties);
++        const auto heap = memory.memoryTypes[*mapped].heapIndex;
++        const auto budget = reported.heapBudget[heap];
++        const auto usage = reported.heapUsage[heap];
++        if (budget == 0 || (usage < budget && bytes <= budget - usage)) return flags;
++        static std::atomic<std::uint64_t> placements{0}, placedBytes{0};
++        const auto count = placements.fetch_add(1) + 1;
++        const auto total = placedBytes.fetch_add(bytes) + bytes;
++        if (count <= 5 || (count & (count - 1)) == 0) std::fprintf(stderr, "[gpu] mapped buffer: device-local heap %u uses %llu of its %llu MiB budget, %llu bytes placed in host memory; %llu such allocations, %llu MiB\n", heap, static_cast<unsigned long long>(usage >> 20u), static_cast<unsigned long long>(budget >> 20u), static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(count), static_cast<unsigned long long>(total >> 20u));
++        return HostBufferProperties;
++    }
++
++    std::optional<std::uint32_t> RefusedMappedMemoryFallback(std::uint32_t mask, VkMemoryPropertyFlags flags, std::uint32_t refused) const {
++        if ((flags & MappedDeviceProperties) != MappedDeviceProperties || refused >= memory.memoryTypeCount || (memory.memoryHeaps[memory.memoryTypes[refused].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) return std::nullopt;
++        std::optional<std::uint32_t> host;
++        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
++            const auto& type = memory.memoryTypes[i];
++            if ((mask & (1u << i)) == 0 || (type.propertyFlags & HostBufferProperties) != HostBufferProperties || (memory.memoryHeaps[type.heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) continue;
++            if ((type.propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0) return i;
++            if (!host) host = i;
++        }
++        return host;
++    }
+ };
+ 
+ inline VkShaderModule CreateShaderModule(const Context& context, const std::uint32_t* code, std::size_t bytes, const char* operation) {
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/Resources.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/Resources.hpp
+index 674cff0c47..7d814f21d9 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/Resources.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/Resources.hpp
+@@ -18,6 +18,7 @@ public:
+     // shadows of GuestBufferMemory) has no mapping and its bytes move by GPU copies alone.
+     std::span<std::byte> Bytes();
+     bool Mapped() const { return mapping != nullptr; }
++    VkMemoryPropertyFlags Properties() const { return properties; }
+     void Invalidate();
+ 
+ private:
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp
+index c8d36deaa3..8cb9eb1149 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp
+@@ -238,7 +238,7 @@ std::uint64_t BufferPool::SlabKey(std::uint32_t memoryType, std::size_t capacity
+     return (static_cast<std::uint64_t>(memoryType) << 40u) | (static_cast<std::uint64_t>(addressable ? 1u : 0u) << 39u) | static_cast<std::uint64_t>(capacity);
+ }
+ 
+-SlabSlot BufferPool::TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable) {
++SlabSlot BufferPool::TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable, std::optional<std::uint32_t> hostType) {
+     const auto key = SlabKey(memoryType, capacity, addressable);
+     const auto takeFrom = [&](SlabBlock& block, Slab& slab) {
+         const auto index = block.free.back();
+@@ -246,12 +246,16 @@ SlabSlot BufferPool::TakeSlot(const Context& context, std::uint32_t memoryType,
+         if (block.used++ == 0) --slab.emptyBlocks;
+         if (block.free.empty()) slab.available.erase(std::find(slab.available.begin(), slab.available.end(), &block));
+         const auto offset = static_cast<VkDeviceSize>(index) * block.slotBytes;
+-        return SlabSlot{block.memory, offset, block.mapping != nullptr ? block.mapping + offset : nullptr};
++        return SlabSlot{block.memory, offset, block.mapping != nullptr ? block.mapping + offset : nullptr, block.memoryType};
+     };
+     {
+         std::lock_guard lock(slabMutex);
+         auto& slab = slabs[key];
+         if (!slab.available.empty()) return takeFrom(*slab.available.back(), slab);
++        if (hostType.has_value() && *hostType != memoryType) {
++            auto& host = slabs[SlabKey(*hostType, capacity, addressable)];
++            if (!host.available.empty()) return takeFrom(*host.available.back(), host);
++        }
+     }
+     const auto blockBytes = SlabBlockBytes(capacity);
+     const auto release = [this](SlabBlock* block) noexcept {
+@@ -260,14 +264,14 @@ SlabSlot BufferPool::TakeSlot(const Context& context, std::uint32_t memoryType,
+     };
+     std::unique_ptr<SlabBlock, decltype(release)> block(new SlabBlock, release);
+     block->slotBytes = capacity;
+-    block->slab = key;
+     VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+     const VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, nullptr, VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, 0};
+     if (addressable) allocation.pNext = &flags;
+     allocation.allocationSize = blockBytes;
+     allocation.memoryTypeIndex = memoryType;
+-    block->memory = AllocateMemory(allocation, "vkAllocateMemory buffer slab");
+-    if ((context.memory.memoryTypes[memoryType].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
++    block->memory = AllocateMemory(allocation, "vkAllocateMemory buffer slab", hostType, &block->memoryType);
++    block->slab = block->memoryType == memoryType ? key : SlabKey(block->memoryType, capacity, addressable);
++    if ((context.memory.memoryTypes[block->memoryType].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
+         void* mapping = nullptr;
+         const auto mapped = mapMemory(device, block->memory, 0, VK_WHOLE_SIZE, 0, &mapping);
+         Check(mapped, "vkMapMemory buffer slab");
+@@ -277,7 +281,7 @@ SlabSlot BufferPool::TakeSlot(const Context& context, std::uint32_t memoryType,
+     block->free.reserve(slots);
+     for (std::uint32_t index = slots; index-- != 0;) block->free.push_back(index);
+     std::lock_guard lock(slabMutex);
+-    auto& slab = slabs[key];
++    auto& slab = slabs[block->slab];
+     if (slab.blocks == slab.available.capacity()) slab.available.reserve(std::max<std::size_t>(1, slab.available.capacity() * 2));
+     auto& inserted = *block;
+     const auto owner = slabBlocks.try_emplace(inserted.memory).first;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+index d6b2cae746..7aa91265cb 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+@@ -1216,7 +1216,7 @@ DrawInputCopy CopyDrawInput(const Context& context, Recorder* recorder, std::uin
+             return copy;
+         }
+     }
+-    copy.buffer = std::make_shared<Buffer>(context, bytes, use == Recorder::SnapshotUse::Vertex ? VK_BUFFER_USAGE_VERTEX_BUFFER_BIT : VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
++    copy.buffer = use == Recorder::SnapshotUse::Vertex ? std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, context.SnapshotProperties()) : std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+     GuestMemory::Read(address, copy.buffer->Bytes(), alignment);
+     return copy;
+ }
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+index 8f077856a2..89f3b6f68a 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+@@ -2793,7 +2793,7 @@ Recorder::UploadSlice Recorder::DrawUpload(std::size_t bytes) {
+     const VkDeviceSize alignment = std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 16);
+     auto offset = (drawUploadUsed + alignment - 1) & ~(alignment - 1);
+     if (drawUpload == nullptr || offset + bytes > drawUpload->Bytes().size()) {
+-        drawUpload = std::make_shared<Buffer>(context, std::max(DrawUploadChunk, bytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
++        drawUpload = std::make_shared<Buffer>(context, std::max(DrawUploadChunk, bytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, context.SnapshotProperties());
+         offset = 0;
+     }
+     drawUploadUsed = offset + bytes;
+@@ -2898,7 +2898,7 @@ bool Recorder::refreshDrawSnapshot(DrawSnapshot& entry, std::uint64_t address, s
+         spans.push_back({held.data() + offset, reinterpret_cast<const void*>(from), static_cast<std::size_t>(to - from)});
+     }
+     equal.assign(spans.size(), 0);
+-    CompareSpans(spans, equal);
++    if ((entry.buffer->Properties() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0) CompareSpans(spans, equal);
+     for (std::size_t k = 0; k < spans.size(); ++k) {
+         if (equal[k] != 0) continue;
+         const auto offset = static_cast<std::size_t>(static_cast<const std::byte*>(spans[k].first) - held.data());
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Resources.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Resources.cpp
+index e75cb79f82..3442aac30d 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Resources.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Resources.cpp
+@@ -96,9 +96,13 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
+         // The CPU reads most of these buffers back (write-back, diffs), which is very slow from
+         // write-combined memory, so the default host properties prefer cached host memory.
+         const bool useSlab = (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 && BufferPool::SlabEligible(capacity, requirements.alignment, requirements.size, context.limits.nonCoherentAtomSize);
+-        allocation.memoryTypeIndex = context.BufferMemoryType(requirements.memoryTypeBits, properties, useSlab ? BufferPool::SlabBlockBytes(capacity) : allocation.allocationSize);
++        const auto placedBytes = useSlab ? BufferPool::SlabBlockBytes(capacity) : allocation.allocationSize;
++        this->properties = context.MappedBufferProperties(requirements.memoryTypeBits, properties, placedBytes);
++        allocation.memoryTypeIndex = context.BufferMemoryType(requirements.memoryTypeBits, this->properties, placedBytes);
++        const auto refused = context.RefusedMappedMemoryFallback(requirements.memoryTypeBits, this->properties, allocation.memoryTypeIndex);
+         if (useSlab) {
+-            const auto slot = cache->TakeSlot(context, allocation.memoryTypeIndex, capacity, addressable);
++            const auto slot = cache->TakeSlot(context, allocation.memoryTypeIndex, capacity, addressable, refused);
++            if (slot.memoryType != allocation.memoryTypeIndex) this->properties = HostBufferProperties;
+             memory = slot.memory;
+             offset = slot.offset;
+             slab = true;
+@@ -112,7 +116,9 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
+             ready = true;
+             return;
+         }
+-        memory = cache->AllocateMemory(allocation, "vkAllocateMemory buffer");
++        std::uint32_t allocatedType = allocation.memoryTypeIndex;
++        memory = cache->AllocateMemory(allocation, "vkAllocateMemory buffer", refused, &allocatedType);
++        if (allocatedType != allocation.memoryTypeIndex) this->properties = HostBufferProperties;
+         Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, 0), "vkBindBufferMemory");
+         initializeAddress(usage);
+         if ((properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) Check(context.Function<PFN_vkMapMemory>("vkMapMemory")(context.device, memory, 0, VK_WHOLE_SIZE, 0, &mapping), "vkMapMemory");
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+index 774f8691cb..b933593513 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+@@ -5720,7 +5720,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
+                 const auto generation = GuestMemory::CollectWrites(begin, bytes);
+                 buffer = recorder.ReusableDrawSnapshot(begin, bytes, Recorder::SnapshotUse::Storage, nullptr, generation, &offset);
+                 if (buffer == nullptr) {
+-                    buffer = std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
++                    buffer = std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, context.SnapshotProperties());
+                     std::memcpy(buffer->Bytes().data(), reinterpret_cast<const void*>(begin), bytes);
+                     recorder.KeepDrawSnapshot(begin, bytes, generation, registryGeneration, buffer);
+                 }
+diff --git a/core/libs/prx/libSceAgcDriver/tests/BufferPool.cpp b/core/libs/prx/libSceAgcDriver/tests/BufferPool.cpp
+index fcdf6ea91e..fbb0328da8 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/BufferPool.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/BufferPool.cpp
+@@ -51,8 +51,10 @@ struct MockDevice {
+     std::map<VkDeviceMemory, VkDeviceSize> memoryBytes;
+     std::map<VkDeviceMemory, std::uint32_t> memoryTypes;
+     std::map<VkBuffer, std::pair<VkDeviceMemory, VkDeviceSize>> bound;
++    std::map<VkBuffer, std::uint32_t> bufferTypeBits;
+     std::set<VkBuffer> liveBuffers;
+     std::deque<VkResult> results;
++    std::uint32_t memoryTypeBits = 3;
+     VkDeviceSize limit = 0;
+     VkResult pressureResult = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+     std::uint64_t attempts = 0;
+@@ -74,7 +76,8 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateBuffer(VkDevice, const VkBufferCreateIn
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL mockGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* requirements) {
+-    *requirements = {mock.sizes.at(buffer), 256, 3};
++    *requirements = {mock.sizes.at(buffer), 256, mock.memoryTypeBits};
++    mock.bufferTypeBits[buffer] = mock.memoryTypeBits;
+ }
+ 
+ VKAPI_ATTR VkResult VKAPI_CALL mockAllocateMemory(VkDevice, const VkMemoryAllocateInfo* info, const VkAllocationCallbacks*, VkDeviceMemory* memory) {
+@@ -90,7 +93,7 @@ VKAPI_ATTR VkResult VKAPI_CALL mockAllocateMemory(VkDevice, const VkMemoryAlloca
+         return result;
+     }
+     *memory = reinterpret_cast<VkDeviceMemory>(static_cast<std::uintptr_t>(mock.next++));
+-    if (info->memoryTypeIndex == 1) mock.hostMemory[*memory].resize(info->allocationSize);
++    if (info->memoryTypeIndex != 0) mock.hostMemory[*memory].resize(info->allocationSize);
+     mock.memoryBytes[*memory] = info->allocationSize;
+     mock.memoryTypes[*memory] = info->memoryTypeIndex;
+     mock.liveBytes += info->allocationSize;
+@@ -102,6 +105,11 @@ VKAPI_ATTR VkResult VKAPI_CALL mockBindBufferMemory(VkDevice, VkBuffer buffer, V
+     ++mock.binds;
+     if (mock.bindResult != VK_SUCCESS) return mock.bindResult;
+     if (offset + mock.sizes.at(buffer) > mock.memoryBytes.at(memory)) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++    const auto permitted = mock.bufferTypeBits.contains(buffer) ? mock.bufferTypeBits.at(buffer) : mock.memoryTypeBits;
++    if (((permitted >> mock.memoryTypes.at(memory)) & 1u) == 0) {
++        Expect(false, "a buffer was bound to memory type " + std::to_string(mock.memoryTypes.at(memory)) + ", which its memoryTypeBits " + std::to_string(permitted) + " exclude");
++        return VK_ERROR_UNKNOWN;
++    }
+     mock.bound[buffer] = {memory, offset};
+     return VK_SUCCESS;
+ }
+@@ -255,6 +263,72 @@ void RefusedDevicePlacement() {
+     Expect(mock.liveBuffers.empty(), "a failed device buffer left its VkBuffer alive");
+ }
+ 
++void MappedDevicePlacement() {
++    constexpr auto mapped = HostVisible | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++    const auto placed = [&](std::size_t bytes, bool budget = true) {
++        auto context = budgetContext();
++        if (!budget) context.memoryProperties2 = nullptr;
++        context.memory.memoryTypeCount = 3;
++        context.memory.memoryTypes[2] = {mapped, 0};
++        Buffer buffer(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, mapped);
++        const auto type = mock.memoryTypes.at(MemoryOf(buffer.Handle()));
++        Expect(buffer.Properties() == (type == 2 ? mapped : HostVisible), "a mapped buffer's properties do not name the memory it was placed in");
++        return type;
++    };
++    mock = MockDevice{};
++    mock.memoryTypeBits = 7;
++    reportedBudget = 1620 * MiB;
++    reportedUsage = 200 * MiB;
++    Expect(placed(9 * MiB) == 2, "a mapped device-local buffer within the device-local budget was not placed in its device-local type");
++    Expect(placed(4096) == 2, "a mapped device-local slab within the device-local budget was not placed in its device-local type");
++    reportedUsage = 1615 * MiB;
++    Expect(placed(9 * MiB) == 1, "a mapped device-local buffer over the device-local budget was not placed in host memory");
++    reportedUsage = 1619 * MiB;
++    Expect(placed(4096) == 1, "a mapped device-local slab whose block exceeds the device-local budget was not placed in host memory");
++    reportedUsage = 200 * MiB;
++    mock.results = {VK_ERROR_OUT_OF_DEVICE_MEMORY};
++    Expect(placed(9 * MiB) == 1, "a mapped device-local buffer still refused device memory after reclaiming the pool was not placed in host memory");
++    mock.results = {VK_ERROR_OUT_OF_DEVICE_MEMORY};
++    Expect(placed(4096) == 1, "a mapped device-local slab still refused device memory after reclaiming the pool was not placed in host memory");
++    mock.memoryTypeBits = 3;
++    Expect(placed(9 * MiB) == 1, "a mapped device-local buffer whose memory types exclude the BAR type was not placed in the host type");
++    Expect(placed(4096) == 1, "a mapped device-local slab whose memory types exclude the BAR type was not placed in the host type");
++    Expect(placed(9 * MiB, false) == 1, "a mapped device-local buffer whose memory types exclude the BAR type was not placed in the host type without the memory budget extension");
++    Expect(placed(4096, false) == 1, "a mapped device-local slab whose memory types exclude the BAR type was not placed in the host type without the memory budget extension");
++    mock.memoryTypeBits = 7;
++    Expect(placed(9 * MiB, false) == 2, "a mapped device-local buffer without the memory budget extension was not placed in its device-local type");
++    Expect(mock.results.empty() && mock.liveBytes == 0 && mock.liveBuffers.empty(), "mapped buffer placement left a refusal unused or leaked memory");
++}
++
++void FallbackSlabTypes() {
++    constexpr auto mapped = HostVisible | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++    mock = MockDevice{};
++    reportedBudget = 1620 * MiB;
++    reportedUsage = 200 * MiB;
++    {
++        auto context = budgetContext();
++        context.memory.memoryTypeCount = 3;
++        context.memory.memoryTypes[2] = {mapped, 0};
++        mock.memoryTypeBits = 7;
++        mock.results = {VK_ERROR_OUT_OF_DEVICE_MEMORY};
++        Buffer fallback(context, 4096, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, mapped);
++        Expect(mock.memoryTypes.at(MemoryOf(fallback.Handle())) == 1, "a mapped slab buffer refused device memory was not placed in the host type");
++        const auto attempts = mock.attempts;
++        Buffer shared(context, 4096, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, mapped);
++        Expect(MemoryOf(shared.Handle()) == MemoryOf(fallback.Handle()), "a mapped slab buffer allowing the host type did not take the free slot of the host slab before any device-local block existed");
++        Expect(mock.attempts == attempts, "a mapped slab buffer allowing the host type allocated memory although the host slab had a free slot");
++        Expect(shared.Properties() == HostVisible, "a mapped slab buffer placed in the host slab does not report host properties");
++        mock.memoryTypeBits = 5;
++        Buffer device(context, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, mapped);
++        Expect(mock.memoryTypes.at(MemoryOf(device.Handle())) == 2, "a mapped slab buffer whose memory types exclude the host type took the host slab of an earlier fallback");
++        Expect(device.Properties() == mapped, "a mapped slab buffer placed in its device-local type does not report device-local properties");
++        mock.memoryTypeBits = 7;
++        Buffer host(context, 4096, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, mapped);
++        Expect(mock.memoryTypes.at(MemoryOf(host.Handle())) == 2, "a mapped slab buffer did not take the free slot of its device-local slab");
++    }
++    Expect(mock.results.empty() && mock.liveBytes == 0 && mock.liveBuffers.empty(), "fallback slab placement left a refusal unused or leaked memory");
++}
++
+ void AttachmentReclaim() {
+     mock = MockDevice{};
+     auto context = budgetContext();
+@@ -1233,6 +1307,8 @@ int main(int argc, char** argv) {
+         ImageMemoryOverBudget();
+         HostPlacement();
+         RefusedDevicePlacement();
++        MappedDevicePlacement();
++        FallbackSlabTypes();
+         AttachmentReclaim();
+     } catch (const std::exception& error) {
+         std::fprintf(stderr, "FAIL: %s\n", error.what());
+diff --git a/core/libs/prx/libSceAgcDriver/tests/Graphics.cpp b/core/libs/prx/libSceAgcDriver/tests/Graphics.cpp
+index 21accfeb6d..a640bdd4f3 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/Graphics.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/Graphics.cpp
+@@ -11491,6 +11491,27 @@ void meshIndexBufferTests() {
+     expectFailure([] { static_cast<void>(AgcDriver::Graphics::MeshIndexBufferDescriptor(AgcDriver::Pm4::DrawParameters{0, 3, 2, 1, 0, true})); }, "invalid mesh index buffer range");
+ }
+ 
++void snapshotMemoryTests() {
++    constexpr VkMemoryPropertyFlags host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++    constexpr VkMemoryPropertyFlags bar = host | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++    VkPhysicalDeviceMemoryProperties memory{};
++    memory.memoryHeapCount = 2;
++    memory.memoryHeaps[0] = {VkDeviceSize{16} << 30u, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};
++    memory.memoryHeaps[1] = {VkDeviceSize{32} << 30u, 0};
++    memory.memoryTypeCount = 3;
++    memory.memoryTypes[0] = {VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0};
++    memory.memoryTypes[1] = {host | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 1};
++    memory.memoryTypes[2] = {bar, 0};
++    Require(AgcDriver::Graphics::SnapshotMemoryProperties(memory, false) == bar, "a resizable BAR over the whole device heap was not chosen for snapshots");
++    Require(AgcDriver::Graphics::SnapshotMemoryProperties(memory, true) == host, "disabled BAR snapshots still chose device-local memory");
++    memory.memoryHeapCount = 3;
++    memory.memoryHeaps[2] = {VkDeviceSize{256} << 20u, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};
++    memory.memoryTypes[2] = {bar, 2};
++    Require(AgcDriver::Graphics::SnapshotMemoryProperties(memory, false) == host, "a 256 MiB BAR window was taken for snapshots");
++    memory.memoryTypeCount = 2;
++    Require(AgcDriver::Graphics::SnapshotMemoryProperties(memory, false) == host, "a device without host-visible device memory did not keep host snapshots");
++}
++
+ void stagingPoolBudgetTests() {
+     if (std::getenv("APS5_STAGING_POOL_MIB") != nullptr) return;
+     VkPhysicalDeviceMemoryProperties memory{};
+@@ -12891,6 +12912,7 @@ int main(int argc, char** argv) {
+         meshLimitTests();
+         meshIndexBufferTests();
+         stagingPoolBudgetTests();
++        snapshotMemoryTests();
+         validationTests();
+         vertexCopyTests();
+         highestDrawIndexTests();
+diff --git a/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp b/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
+index 6bcfea05b4..408f1becf3 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
+@@ -5198,6 +5198,15 @@ void drawInputReuseTests(const Device& device, Recorder& recorder) {
+     recorder.Sync();
+ }
+ 
++void drawInputMemoryTests(const Device& device) {
++    alignas(64) static std::array<std::uint32_t, 64> indices{};
++    for (std::uint32_t i = 0; i < indices.size(); ++i) indices[i] = i;
++    const auto copy = CopyDrawInput(device.GetContext(), nullptr, reinterpret_cast<std::uint64_t>(indices.data()), sizeof(indices), 4, Recorder::SnapshotUse::Index32);
++    indices[9] = 0x10000;
++    Require((copy.buffer->Properties() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0, "an index copy left host memory, so its highest index would be scanned from the guest instead of the copy");
++    Require(HighestDrawIndex(copy.buffer->Bytes(), 4, false) == 63u, "the highest index of an index copy followed a later store to the guest");
++}
++
+ void drawInputInPlaceTests(const Device& device, Recorder& recorder, bool copied = false) {
+     auto context = device.GetContext();
+     constexpr std::size_t bytes = 65536;
+@@ -12226,6 +12235,11 @@ int main(int argc, char** argv) {
+             std::cout << "In-place draw input tests passed\n";
+             return 0;
+         }
++        if (argc == 2 && std::string_view(argv[1]) == "--draw-input-memory-only") {
++            drawInputMemoryTests(device);
++            std::cout << "Draw input memory tests passed\n";
++            return 0;
++        }
+         if (argc == 2 && std::string_view(argv[1]) == "--draw-inputs-copied-only") {
+             drawInputInPlaceTests(device, recorder, true);
+             std::cout << "Copied draw input tests passed\n";
+@@ -12315,6 +12329,7 @@ int main(int argc, char** argv) {
+         unwrittenSnapshotTests(device);
+         drawSnapshotUploadTests(device, recorder);
+         drawInputReuseTests(device, recorder);
++        drawInputMemoryTests(device);
+         drawInputInPlaceTests(device, recorder);
+         RunResidentPresentTests(device.GetContext());
+         sliceDirtyTests(device, recorder);
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index 05678c738d..7fdf700a1a 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -216,6 +216,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_NO_ATOMIC_STAGING` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | binds atomic shader elements in place instead of staging them through a device-local buffer |
+ | `APS5_NO_BARRIER_BATCH` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/RuntimeSwitches.cpp` |  | records the staging, write-back and label-run leading barriers that a covering barrier already orders, instead of leaving them out; APS5_AB can toggle it |
+ | `APS5_NO_BARRIER_ELISION` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | records every leading barrier instead of merging it into the following submission |
++| `APS5_NO_BAR_SNAPSHOTS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp` |  | keeps draw snapshots and vertex copies in host memory instead of the device-local host-visible memory a resizable BAR exposes |
+ | `APS5_NO_BDA_STAGING` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | binds the written elements of address-based compute builds in place in the host imports instead of staging them device-local |
+ | `APS5_NO_BDA_TABLE_CACHE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/BdaResources.cpp` |  | builds every BDA descriptor table instead of reusing the recent-table cache |
+ | `APS5_NO_BLOCK_TRACKING` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | tracks array layers, or the whole surface, instead of 64 KiB blocks |
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,144 @@
+From 541cb9c49f286795f648aec3fed896b23a514767 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Fri, 30 Oct 2026 00:25:25 +0000
+Subject: [PATCH 11/26] feat(agc): lane-separated recorder batches for async
+ compute (APS5_COMPUTE_LANE)
+
+Stage 1 of running async compute on its own Vulkan queue. With APS5_COMPUTE_LANE=1, queue workers
+0x40 and 0x48 record into compute-lane batches and every other thread into graphics-lane batches:
+when a thread of the other lane needs the recorder, ensureOpen submits the open batch first, so each
+batch holds one lane's work, in the original order, with one command buffer as before. A thread's
+lane is fixed when its queue worker starts (the GPU-lock thread tag can be retagged by waits).
+
+Splitting a batch into per-lane command buffers mid-batch was tried first and dropped: some recording
+paths keep a command buffer across a submit-and-wait and rely on the batch's buffer being reused.
+
+Astro Bot world map: 0 validation errors (VK_LAYER_KHRONOS_validation, 200 s), screenshot correct;
+render passes broken by interleaved compute 3075 -> 602 per 10 s, submits 161k -> 277k per run,
+presents ~5% lower (106-122 vs 113-130 per 10 s) while both lanes share one queue. Off by default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/Driver/Queues/QueueWorker.cpp         |  2 ++
+ .../Graphics/include/Recorder.hpp             |  4 +++
+ .../libSceAgcDriver/Graphics/src/Recorder.cpp | 26 ++++++++++++++++++-
+ docs/dev/ENVIRONMENT.md                       |  1 +
+ 4 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp
+index 1d43105863..abbe9516fb 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp
+@@ -9,6 +9,7 @@
+ #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/WorkerSampler.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
++#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+ #include <algorithm>
+ #include <chrono>
+ #include <cstdlib>
+@@ -141,6 +142,7 @@ void Driver::run(std::uint32_t id) noexcept {
+     PinWorkerThread(role);
+ 
+     GuestMemory::TagGpuLockThread(id);
++    Graphics::Recorder::SetThreadLane(id == 0x40u || id == 0x48u ? 1u : 0u);
+     static const std::uint32_t sampledQueue = [] {
+         const char* text = std::getenv("APS5_SAMPLE_QUEUE");
+         return text != nullptr ? static_cast<std::uint32_t>(std::strtoul(text, nullptr, 16)) : 0u;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
+index 637a5e1ab4..54019b4546 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
+@@ -424,6 +424,9 @@ public:
+     // The recorder of the current device, for code that only has guest addresses (the flush hook)
+     // and for helpers that must not recycle resources the recorded work still uses.
+     static Recorder* Active();
++    static bool ComputeLanesEnabled();
++    static std::uint8_t CallerLane();
++    static void SetThreadLane(std::uint8_t lane);
+     VkDevice Device() const { return context.device; }
+     // Whether the calling thread runs inside a batch's completion action (finish()): a store made
+     // there must not have a publish recorded for it (UnitShadow), see SyncThrough.
+@@ -561,6 +564,7 @@ private:
+     struct Batch {
+         VkCommandBuffer commands = VK_NULL_HANDLE;
+         VkFence fence = VK_NULL_HANDLE;
++        std::uint8_t lane = 0;
+         std::vector<std::shared_ptr<void>> kept;
+         std::size_t keptBytes = 0;
+         std::unordered_set<const void*> keptOwners;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+index 89f3b6f68a..7bbf7ed071 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+@@ -45,6 +45,8 @@ namespace AgcDriver::Graphics {
+ namespace {
+ 
+ Recorder* activeRecorder = nullptr;
++std::atomic<std::uint64_t> laneSwitchCount{0};
++thread_local std::uint8_t threadLane = 0;
+ 
+ bool DrawProfiled() {
+     static const bool profiled = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+@@ -1575,8 +1577,29 @@ void Recorder::recordKeyStores(bool forWriter) {
+     if (forWriter) keyStoreRunsForWriter.fetch_add(1, std::memory_order_relaxed);
+ }
+ 
++bool Recorder::ComputeLanesEnabled() {
++    static const bool enabled = [] {
++        const char* text = std::getenv("APS5_COMPUTE_LANE");
++        return text != nullptr && text[0] != '0' && text[0] != 0;
++    }();
++    return enabled;
++}
++
++std::uint8_t Recorder::CallerLane() {
++    return threadLane;
++}
++
++void Recorder::SetThreadLane(std::uint8_t lane) {
++    threadLane = lane;
++}
++
+ void Recorder::ensureOpen() {
+     GuestMemory::AssertGpuLockHeld("Recorder::Commands");
++    if (open != nullptr && ComputeLanesEnabled() && open->lane != threadLane) {
++        open->lane = threadLane;
++        laneSwitchCount.fetch_add(1, std::memory_order_relaxed);
++        Submit();
++    }
+     if (open == nullptr) {
+         auto batch = std::make_unique<Batch>();
+         try {
+@@ -1601,6 +1624,7 @@ void Recorder::ensureOpen() {
+             throw;
+         }
+         batch->queue = GuestMemory::GpuLockThreadTag();
++        batch->lane = threadLane;
+         if (countingSamples && !segmentMode()) beginSamples(*batch);
+         dropStaleHoldKept();
+         batch->kept.insert(batch->kept.end(), holdKept.begin(), holdKept.end());
+@@ -4173,7 +4197,7 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool
+                     const auto& h = holdCounters;
+                     AgcDriver::ProfilePrint_nid_no_patch("[recorder] %llu syncs waited %.1f s for the GPU in total (sources, count/wait: idle %llu/%.1fs, pending write %llu/%.1fs, recorded store %llu/%.1fs, address-based %llu/%.1fs, other %llu/%.1fs); hook %llu calls, %llu locked; %llu targeted syncs left %llu batches in flight; snapshot %llu rebuilds %.0f ms, %llu notes covered; %llu unlocked timeline waits %.1f s; %llu submissions, %zu label entries, %llu completion labels pending; fence waits by thread (count/wait):%s; top sync sites (source@caller syncs/batches/wait):%s; under holds (cumulative): %llu completions ran %.0f ms (kept objects released %.0f ms), pending-write syncs from completions: %llu skipped, %llu waited %.0f ms; %llu reaps (%llu with work) retired %llu batches in %.0f ms; hook waits unlocked %llu / %.0f ms GPU (pending write %llu / %.0f ms, recorded store %llu / %.0f ms) + %.0f ms relock (%llu found the recorder torn down), locked %llu; deferred releases: on the release thread %llu batches (%llu objects) in %.0f ms, inline %llu batches (%llu objects) in %.0f ms (%llu batches over the queue bound of %zu), queue max %llu batches, %llu pending\n",static_cast<unsigned long long>(waits), waitedMs / 1000, static_cast<unsigned long long>(syncCounts[0]), syncWaitedMs[0] / 1000, static_cast<unsigned long long>(syncCounts[1]), syncWaitedMs[1] / 1000, static_cast<unsigned long long>(syncCounts[2]), syncWaitedMs[2] / 1000, static_cast<unsigned long long>(syncCounts[3]), syncWaitedMs[3] / 1000, static_cast<unsigned long long>(syncCounts[4]), syncWaitedMs[4] / 1000, static_cast<unsigned long long>(hookCalls.load()), static_cast<unsigned long long>(hookLocks.load()), static_cast<unsigned long long>(targetedSyncs.load()), static_cast<unsigned long long>(batchesLeftInFlight.load()), static_cast<unsigned long long>(snapshotRebuilds), snapshotRebuildMs, static_cast<unsigned long long>(snapshotCovered), static_cast<unsigned long long>(unlockedWaits.load()), unlockedWaitedUs.load() / 1e6, static_cast<unsigned long long>(recorder.submissions), recorder.PendingLabels(), static_cast<unsigned long long>(completionLabels.load()), ThreadSyncReport().c_str(), SyncSiteReport().c_str(), static_cast<unsigned long long>(h.completions), h.completionMs, h.keptReleaseMs, static_cast<unsigned long long>(h.completionSyncsSkipped), static_cast<unsigned long long>(h.completionSyncsWaited), h.completionSyncWaitMs, static_cast<unsigned long long>(h.reaps), static_cast<unsigned long long>(h.reapsWithWork), static_cast<unsigned long long>(h.reapBatches), h.reapMs, static_cast<unsigned long long>(h.hookUnlockedWaits), h.hookUnlockedWaitMs, static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[1]), h.hookUnlockedWaitMsBySource[1], static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[2]), h.hookUnlockedWaitMsBySource[2], h.hookRelockMs, static_cast<unsigned long long>(h.hookUnlockedTornDown), static_cast<unsigned long long>(h.hookLockedWaits), static_cast<unsigned long long>(threadReleases.load()), static_cast<unsigned long long>(threadObjects.load()), threadReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineReleases.load()), static_cast<unsigned long long>(inlineObjects.load()), inlineReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineOverBound.load()), ReleaseQueueBound(), static_cast<unsigned long long>(releaseQueueMax.load()), static_cast<unsigned long long>(deferredPending.load()));
+                     AgcDriver::ProfilePrint_nid_no_patch("[recorder] completion label stores: %llu run, %llu skipped (no CPU write-back overlapped them); %llu counted pending at a write-back; %llu write-backs over a tracked label; %llu write-back completions pending\n", static_cast<unsigned long long>(completionStoresRun.load()), static_cast<unsigned long long>(completionStoresSkipped.load()), static_cast<unsigned long long>(completionLabelsCountedLate.load()), static_cast<unsigned long long>(writeBacksOverLabels.load()), static_cast<unsigned long long>(writeBackCompletions.load()));
+-                    AgcDriver::ProfilePrint_nid_no_patch("[recorder] submits %llu, vkQueueSubmit mean %.1f us, max %.1f us\n", static_cast<unsigned long long>(submitCount), submitCount != 0 ? submitUs / static_cast<double>(submitCount) : 0.0, submitMaxUs);
++                    AgcDriver::ProfilePrint_nid_no_patch("[recorder] submits %llu, vkQueueSubmit mean %.1f us, max %.1f us, lane switches %llu\n", static_cast<unsigned long long>(submitCount), submitCount != 0 ? submitUs / static_cast<double>(submitCount) : 0.0, submitMaxUs, static_cast<unsigned long long>(laneSwitchCount.load(std::memory_order_relaxed)));
+                     const auto reads = Recorder::ReadCounts();
+                     AgcDriver::ProfilePrint_nid_no_patch("[recorder] in-place reads: %llu noted, %llu queries, hits by reader: dispatch element %llu, gpu copy %llu, address-based %llu, indirect %llu, storage upload %llu, copy source %llu, draw input %llu; %llu hits on signaled batches ignored\n", static_cast<unsigned long long>(reads.noted), static_cast<unsigned long long>(reads.queries), static_cast<unsigned long long>(reads.hits[0]), static_cast<unsigned long long>(reads.hits[1]), static_cast<unsigned long long>(reads.hits[2]), static_cast<unsigned long long>(reads.hits[3]), static_cast<unsigned long long>(reads.hits[4]), static_cast<unsigned long long>(reads.hits[5]), static_cast<unsigned long long>(reads.hits[6]), static_cast<unsigned long long>(reads.staleIgnored));
+                 }
+diff --git a/docs/dev/ENVIRONMENT.md b/docs/dev/ENVIRONMENT.md
+index 978953b3eb..e20cf98503 100644
+--- a/docs/dev/ENVIRONMENT.md
++++ b/docs/dev/ENVIRONMENT.md
+@@ -112,6 +112,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
+ | `APS5_CAPTURE_TRACE_PATH` | string | `core/libs/prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp` | capture-trace.log | file path for the capture events log |
+ | `APS5_CHECK_INDIRECT_ARGS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | reads GPU-side indirect draw records back on the CPU and prints the first ones |
+ | `APS5_COMPLETION_STORE_SYNC` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | makes a store made by a completion action wait for later batches over its range |
++| `APS5_COMPUTE_LANE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | lane-separated batches: queue workers 0x40 and 0x48 record into compute-lane batches and every other thread into graphics-lane batches; when a thread of the other lane records, the open batch is submitted first, so each batch holds one lane's work in the original order (groundwork for a separate compute queue); an empty value or one starting with `0` leaves it off |
+ | `APS5_COPY_DESTINATION_STRICT` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | refuses a CPU copy whose destination has any pending writer, not only an unsettled one |
+ | `APS5_COPY_HLE_CPU_MAX` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/BufferCopy.cpp` | 262144 | largest copy in bytes the CPU side of the copy HLE handles |
+ | `APS5_COPY_HLE_GPU_MAX` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/BufferCopy.cpp` |  | largest copy in bytes the GPU side of the copy HLE handles; unset means no limit |
+-- 
+2.55.0.windows.5
+
