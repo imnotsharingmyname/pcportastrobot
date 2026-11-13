@@ -268,6 +268,15 @@ namespace AstroHybrid.App.Services
             }
             foreach (var file in Directory.GetFiles(dump))
                 LinkOrCopy(file, Path.Combine(app0, Path.GetFileName(file)));
+            // args.txt carries the game's start arguments; some dumps leave it out, and without "-mode product" the
+            // game starts as a development build that reads its data from the developer's host and stops at its
+            // error screen. The standard arguments go into app0 (never into the dump).
+            var args = Path.Combine(app0, "args.txt");
+            if (!File.Exists(args))
+            {
+                File.WriteAllText(args, "-package -sequence product -mode product -odxBinary -perfDisplay false -debugDisplay false -debugInput false\r\n");
+                log("app0\\args.txt: missing in the dump, standard product arguments written");
+            }
             var modules = Path.Combine(app0, "sce_module");
             Directory.CreateDirectory(modules);
             foreach (var module in OriginalModules(dump))

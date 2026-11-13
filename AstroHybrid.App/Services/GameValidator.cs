@@ -66,7 +66,7 @@ namespace AstroHybrid.App.Services
                 bool testedVersion = string.IsNullOrEmpty(gameInfo.Version) || gameInfo.Version == ExpectedVersion;
 
                 // Check for required directories
-                var requiredDirs = new[] { "sce_module", "sce_sys" };
+                var requiredDirs = new[] { "sce_module", "sce_sys", "data" };
                 foreach (var dir in requiredDirs)
                 {
                     var dirPath = Path.Combine(gamePath, dir);
