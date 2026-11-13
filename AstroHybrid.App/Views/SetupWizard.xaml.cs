@@ -17,6 +17,16 @@ namespace AstroHybrid.App.Views
             _viewModel = new SetupWizardViewModel(rootDirectory);
             DataContext = _viewModel;
             _viewModel.SetupCompleted += OnSetupCompleted;
+            // Closing half-way would leave the game program half-written; setup closes the window itself at 100%.
+            Closing += (sender, e) =>
+            {
+                if (_viewModel.IsInstalling && _viewModel.ProgressPercent < 100)
+                {
+                    e.Cancel = true;
+                    MessageBox.Show(this, "Setup is still converting the game (about a minute). Please wait until it finishes.",
+                        "AstroHybrid Setup", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            };
             _viewModel.SetupCancelled += OnSetupCancelled;
 
             // Update UI based on validation state

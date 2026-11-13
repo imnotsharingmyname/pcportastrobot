@@ -45,7 +45,8 @@ namespace AstroHybrid.App.ViewModels
             BrowseCommand = new RelayCommand(BrowseForGameFolder);
             ValidateCommand = new RelayCommand(async () => await ValidateGameDumpAsync(), () => !IsValidating && !string.IsNullOrWhiteSpace(GameDumpPath));
             InstallCommand = new RelayCommand(async () => await InstallAsync(), () => !IsInstalling && GameInfo?.IsValid == true);
-            CancelCommand = new RelayCommand(Cancel);
+            // Setup cannot be stopped half-way (the game program would be left half-written); Cancel waits for it.
+            CancelCommand = new RelayCommand(Cancel, () => !IsInstalling);
         }
 
         public string GameDumpPath

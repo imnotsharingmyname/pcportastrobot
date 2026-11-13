@@ -68,6 +68,15 @@ namespace AstroHybrid.App.ViewModels
             _ = InitializeAsync();
         }
 
+        public override void OnPropertyChanged(string? propertyName = null)
+        {
+            base.OnPropertyChanged(propertyName);
+            if (propertyName == nameof(Settings) && !IsLoading && _settingsManager != null)
+            {
+                try { _settingsManager.Save(Settings); } catch { }
+            }
+        }
+
         public LauncherPage CurrentPage
         {
             get => _currentPage;

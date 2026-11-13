@@ -129,11 +129,6 @@
                 <StackPanel>
                     <TextBlock Text="NVIDIA Frame Generation" Style="{StaticResource SectionHeaderStyle}"/>
 
-                    <StackPanel Margin="0,10,0,0">
-                        <CheckBox Content="CUDA Address Hole (required for DLSS/Frame Gen)"
-                                  IsChecked="{Binding CudaHole}"
-                                  Style="{StaticResource ModernCheckBoxStyle}"/>
-                    </StackPanel>
                 </StackPanel>
             </Border>
 

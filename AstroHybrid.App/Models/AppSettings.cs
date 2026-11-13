@@ -67,6 +67,28 @@ namespace AstroHybrid.App.Models
         public InstallationManifest? InstallationManifest { get; set; }
 
         // First run tracking
+        // Runtime options (Advanced page), passed to Run-AstroHybrid.bat; defaults are the script's own.
+        [JsonPropertyName("hangWatchdog")]
+        public bool HangWatchdog { get; set; } = false;
+
+        [JsonPropertyName("shaderCache")]
+        public bool ShaderCache { get; set; } = true;
+
+        [JsonPropertyName("drawPrepTuning")]
+        public bool DrawPrepTuning { get; set; } = true;
+
+        [JsonPropertyName("priority")]
+        public string Priority { get; set; } = "abovenormal";
+
+        [JsonPropertyName("cpPriority")]
+        public int CpPriority { get; set; } = 2;
+
+        [JsonPropertyName("padMotion")]
+        public bool MotionControls { get; set; } = true;
+
+        [JsonPropertyName("triggerState")]
+        public bool TriggerState { get; set; } = true;
+
         // Set by the setup wizard: the main window picks the best settings for this PC once.
         [JsonPropertyName("applyBestOnStart")]
         public bool ApplyBestOnStart { get; set; } = false;

@@ -48,72 +48,106 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
-        // Hang Watchdog
-        private bool _hangWatchdog = true;
         public bool HangWatchdog
         {
-            get => _hangWatchdog;
-            set => SetProperty(ref _hangWatchdog, value);
+            get => _mainViewModel.Settings.HangWatchdog;
+            set
+            {
+                if (!Equals(_mainViewModel.Settings.HangWatchdog, value))
+                {
+                    _mainViewModel.Settings.HangWatchdog = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
         }
 
-        // Shader Cache
-        private bool _shaderCache = true;
         public bool ShaderCache
         {
-            get => _shaderCache;
-            set => SetProperty(ref _shaderCache, value);
+            get => _mainViewModel.Settings.ShaderCache;
+            set
+            {
+                if (!Equals(_mainViewModel.Settings.ShaderCache, value))
+                {
+                    _mainViewModel.Settings.ShaderCache = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
         }
 
-        // Draw Prep Tuning
-        private bool _drawPrepTuning = true;
         public bool DrawPrepTuning
         {
-            get => _drawPrepTuning;
-            set => SetProperty(ref _drawPrepTuning, value);
+            get => _mainViewModel.Settings.DrawPrepTuning;
+            set
+            {
+                if (!Equals(_mainViewModel.Settings.DrawPrepTuning, value))
+                {
+                    _mainViewModel.Settings.DrawPrepTuning = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
         }
 
-        // Priority
-        private string _priority = "abovenormal";
         public string Priority
         {
-            get => _priority;
-            set => SetProperty(ref _priority, value);
+            get => _mainViewModel.Settings.Priority;
+            set
+            {
+                if (!Equals(_mainViewModel.Settings.Priority, value))
+                {
+                    _mainViewModel.Settings.Priority = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
         }
 
-        public string[] PriorityOptions => new[] { "normal", "abovenormal", "high", "realtime" };
+        public string[] PriorityOptions => new[] { "normal", "abovenormal", "high" };
 
-        // CP Priority
-        private int _cpPriority = 2;
         public int CpPriority
         {
-            get => _cpPriority;
-            set => SetProperty(ref _cpPriority, value);
+            get => _mainViewModel.Settings.CpPriority;
+            set
+            {
+                if (!Equals(_mainViewModel.Settings.CpPriority, value))
+                {
+                    _mainViewModel.Settings.CpPriority = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
         }
 
-        public int[] CpPriorityOptions => new[] { 0, 1, 2 };
+        public int[] CpPriorityOptions => new[] { 1, 2 };
 
-        // CUDA Hole
-        private bool _cudaHole = true;
-        public bool CudaHole
-        {
-            get => _cudaHole;
-            set => SetProperty(ref _cudaHole, value);
-        }
-
-        // Motion Controls
-        private bool _motionControls = true;
         public bool MotionControls
         {
-            get => _motionControls;
-            set => SetProperty(ref _motionControls, value);
+            get => _mainViewModel.Settings.MotionControls;
+            set
+            {
+                if (!Equals(_mainViewModel.Settings.MotionControls, value))
+                {
+                    _mainViewModel.Settings.MotionControls = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
         }
 
-        // Trigger State
-        private bool _triggerState = true;
         public bool TriggerState
         {
-            get => _triggerState;
-            set => SetProperty(ref _triggerState, value);
+            get => _mainViewModel.Settings.TriggerState;
+            set
+            {
+                if (!Equals(_mainViewModel.Settings.TriggerState, value))
+                {
+                    _mainViewModel.Settings.TriggerState = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
         }
 
         // Experimental Features
@@ -124,13 +158,13 @@ namespace AstroHybrid.App.ViewModels
 
         public string SpeedNote => "The game runs in real-time regardless of FPS. Lower values slow down the game simulation.";
 
-        public string HangWatchdogNote => "Records diagnostics when the game hangs. Enable when reporting freezes. Defaults to ON for RTX 50 series.";
+        public string HangWatchdogNote => "Records diagnostics when the game hangs. Turn on when reporting a freeze; it costs about 1.8 ms per frame on RTX 50 cards, so it is off by default.";
 
         public string ShaderCacheNote => "Persistent shader and pipeline caches eliminate late shader compiles (100-117ms hitches). Requires title ID.";
 
         public string DrawPrepNote => "Raises draw-prep helper priority to match CP priority, reducing CP spin time by ~1.2ms/frame when other programs run.";
 
-        public string PriorityNote => "Process and thread priorities keep other programs off the reserved CP core.";
+        public string PriorityNote => "Process priority (above normal recommended) and the command-processor thread priority (2 = highest) keep other programs off the reserved core.";
 
         public string MotionNote => "Enables accelerometer/gyroscope input for shake and tilt moves. Disable if your controller doesn't have motion sensors.";
 
