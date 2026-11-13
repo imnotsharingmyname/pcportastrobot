@@ -55,10 +55,12 @@ namespace AstroHybrid.App.Services
                 ReadGameMetadata(gamePath, gameInfo);
 
                 // Validate title ID
-                if (!string.IsNullOrEmpty(gameInfo.TitleId) && gameInfo.TitleId != ExpectedTitleId)
+                // Other regions (PPSA21564 and so on) are the same game under another title ID: they share the
+                // concept ID, and the title name says ASTRO BOT.
+                if (!string.IsNullOrEmpty(gameInfo.TitleId) && gameInfo.TitleId != ExpectedTitleId && !GameSetup.IsAstroBot(gamePath))
                 {
                     gameInfo.IsValid = false;
-                    gameInfo.ValidationError = $"Game title ID mismatch. Expected {ExpectedTitleId}, found {gameInfo.TitleId}. This does not appear to be Astro Bot (PPSA21567).";
+                    gameInfo.ValidationError = $"This dump ({gameInfo.TitleId}) does not appear to be Astro Bot (PPSA21567 or another region of the same game).";
                     return gameInfo;
                 }
 

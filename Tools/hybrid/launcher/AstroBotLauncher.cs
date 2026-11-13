@@ -10,6 +10,15 @@ using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
+// Version information shown in the file's Properties (and read by antivirus heuristics).
+[assembly: AssemblyTitle("AstroBot Launcher")]
+[assembly: AssemblyDescription("AstroHybrid classic launcher: settings window that starts Run-AstroHybrid.bat")]
+[assembly: AssemblyCompany("AstroHybrid Project")]
+[assembly: AssemblyProduct("AstroHybrid")]
+[assembly: AssemblyCopyright("Copyright (c) 2026 AstroHybrid Project")]
+[assembly: AssemblyVersion("1.0.7.0")]
+[assembly: AssemblyFileVersion("1.0.7.0")]
+
 static class AstroBotLauncher
 {
     static readonly string[] LightingLabels = { "Faster lighting (recommended)", "Original lighting (slower)" };

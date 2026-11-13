@@ -225,6 +225,31 @@ namespace AstroHybrid.App.Services
             return CpuVendor().IndexOf("AMD", StringComparison.OrdinalIgnoreCase) < 0;
         }
 
+        // Astro Bot in any region: the concept ID (one per game, shared by its regional releases; 10002684 for
+        // PPSA21567) or the title name in param.json.
+        public const string AstroBotConceptId = "10002684";
+
+        public static bool IsAstroBot(string dump)
+        {
+            try
+            {
+                var path = Path.Combine(dump, "sce_sys", "param.json");
+                if (!File.Exists(path)) return false;
+                using var document = JsonDocument.Parse(File.ReadAllText(path));
+                var root = document.RootElement;
+                if (root.TryGetProperty("conceptId", out var concept) &&
+                    (concept.ValueKind == JsonValueKind.Number ? concept.GetRawText() : concept.ValueKind == JsonValueKind.String ? concept.GetString() : "") == AstroBotConceptId)
+                    return true;
+                if (root.TryGetProperty("localizedParameters", out var localized) && localized.ValueKind == JsonValueKind.Object)
+                    foreach (var language in localized.EnumerateObject())
+                        if (language.Value.ValueKind == JsonValueKind.Object && language.Value.TryGetProperty("titleName", out var name) &&
+                            name.ValueKind == JsonValueKind.String && (name.GetString() ?? "").Replace(" ", "").ToUpperInvariant().Contains("ASTROBOT"))
+                            return true;
+            }
+            catch { }
+            return false;
+        }
+
         public static (string TitleId, string Version) ReadParam(string dump)
         {
             var path = Path.Combine(dump, "sce_sys", "param.json");
