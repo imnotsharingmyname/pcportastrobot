@@ -85,7 +85,7 @@ microsecond frame CSV. Frame statistics use its last 60 seconds. The 1% low is r
 the average slowest 1% frame time, not reciprocal p99. Raw results and CSV paths are retained.
 
 The first new runs 033431/033704/033937 were contaminated by an inherited recursive PowerShell
-search from the previous takeover; the agent-owned search was identified by its command line
+search from the previous takeover; the background search process was identified by its command line
 and stopped. These runs cannot support a gain claim.
 
 Game files and the archive remain untouched. No pushes, driver installs, registry edits or

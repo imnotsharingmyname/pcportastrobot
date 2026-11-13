@@ -15,7 +15,7 @@ rem RTX 50 GPUs, where it costs the command processor ~1.8 ms per frame in Sky G
 rem It only records diagnostics when the game hangs. ASTROHYBRID_HANG_WATCHDOG=1 (or KYTY_HANG_WATCHDOG
 rem set by you) brings it back; set it when reporting a freeze.
 if not defined KYTY_HANG_WATCHDOG if not "%ASTROHYBRID_HANG_WATCHDOG%"=="1" set KYTY_HANG_WATCHDOG=0
-rem Persistent shader and pipeline caches (Codex, 2026-11-08, OVERNIGHT.md): without the title ID the
+rem Persistent shader and pipeline cache behaviour (verified 2026-11-08; see OVERNIGHT.md): without the title ID the
 rem hybrid never opened Kyty's caches and compiled shaders during play (100-117 ms hitches); with it, no
 rem late compiles and no frame over 80 ms. ASTROHYBRID_SHADER_CACHE=0 turns it off.
 if not defined ASTROHYBRID_CACHE_TITLE_ID if not "%ASTROHYBRID_SHADER_CACHE%"=="0" set ASTROHYBRID_CACHE_TITLE_ID=PPSA21567

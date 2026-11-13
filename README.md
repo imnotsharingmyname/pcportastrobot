@@ -126,7 +126,7 @@ All new behaviour is behind environment switches that are off by default; the la
 | `Source/experiments` | Measured experiments that were not kept, with their patches |
 | `Tools/hybrid` | Launcher, run-folder builder, Kyty build script, reverse-engineering helpers |
 | `Tests` | Benchmarks and A/B test scripts |
-| `Docs` | Handover, plans, and the full results log (`OVERNIGHT.md`, every measurement good or bad) |
+| `Docs` | Build instructions, technical plans, reverse-engineering notes, and the full results log (`OVERNIGHT.md`) |
 | `Run-AstroHybrid*.bat` | Start scripts: plain, DLSS, Frame Generation |
 | `AstroHybrid.App` | The AstroHybrid app (WPF, .NET Framework 4.8): setup from a dump (`Services/GameSetup.cs`, a C# port of AnyPS5's `unwrap_self.py`), settings, best settings for the PC, launch |
 | `Tools/release` | `make_release.ps1` builds the download from a working install (with a guard against game files); `make_icon.ps1` draws the app icon |

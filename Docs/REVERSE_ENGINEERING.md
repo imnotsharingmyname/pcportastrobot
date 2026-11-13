@@ -79,12 +79,3 @@ AnyPS5 runtime logs. Inferences are marked as such.
 Why not a from-scratch loader: AnyPS5 already implements ELF loading, relocation, NID resolution, TLS,
 exception unwinding, FreeBSD syscall trapping, and the AGC/Vulkan stack, and it boots this exact title.
 Rebuilding these would only re-derive the same results; the useful engineering is in its open blockers.
-
-## REA
-
-REA (`morluto/rea`) is registered as an MCP server in Claude Code and connected. Its native-binary
-analysis needs a Ghidra 12.1.x backend; Ghidra 12.1.4 and Temurin JDK 21 are installed in `Tools/` and
-`GHIDRA_INSTALL_DIR`, `JAVA_HOME`, `GHIDRA_HEADLESS_MAXMEM=16G` were added to the REA registration in
-`~/.claude.json` (backup in `REA/`). These take effect after the Claude session restarts; no REA function
-analysis has been run yet. `Analysis/elf/eboot_etdyn.elf` is a copy with `e_type` patched to `ET_DYN` so
-stock ELF loaders accept it.

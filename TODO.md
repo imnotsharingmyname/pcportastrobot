@@ -13,6 +13,6 @@
 5. Play past the intro into the Crash Site hub with keyboard and an SDL controller; verify movement,
    jump, camera.
 6. Verify audio output (`libSceAudioOut2` path) and record whether music/SFX play.
-7. After restarting the Claude session, use REA + Ghidra on `Analysis/elf/eboot_etdyn.elf` to name the
-   functions around the AGC submit path and the async-compute wait sites.
+7. Use Ghidra on `Analysis/elf/eboot_etdyn.elf` to identify the functions around the AGC submit path and
+   the async-compute wait sites.
 8. Profile once frames are stable: Tracy build (`-DAPS5_ENABLE_TRACY=ON`), 1080p vs 1440p.
