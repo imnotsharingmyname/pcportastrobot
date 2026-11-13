@@ -115,8 +115,8 @@ All new behaviour is behind environment switches that are off by default; the la
 - Xbox and other pads without motion sensors: the motion hand does not work yet (tilt emulation with
   View/Back + right stick reaches the pad library but the game did not react in the user's test).
 - Vibration on third-party Switch Pro pads (for example Data Frog) is not confirmed yet.
-- With **no FPS limit and Frame Generation off**, one start stayed on a black screen for 60 s at about
-  144 FPS with the level loaded; every capped start was normal. Use a limit or Frame Generation.
+- With **no FPS limit and Frame Generation off**, the first loading screen stays black for about 35 s (it
+  runs at about 144 FPS and slows the loading threads); capped starts take about 20 s. It is not a hang.
 - Input latency with Frame Generation has not been measured. The DLSS jitter sign is set by eye.
 - The game is CPU-limited at about 30-34 FPS on a Ryzen 5 5500 in the heaviest areas.
 
