@@ -46,6 +46,13 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
+        // NVIDIA frame generation presents the frames itself, and its VSync works only on D3D12 (Streamline
+        // DLSS-G guide, 22.5); this port draws with Vulkan, so VSync applies only with frame generation off.
+        public bool IsVSyncAvailable => _mainViewModel.Settings.FrameGenMode == 0;
+        public string VSyncNote => IsVSyncAvailable
+            ? "Locks presentation to your screen's refresh (no tearing)."
+            : "Not available with frame generation: NVIDIA frame generation can't use VSync with Vulkan. For no tearing, use a G-Sync / FreeSync screen (with G-Sync on, keep the on-screen target below its refresh rate), or turn frame generation off and tick VSync.";
+
         // VSync
         public bool VSync
         {
@@ -118,6 +125,8 @@ namespace AstroHybrid.App.ViewModels
                     OnPropertyChanged(nameof(IsFrameGenTargetEnabled));
                     OnPropertyChanged(nameof(FrameGenNote));
                     OnPropertyChanged(nameof(IsFpsLimitEnabled));
+                    OnPropertyChanged(nameof(IsVSyncAvailable));
+                    OnPropertyChanged(nameof(VSyncNote));
                     OnPropertyChanged(nameof(FpsLimitNote));
                     _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
                 }
