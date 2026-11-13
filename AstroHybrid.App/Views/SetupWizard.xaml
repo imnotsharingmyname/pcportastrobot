@@ -6,9 +6,9 @@
         xmlns:local="clr-namespace:AstroHybrid.App.Views"
         xmlns:vm="clr-namespace:AstroHybrid.App.ViewModels"
         mc:Ignorable="d"
-        Title="AstroHybrid Setup" Height="600" Width="700"
+        Title="AstroHybrid Setup" Height="760" Width="720" MinHeight="560" MinWidth="620"
         WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize"
+        ResizeMode="CanResize"
         Style="{StaticResource MainWindowStyle}"
         Icon="/Resources/astrohybrid.ico">
 
@@ -21,7 +21,6 @@
     <Grid Margin="40">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -33,7 +32,8 @@
         </StackPanel>
 
         <!-- Content -->
-        <Border Grid.Row="1" Style="{StaticResource CardStyle}">
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+        <Border Style="{StaticResource CardStyle}">
             <StackPanel>
                 <!-- Welcome Screen -->
                 <StackPanel x:Name="WelcomePanel" Visibility="Visible">
@@ -70,8 +70,7 @@
                         <TextBox Grid.Column="0"
                                  Text="{Binding GameDumpPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource ModernTextBoxStyle}"
-                                 IsReadOnly="True"
-                                 ToolTip="Selected game dump path"/>
+                                 ToolTip="Type or paste the dump folder, or use Browse"/>
                         <Button Grid.Column="1" Content="Browse..."
                                 Command="{Binding BrowseCommand}"
                                 Style="{StaticResource SecondaryButtonStyle}"
@@ -140,14 +139,14 @@
                 </StackPanel>
             </StackPanel>
         </Border>
+        </ScrollViewer>
 
         <!-- Bottom Buttons -->
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
             <Button Content="Cancel" Command="{Binding CancelCommand}"
                     Style="{StaticResource SecondaryButtonStyle}" MinWidth="100"/>
-            <Button x:Name="NextButton" Content="Next" Command="{Binding ValidateCommand}"
-                    Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" Margin="10,0,0,0"
-                    IsEnabled="{Binding CanProceed}"/>
+            <Button x:Name="NextButton" Content="Check folder" Command="{Binding ValidateCommand}"
+                    Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" Margin="10,0,0,0"/>
             <Button x:Name="InstallButton" Content="Install" Command="{Binding InstallCommand}"
                     Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" Margin="10,0,0,0"
                     Visibility="Collapsed" IsEnabled="{Binding CanProceed}"/>

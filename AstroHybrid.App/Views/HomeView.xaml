@@ -75,7 +75,7 @@
                             </StackPanel>
                             <TextBlock Text=" | " Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" Margin="10,0"/>
                             <StackPanel>
-                                <TextBlock Text="{Binding DisplayInfo}" Style="{StaticResource BodyTextStyle}" FontWeight="SemiBold" FontSize="16"/>
+                                <TextBlock Text="{Binding DisplayInfo}" Style="{StaticResource BodyTextStyle}" FontWeight="SemiBold" FontSize="14"/>
                                 <TextBlock Text="Display" Style="{StaticResource MutedTextStyle}" FontSize="11"/>
                             </StackPanel>
                         </StackPanel>

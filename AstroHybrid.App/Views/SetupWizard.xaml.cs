@@ -26,7 +26,9 @@ namespace AstroHybrid.App.Views
                 {
                     UpdatePanels();
                 }
-                else if (e.PropertyName == nameof(SetupWizardViewModel.IsInstalling))
+                else if (e.PropertyName == nameof(SetupWizardViewModel.IsInstalling) ||
+                         e.PropertyName == nameof(SetupWizardViewModel.GameDumpPath) ||
+                         e.PropertyName == nameof(SetupWizardViewModel.CanProceed))
                 {
                     UpdatePanels();
                 }
@@ -41,15 +43,16 @@ namespace AstroHybrid.App.Views
             bool hasGameInfo = _viewModel.GameInfo?.IsValid == true;
             bool isInstalling = _viewModel.IsInstalling;
 
-            WelcomePanel.Visibility = (!hasGameInfo && !isInstalling) ? Visibility.Visible : Visibility.Collapsed;
+            WelcomePanel.Visibility = (!hasGameInfo && !isInstalling && string.IsNullOrEmpty(_viewModel.GameDumpPath)) ? Visibility.Visible : Visibility.Collapsed;
             GameSelectionPanel.Visibility = !isInstalling ? Visibility.Visible : Visibility.Collapsed;
             GameInfoBorder.Visibility = hasGameInfo ? Visibility.Visible : Visibility.Collapsed;
             InstallPanel.Visibility = isInstalling ? Visibility.Visible : Visibility.Collapsed;
-            CompletePanel.Visibility = (!isInstalling && hasGameInfo && _viewModel.ProgressPercent == 100) ? Visibility.Visible : Visibility.Collapsed;
+            // After a successful install the wizard closes by itself; there is no separate "complete" page.
+            CompletePanel.Visibility = Visibility.Collapsed;
 
-            NextButton.Visibility = Visibility.Collapsed;
+            NextButton.Visibility = (!hasGameInfo && !isInstalling) ? Visibility.Visible : Visibility.Collapsed;
             InstallButton.Visibility = (hasGameInfo && !isInstalling) ? Visibility.Visible : Visibility.Collapsed;
-            FinishButton.Visibility = (!isInstalling && hasGameInfo && _viewModel.ProgressPercent == 100) ? Visibility.Visible : Visibility.Collapsed;
+            FinishButton.Visibility = Visibility.Collapsed;
         }
 
         private void OnSetupCompleted()

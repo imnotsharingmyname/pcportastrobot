@@ -14,9 +14,9 @@ shaders, keys, saves or game artwork. You need your own decrypted dump of the ga
 
 ## Download and play
 
-1. Download **AstroBotPC-AstroHybrid-1.0.0.zip** from the [latest release](https://github.com/imnotsharingmyname/pcportastrobot/releases/latest)
+1. Download the **AstroBotPC-AstroHybrid** zip from the [latest release](https://github.com/imnotsharingmyname/pcportastrobot/releases/latest)
    and extract it anywhere with about 1 GB free (the game itself stays where your dump is).
-2. Start **AstroHybrid.exe**. Setup asks for your Astro Bot dump folder (the one with `eboot.bin`, `sce_module`,
+2. Start **AstroHybrid.exe**. Setup asks for your Astro Bot dump folder (Browse, or paste the path and press Check folder, then Install) (the one with `eboot.bin`, `sce_module`,
    `sce_sys`) and builds the Windows version of the game from it in about two minutes. Your dump is only read.
 3. The app picks the best settings for your PC once (graphics card, CPU, RAM, display); change anything on the
    Graphics, Controller and Advanced pages.

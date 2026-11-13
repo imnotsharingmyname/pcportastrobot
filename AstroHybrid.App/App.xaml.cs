@@ -68,11 +68,15 @@ namespace AstroHybrid.App
                 if (!_settings.FirstRunComplete)
                 {
                     LogDebug("Showing SetupWizard...");
+                    // The wizard is the only window for a while: closing it must not end the app.
+                    ShutdownMode = ShutdownMode.OnExplicitShutdown;
                     var setupWizard = new SetupWizard(GetRootDirectory());
                     var result = setupWizard.ShowDialog();
                     LogDebug($"SetupWizard closed with result: {result}");
 
-                    // Reload settings after setup
+                    // Reload settings after setup: the wizard saved them through its own manager, so read the
+                    // file again instead of this manager's cached copy.
+                    _settingsManager = new SettingsManager(GetRootDirectory());
                     _settings = _settingsManager.Load();
                     LogDebug($"Settings reloaded. FirstRunComplete: {_settings.FirstRunComplete}");
 
@@ -172,6 +176,8 @@ namespace AstroHybrid.App
             var mainWindow = new MainWindow();
             var rootDir = GetRootDirectory();
             mainWindow.DataContext = new MainWindowViewModel(rootDir);
+            MainWindow = mainWindow;
+            ShutdownMode = ShutdownMode.OnMainWindowClose;
             mainWindow.Show();
         }
 

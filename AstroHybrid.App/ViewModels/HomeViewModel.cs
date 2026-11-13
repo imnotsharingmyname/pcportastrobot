@@ -36,7 +36,7 @@ namespace AstroHybrid.App.ViewModels
             : "Unknown";
 
         public string DisplayInfo => _mainViewModel.HardwareInfo != null
-            ? $"{_mainViewModel.HardwareInfo.ScreenWidth}x{_mainViewModel.HardwareInfo.ScreenHeight} @ {_mainViewModel.HardwareInfo.RefreshRate}Hz"
+            ? $"{_mainViewModel.HardwareInfo.ScreenWidth}x{_mainViewModel.HardwareInfo.ScreenHeight}\n{_mainViewModel.HardwareInfo.RefreshRate} Hz"
             : "Unknown";
 
         public string CurrentGraphicsConfig => BuildGraphicsConfigString();

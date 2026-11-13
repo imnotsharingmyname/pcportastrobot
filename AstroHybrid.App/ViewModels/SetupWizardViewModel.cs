@@ -51,7 +51,17 @@ namespace AstroHybrid.App.ViewModels
         public string GameDumpPath
         {
             get => _gameDumpPath;
-            set => SetProperty(ref _gameDumpPath, value);
+            set
+            {
+                // A pasted path may come with quotes; a changed path needs a new check.
+                var path = (value ?? "").Trim().Trim('"').Trim();
+                if (SetProperty(ref _gameDumpPath, path) && GameInfo != null)
+                {
+                    GameInfo = null;
+                    CanProceed = false;
+                    ShowError = false;
+                }
+            }
         }
 
         public GameInfo? GameInfo
