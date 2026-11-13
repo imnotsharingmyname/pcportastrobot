@@ -67,6 +67,14 @@ namespace AstroHybrid.App.Models
         public InstallationManifest? InstallationManifest { get; set; }
 
         // First run tracking
+        // Game language: -1 = follow Windows, else the console language number (ANYPS5_LANGUAGE).
+        [JsonPropertyName("language")]
+        public int Language { get; set; } = -1;
+
+        // VSync (Vulkan FIFO presentation) instead of immediate presentation: no tearing.
+        [JsonPropertyName("vsync")]
+        public bool VSync { get; set; } = false;
+
         // Runtime options (Advanced page), passed to Run-AstroHybrid.bat; defaults are the script's own.
         [JsonPropertyName("hangWatchdog")]
         public bool HangWatchdog { get; set; } = false;

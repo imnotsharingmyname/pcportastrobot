@@ -52,6 +52,16 @@ foreach ($f in 'nvngx_dlss.license.txt', 'streamline.license.txt', 'reflex.licen
     Copy-Item (Join-Path $src $f) (Join-Path $stage 'licenses')
 }
 
+# System fonts: the game lays out its menu and prompt text in the console's system fonts. The Noto
+# substitutes AnyPS5 accepts (SIL Open Font License, Tools\release\get_fonts.ps1 downloads them) go in
+# anyps5-fonts next to the game; without them button prompts and settings have no text.
+$fonts = Join-Path (Split-Path $Out -Parent) 'fonts\noto'
+$fontFiles = Get-ChildItem $fonts -File | Where-Object { $_.Extension -in '.ttf', '.ttc' }
+if ($fontFiles.Count -lt 20) { throw "fonts missing in $fonts (run Tools\release\get_fonts.ps1)" }
+New-Item -ItemType Directory -Force (Join-Path $run 'anyps5-fonts') | Out-Null
+$fontFiles | Copy-Item -Destination (Join-Path $run 'anyps5-fonts')
+Get-ChildItem $fonts -Filter 'OFL-*.txt' | Copy-Item -Destination (Join-Path $stage 'licenses')
+
 # Readme for players.
 @"
 AstroHybrid $Version - Astro Bot (PPSA21567) native PC port
@@ -74,8 +84,12 @@ In game: F2 performance overlay, F11 or Alt+Enter fullscreen.
 Logs: Logs\hybrid-run.*.log, Logs\setup.log.
 
 Source and full results log: https://github.com/imnotsharingmyname/pcportastrobot
-Not affiliated with Sony Interactive Entertainment, Team ASOBI or NVIDIA. NVIDIA runtime files are
-redistributed under the licences in the licenses folder.
+Intel processors: setup converts the game's AMD-only instructions for you (updating from 1.0.2 or older:
+the app offers to convert the game again at its first start).
+Language and VSync: Advanced and Graphics pages.
+
+Not affiliated with Sony Interactive Entertainment, Team ASOBI or NVIDIA. NVIDIA runtime files and the
+Noto fonts (SIL Open Font License) are redistributed under the licences in the licenses folder.
 "@ | Set-Content -Encoding UTF8 (Join-Path $stage 'README.txt')
 
 # Guard: nothing from a game dump or a play session.

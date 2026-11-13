@@ -169,6 +169,33 @@ namespace AstroHybrid.App.ViewModels
                 }
 
                 StatusMessage = InstallationState?.IsInstalled == true ? "Ready" : "Setup required";
+
+                // A game converted by an earlier version on a CPU that is not an AMD one still holds AMD-only
+                // instructions and hangs after the title screen: convert it again, once.
+                var runHybrid = System.IO.Path.Combine(_rootDirectory, "Build", "RunHybrid");
+                var features = GameFeatures.Load(runHybrid);
+                var setup = new GameSetup(_rootDirectory);
+                if (InstallationState?.IsInstalled == true && setup.IsReleaseLayout && features != null && !features.IntelConversion &&
+                    GameSetup.NeedsIntelConversion() && !string.IsNullOrEmpty(Settings.GameDumpPath))
+                {
+                    var answer = MessageBox.Show(
+                        "This PC's processor needs an updated conversion of the game (it fixes the hang after the title screen on Intel processors).\n\nConvert the game again now? It takes about a minute.",
+                        "AstroHybrid", MessageBoxButton.YesNo, MessageBoxImage.Information);
+                    if (answer == MessageBoxResult.Yes)
+                    {
+                        StatusMessage = "Converting the game for this processor...";
+                        try
+                        {
+                            await _installationManager.RepairAsync();
+                            InstallationState = await _installationManager.GetInstallationStateAsync();
+                            StatusMessage = "Ready";
+                        }
+                        catch (Exception ex)
+                        {
+                            StatusMessage = $"Conversion failed: {ex.Message}";
+                        }
+                    }
+                }
             }
             catch (Exception ex)
             {

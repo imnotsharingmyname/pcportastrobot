@@ -32,6 +32,34 @@ namespace AstroHybrid.App.ViewModels
         }
 
         // Game Speed
+        // Game language: the console language numbers the game asks for (AnyPS5's ANYPS5_LANGUAGE).
+        public string[] LanguageLabels => LanguageNames;
+
+        public int LanguageIndex
+        {
+            get => _mainViewModel.Settings.Language < 0 || _mainViewModel.Settings.Language > 30 ? 0 : _mainViewModel.Settings.Language + 1;
+            set
+            {
+                int language = value <= 0 ? -1 : value - 1;
+                if (_mainViewModel.Settings.Language != language)
+                {
+                    _mainViewModel.Settings.Language = language;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
+        }
+
+        public string LanguageNote => "The language the game shows its text in. Auto follows your Windows language when the game has it.";
+
+        private static readonly string[] LanguageNames =
+        {
+            "Auto (Windows language)", "Japanese", "English (United States)", "French", "Spanish", "German", "Italian", "Dutch",
+            "Portuguese (Portugal)", "Russian", "Korean", "Chinese (Traditional)", "Chinese (Simplified)", "Finnish", "Swedish",
+            "Danish", "Norwegian", "Polish", "Portuguese (Brazil)", "English (United Kingdom)", "Turkish", "Spanish (Latin America)",
+            "Arabic", "French (Canada)", "Czech", "Hungarian", "Greek", "Romanian", "Thai", "Vietnamese", "Indonesian", "Ukrainian",
+        };
+
         public string[] SpeedLabels => new[] { "100% - real time", "95%", "90%", "85%", "80%", "75% (recommended)" };
 
         public int SpeedIndex

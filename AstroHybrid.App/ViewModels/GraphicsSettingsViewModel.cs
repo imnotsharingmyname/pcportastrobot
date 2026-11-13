@@ -46,6 +46,21 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
+        // VSync
+        public bool VSync
+        {
+            get => _mainViewModel.Settings.VSync;
+            set
+            {
+                if (_mainViewModel.Settings.VSync != value)
+                {
+                    _mainViewModel.Settings.VSync = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
+        }
+
         // FPS Limiter
         public string[] FpsLabels => new[] { "30 FPS - steady (recommended)", "35 FPS", "45 FPS", "50 FPS", "55 FPS", "60 FPS", "No limit" };
 

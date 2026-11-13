@@ -293,6 +293,13 @@ namespace AstroHybrid.App.Services
             // Window title
             env["ASTROHYBRID_WINDOW_TITLE"] = "Astro Bot";
 
+            // Game language (AnyPS5 console language number); Auto maps the Windows display language.
+            int language = settings.Language >= 0 && settings.Language <= 30 ? settings.Language : WindowsLanguage();
+            env["ANYPS5_LANGUAGE"] = language.ToString();
+
+            // VSync: Vulkan FIFO presentation (the default is immediate presentation).
+            if (settings.VSync) env["KYTY_GPU_PRESENT_MODE"] = "Fifo";
+
             // Advanced page: the variables Run-AstroHybrid.bat reads (it keeps its defaults when unset).
             if (settings.HangWatchdog) env["ASTROHYBRID_HANG_WATCHDOG"] = "1";
             if (!settings.ShaderCache) env["ASTROHYBRID_SHADER_CACHE"] = "0";
@@ -307,6 +314,50 @@ namespace AstroHybrid.App.Services
             env["ASTROHYBRID_COMMIT_EPOCH_FASTPATH"] = "1";
 
             return env;
+        }
+
+        // The console language number for the Windows display language; English (United States) when unknown.
+        public static int WindowsLanguage()
+        {
+            var culture = System.Globalization.CultureInfo.CurrentUICulture;
+            string name = culture.Name, two = culture.TwoLetterISOLanguageName;
+            switch (name)
+            {
+                case "pt-BR": return 17;
+                case "en-GB": return 18;
+                case "fr-CA": return 22;
+                case "zh-TW": case "zh-HK": case "zh-MO": return 10;
+            }
+            if (two == "es") return name == "es-ES" ? 3 : 20;
+            if (two == "zh") return 11;
+            switch (two)
+            {
+                case "ja": return 0;
+                case "en": return 1;
+                case "fr": return 2;
+                case "de": return 4;
+                case "it": return 5;
+                case "nl": return 6;
+                case "pt": return 7;
+                case "ru": return 8;
+                case "ko": return 9;
+                case "fi": return 12;
+                case "sv": return 13;
+                case "da": return 14;
+                case "nb": case "nn": case "no": return 15;
+                case "pl": return 16;
+                case "tr": return 19;
+                case "ar": return 21;
+                case "cs": return 23;
+                case "hu": return 24;
+                case "el": return 25;
+                case "ro": return 26;
+                case "th": return 27;
+                case "vi": return 28;
+                case "id": return 29;
+                case "uk": return 30;
+                default: return 1;
+            }
         }
 
         public bool IsGameRunning()

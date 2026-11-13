@@ -20,6 +20,8 @@ namespace AstroHybrid.App.Services
         public bool FasterLighting { get; set; }
         // Real-time game speed writes one global at a fixed address, known for 01.019.000 only.
         public bool RealTimeSpeed { get; set; }
+        // The game code was converted for CPUs without AMD-only instructions (relinker --to-intel).
+        public bool IntelConversion { get; set; }
         public DateTime SetupAt { get; set; }
 
         public const string FileName = "astrohybrid-game.json";
@@ -117,7 +119,13 @@ namespace AstroHybrid.App.Services
                 var exe = Path.Combine(_runHybrid, "AstroBot.exe");
                 foreach (var old in Directory.GetFiles(_runHybrid, "AstroBot*.exe").Concat(Directory.GetFiles(_runHybrid, "AstroBot*.json")))
                     File.Delete(old);
-                var (code, output) = RunProcess(_relinker, $"--windows --registry \"{Path.Combine(work, "eboot.elf")}\" \"{exe}\"", _runHybrid);
+                // The game uses AMD-only instructions (SSE4a EXTRQ, and VRSQRTPS / VRCPPS whose results differ on
+                // other CPUs: the game hangs after the title screen there). --to-intel replaces them with
+                // equivalent code; an AMD CPU keeps the original code.
+                features.IntelConversion = NeedsIntelConversion();
+                Log($"CPU: {CpuVendor()}, Intel conversion: {features.IntelConversion}");
+                var options = features.IntelConversion ? "--windows --registry --to-intel" : "--windows --registry";
+                var (code, output) = RunProcess(_relinker, $"{options} \"{Path.Combine(work, "eboot.elf")}\" \"{exe}\"", _runHybrid);
                 File.WriteAllText(Path.Combine(_root, "Logs", "setup-relinker.log"), output);
                 if (code != 0 || !File.Exists(exe))
                     throw new InvalidOperationException($"The relinker failed (exit {code}); see Logs\\setup-relinker.log.");
@@ -146,6 +154,27 @@ namespace AstroHybrid.App.Services
                 JsonSerializer.Serialize(features, new JsonSerializerOptions { WriteIndented = true }));
             Report(100, "Done.");
             return features;
+        }
+
+        public static string CpuVendor()
+        {
+            try
+            {
+                return Microsoft.Win32.Registry.GetValue(@"HKEY_LOCAL_MACHINE\HARDWARE\DESCRIPTION\System\CentralProcessor\0", "VendorIdentifier", null) as string ?? "";
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        // ASTROHYBRID_SETUP_TO_INTEL=1 / 0 forces the choice; otherwise every CPU that is not an AMD one.
+        public static bool NeedsIntelConversion()
+        {
+            var forced = Environment.GetEnvironmentVariable("ASTROHYBRID_SETUP_TO_INTEL");
+            if (forced == "1") return true;
+            if (forced == "0") return false;
+            return CpuVendor().IndexOf("AMD", StringComparison.OrdinalIgnoreCase) < 0;
         }
 
         public static (string TitleId, string Version) ReadParam(string dump)
