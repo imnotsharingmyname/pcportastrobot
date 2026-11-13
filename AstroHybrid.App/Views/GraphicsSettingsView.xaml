@@ -62,12 +62,11 @@
                         <ComboBox Grid.Column="1"
                                   ItemsSource="{Binding FpsLabels}"
                                   SelectedIndex="{Binding FpsIndex}"
+                                  IsEnabled="{Binding IsFpsLimitEnabled}"
                                   Style="{StaticResource ModernComboBoxStyle}" Width="400"/>
                     </Grid>
 
-                    <TextBlock Style="{StaticResource MutedTextStyle}" Margin="0,8,0,0">
-                        The game may run below the selected limit in demanding scenes.
-                    </TextBlock>
+                    <TextBlock Style="{StaticResource MutedTextStyle}" Margin="0,8,0,0" TextWrapping="Wrap" Text="{Binding FpsLimitNote}"/>
                 </StackPanel>
             </Border>
 

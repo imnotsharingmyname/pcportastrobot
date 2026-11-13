@@ -287,10 +287,21 @@ namespace AstroHybrid.App.ViewModels
 
         private async Task RepairInstallationAsync()
         {
-            if (InstallationState?.GameDumpPath == null)
+            if (string.IsNullOrEmpty(Settings.GameDumpPath))
             {
-                MessageBox.Show("No game dump configured. Please run setup again.", "AstroHybrid", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                // Installs made by the classic launcher or an older version do not know the dump folder: ask once.
+                using (var dialog = new System.Windows.Forms.FolderBrowserDialog { Description = "Select your Astro Bot dump folder (the one with eboot.bin)", ShowNewFolderButton = false })
+                {
+                    if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+                    var info = await new GameValidator().ValidateGameDumpAsync(dialog.SelectedPath);
+                    if (!info.IsValid)
+                    {
+                        MessageBox.Show(info.ValidationError ?? "That folder is not an Astro Bot dump.", "AstroHybrid", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                    Settings.GameDumpPath = dialog.SelectedPath;
+                    _settingsManager.Save(Settings);
+                }
             }
 
             var result = MessageBox.Show("This will rebuild the installation from your game dump. Continue?",
@@ -325,10 +336,21 @@ namespace AstroHybrid.App.ViewModels
 
         private async Task RebuildInstallationAsync()
         {
-            if (InstallationState?.GameDumpPath == null)
+            if (string.IsNullOrEmpty(Settings.GameDumpPath))
             {
-                MessageBox.Show("No game dump configured. Please run setup again.", "AstroHybrid", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                // Installs made by the classic launcher or an older version do not know the dump folder: ask once.
+                using (var dialog = new System.Windows.Forms.FolderBrowserDialog { Description = "Select your Astro Bot dump folder (the one with eboot.bin)", ShowNewFolderButton = false })
+                {
+                    if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+                    var info = await new GameValidator().ValidateGameDumpAsync(dialog.SelectedPath);
+                    if (!info.IsValid)
+                    {
+                        MessageBox.Show(info.ValidationError ?? "That folder is not an Astro Bot dump.", "AstroHybrid", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                    Settings.GameDumpPath = dialog.SelectedPath;
+                    _settingsManager.Save(Settings);
+                }
             }
 
             var result = MessageBox.Show("This will completely rebuild the installation. Continue?",

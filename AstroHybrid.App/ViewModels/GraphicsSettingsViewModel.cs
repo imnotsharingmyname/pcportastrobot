@@ -61,6 +61,12 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
+        // With frame generation on, the target sets the game's own limit (as in the classic launcher).
+        public bool IsFpsLimitEnabled => _mainViewModel.Settings.FrameGenMode == 0;
+        public string FpsLimitNote => IsFpsLimitEnabled
+            ? "The game may run below the selected limit in demanding scenes."
+            : "Frame generation is on: the game's own limit comes from the frame generation target below (60 on screen = game at 30 x2). Turn frame generation off to use this limit.";
+
         // FPS Limiter
         public string[] FpsLabels => new[] { "30 FPS - steady (recommended)", "35 FPS", "45 FPS", "50 FPS", "55 FPS", "60 FPS", "No limit" };
 
@@ -111,6 +117,8 @@ namespace AstroHybrid.App.ViewModels
                     OnPropertyChanged();
                     OnPropertyChanged(nameof(IsFrameGenTargetEnabled));
                     OnPropertyChanged(nameof(FrameGenNote));
+                    OnPropertyChanged(nameof(IsFpsLimitEnabled));
+                    OnPropertyChanged(nameof(FpsLimitNote));
                     _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
                 }
             }

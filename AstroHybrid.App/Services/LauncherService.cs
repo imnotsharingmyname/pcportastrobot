@@ -224,6 +224,8 @@ namespace AstroHybrid.App.Services
             // Game speed
             // Always real time, where the game version is known: it writes one global at a fixed address.
             env["ASTROHYBRID_GAME_SPEED"] = features == null || features.RealTimeSpeed ? "1" : "0";
+            if (features != null && features.GameStepAddress != 0)
+                env["ASTROHYBRID_GAME_STEP_ADDR"] = "0x" + features.GameStepAddress.ToString("x");
             var speedValues = new[] { "100", "95", "90", "85", "80", "75" };
             if (settings.Speed >= 0 && settings.Speed < speedValues.Length)
             {

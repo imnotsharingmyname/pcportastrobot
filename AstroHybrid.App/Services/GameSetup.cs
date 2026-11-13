@@ -22,6 +22,9 @@ namespace AstroHybrid.App.Services
         public bool RealTimeSpeed { get; set; }
         // The game code was converted for CPUs without AMD-only instructions (relinker --to-intel).
         public bool IntelConversion { get; set; }
+        // Guest address of the game's frame-rate block (f64 60.0, f32 1/60, u64 16666 microseconds), found by
+        // those values in AstroBot.exe; 0 = not found. Passed to the engine as ASTROHYBRID_GAME_STEP_ADDR.
+        public ulong GameStepAddress { get; set; }
         public DateTime SetupAt { get; set; }
 
         public const string FileName = "astrohybrid-game.json";
@@ -147,13 +150,58 @@ namespace AstroHybrid.App.Services
                 if (ApplyAll(soft, SoftAssertPatches, Log))
                     WriteVariant(soft, "AstroBot-NonRT-SoftAssert");
             }
-            features.RealTimeSpeed = version == GameFeatures.TestedVersion;
+            // Real-time speed needs the frame-rate block; it is found by its initial values in any version (the
+            // engine checks the block again before every use and turns the feature off if it is not one).
+            features.GameStepAddress = FindGameStepBlock(baseBytes, Log);
+            features.RealTimeSpeed = features.GameStepAddress != 0;
             Log($"faster lighting: {features.FasterLighting}, real-time speed: {features.RealTimeSpeed}");
 
             File.WriteAllText(Path.Combine(_runHybrid, GameFeatures.FileName),
                 JsonSerializer.Serialize(features, new JsonSerializerOptions { WriteIndented = true }));
             Report(100, "Done.");
             return features;
+        }
+
+        private static ulong FindGameStepBlock(byte[] exe, Action<string> log)
+        {
+            var prefix = new byte[12];
+            Array.Copy(BitConverter.GetBytes(60.0), 0, prefix, 0, 8);
+            Array.Copy(BitConverter.GetBytes(1.0f / 60.0f), 0, prefix, 8, 4);
+            int found = -1, count = 0;
+            for (int i = 0; i + 24 <= exe.Length; i++)
+            {
+                if (exe[i] != prefix[0] || exe[i + 6] != prefix[6] || exe[i + 7] != prefix[7]) continue;
+                int j = 1;
+                while (j < 12 && exe[i + j] == prefix[j]) j++;
+                if (j < 12) continue;
+                ulong us = BitConverter.ToUInt64(exe, i + 16);
+                if (us != 16666 && us != 16667) continue;
+                count++;
+                found = i;
+            }
+            if (count != 1)
+            {
+                log($"frame-rate block: found {count} times, real-time speed off");
+                return 0;
+            }
+            // File offset -> guest address through the PE section table (image base + rva).
+            int pe = BitConverter.ToInt32(exe, 0x3C);
+            int sections = BitConverter.ToUInt16(exe, pe + 6);
+            int optional = BitConverter.ToUInt16(exe, pe + 20);
+            ulong imageBase = BitConverter.ToUInt64(exe, pe + 24 + 24);
+            for (int s = 0; s < sections; s++)
+            {
+                int o = pe + 24 + optional + s * 40;
+                uint va = BitConverter.ToUInt32(exe, o + 12), rawSize = BitConverter.ToUInt32(exe, o + 16), rawPtr = BitConverter.ToUInt32(exe, o + 20);
+                if (found >= rawPtr && found < rawPtr + rawSize)
+                {
+                    ulong address = imageBase + va + (ulong)(found - rawPtr);
+                    log($"frame-rate block at 0x{address:x}");
+                    return address;
+                }
+            }
+            log("frame-rate block: outside every section, real-time speed off");
+            return 0;
         }
 
         public static string CpuVendor()
@@ -203,7 +251,20 @@ namespace AstroHybrid.App.Services
                 var name = Path.GetFileName(dir);
                 if (name.Equals("sce_module", StringComparison.OrdinalIgnoreCase)) continue;
                 var (code, output) = RunProcess("cmd.exe", $"/c mklink /J \"{Path.Combine(app0, name)}\" \"{dir}\"", app0);
-                if (code != 0) throw new InvalidOperationException($"Could not link {name}: {output.Trim()}");
+                if (code != 0)
+                {
+                    // Folder junctions cannot point to a network drive; a directory symbolic link can, when Windows
+                    // allows this user to make one (Developer Mode, or AstroHybrid run as administrator).
+                    var (linkCode, linkOutput) = RunProcess("cmd.exe", $"/c mklink /D \"{Path.Combine(app0, name)}\" \"{dir}\"", app0);
+                    if (linkCode != 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Could not link the dump's '{name}' folder ({output.Trim()}). If the dump is on a network drive, turn on Developer Mode " +
+                            "(Windows Settings > System > For developers) or run AstroHybrid once as administrator, then press Install again; " +
+                            "or copy the dump to a local drive.");
+                    }
+                    log($"app0\\{name}: symbolic link (junction refused: {output.Trim()})");
+                }
             }
             foreach (var file in Directory.GetFiles(dump))
                 LinkOrCopy(file, Path.Combine(app0, Path.GetFileName(file)));
