@@ -1,0 +1,366 @@
+From 0678e89e3dc91b7bc5b343f2a776b4509889ebea Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Thu, 12 Nov 2026 23:00:15 +0000
+Subject: [PATCH 1/3] feat(hybrid): overlay shows frames on screen with frame
+ generation
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/host_gpu/renderer/frameGen.cpp     | 12 ++++++++++++
+ src/graphics/host_gpu/renderer/frameGen.h       |  3 +++
+ .../presentation/performanceOverlay.cpp         | 17 +++++++++++++++--
+ 3 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/frameGen.cpp b/src/graphics/host_gpu/renderer/frameGen.cpp
+index 49717c4b..619cf064 100644
+--- a/src/graphics/host_gpu/renderer/frameGen.cpp
++++ b/src/graphics/host_gpu/renderer/frameGen.cpp
+@@ -1,5 +1,6 @@
+ #include "graphics/host_gpu/renderer/frameGen.h"
+ 
++#include <algorithm>
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+@@ -61,6 +62,9 @@ uint64_t CurrentFrame() {
+ bool CameraWanted() {
+ 	return false;
+ }
++double ShownPerGameFrame() {
++	return 1.0;
++}
+ void SetCamera(const float*) {}
+ bool TagFrame(VkCommandBuffer, const ImageInput&, const ImageInput&, const float*, uint32_t, uint32_t) {
+ 	return false;
+@@ -156,6 +160,7 @@ struct State {
+ 	uint32_t              mvec_width = 0, mvec_height = 0;
+ 	uint64_t              tags = 0, tag_failures = 0, sleeps = 0;
+ 	uint64_t              presents = 0, presented_frames = 0;
++	std::atomic<double>   shown_ratio {1.0};
+ 	int64_t               print_ns = 0;
+ };
+ 
+@@ -386,6 +391,9 @@ void PresentEnd(uint64_t frame) {
+ 		if (s.api.dlssg_get_state(viewport, state, nullptr) == sl::Result::eOk) {
+ 			s.presents++;
+ 			s.presented_frames += state.numFramesActuallyPresented;
++			const double shown = std::max(1u, state.numFramesActuallyPresented);
++			const double old   = s.shown_ratio.load(std::memory_order_relaxed);
++			s.shown_ratio.store(old + (shown - old) * 0.1, std::memory_order_relaxed);
+ 		}
+ 		Summary();
+ 	}
+@@ -395,6 +403,10 @@ uint64_t CurrentFrame() {
+ 	return Get().cp_frame.load(std::memory_order_acquire) + 1;
+ }
+ 
++double ShownPerGameFrame() {
++	return Active() ? Get().shown_ratio.load(std::memory_order_relaxed) : 1.0;
++}
++
+ bool CameraWanted() {
+ 	auto& s = Get();
+ 	return Active() && s.camera_wanted;
+diff --git a/src/graphics/host_gpu/renderer/frameGen.h b/src/graphics/host_gpu/renderer/frameGen.h
+index 0d9fd563..972415e9 100644
+--- a/src/graphics/host_gpu/renderer/frameGen.h
++++ b/src/graphics/host_gpu/renderer/frameGen.h
+@@ -39,6 +39,9 @@ namespace Libs::Graphics::FrameGen {
+ // After the device: Reflex, DLSS-G options and the runtime state.
+ void OnDeviceReady();
+ [[nodiscard]] bool Active();
++// Frames on screen per game frame, averaged over recent presents (1 when generation is off or
++// paused, e.g. the window lost focus); for the performance overlay. Any thread.
++[[nodiscard]] double ShownPerGameFrame();
+ 
+ // Frame events (frame numbers as in lowLatency.h).
+ void GuestFrameEnd(uint64_t frame);
+diff --git a/src/graphics/presentation/performanceOverlay.cpp b/src/graphics/presentation/performanceOverlay.cpp
+index 622df922..1b784f95 100644
+--- a/src/graphics/presentation/performanceOverlay.cpp
++++ b/src/graphics/presentation/performanceOverlay.cpp
+@@ -5,6 +5,7 @@
+ #include "common/emulatorConfig.h"
+ #include "common/hostStats.h"
+ #include "graphics/host_gpu/graphicContext.h"
++#include "graphics/host_gpu/renderer/frameGen.h"
+ #include "imgui.h"
+ #include "kernel/memory.h"
+ 
+@@ -737,14 +738,26 @@ float DrawPerformanceOverlay(const GraphicContext& graphics, vk::Extent2D extent
+ 		ImGui::SetNextWindowBgAlpha(0.55f);
+ 	}
+ 	const bool open = ImGui::Begin("##kyty_performance_overlay", nullptr, FLAGS);
++	// ASTROHYBRID_DLSSG (frameGen.h): with frame generation the screen shows more frames than the
++	// game renders; both are shown.
++	const double generated = Graphics::FrameGen::ShownPerGameFrame();
++	const bool   frame_gen = generated > 1.05;
+ 	if (open && fps_only) {
+-		if (shown.fps > 0.0) {
++		if (shown.fps > 0.0 && frame_gen) {
++			ImGui::TextColored(Color(GOOD), "%.0f FPS on screen", shown.fps * generated);
++			ImGui::TextDisabled("%.0f game x%.1f frame gen", shown.fps, generated);
++		} else if (shown.fps > 0.0) {
+ 			ImGui::TextColored(Color(FrameTimeColor(shown.frame_ms)), "%.0f FPS", shown.fps);
+ 		} else {
+ 			ImGui::TextDisabled("-- FPS");
+ 		}
+ 	} else if (open) {
+-		if (shown.fps > 0.0) {
++		if (shown.fps > 0.0 && frame_gen) {
++			ImGui::TextColored(Color(GOOD), "%.0f FPS on screen (frame gen x%.1f)", shown.fps * generated,
++			                   generated);
++			ImGui::TextColored(Color(FrameTimeColor(shown.frame_ms)), "Game %.1f FPS   %.1f ms",
++			                   shown.fps, shown.frame_ms);
++		} else if (shown.fps > 0.0) {
+ 			ImGui::TextColored(Color(FrameTimeColor(shown.frame_ms)), "%.1f FPS   %.1f ms",
+ 			                   shown.fps, shown.frame_ms);
+ 		} else if (shown.stalled_s >= 1.0) {
+-- 
+2.55.0.windows.5
+
+
+From af49c78c1a3cbd2a9a89ce612e6c1af278b75dcc Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Thu, 12 Nov 2026 23:14:46 +0000
+Subject: [PATCH 2/3] feat(hybrid): ASTROHYBRID_FPS_LIMIT accepts any value
+ from 10 to 240
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/presentation/videoOut.cpp | 27 +++++++++++++++++++++++---
+ 1 file changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 4b73fdb1..3f17232a 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -892,6 +892,13 @@ constexpr std::array<uint32_t, 10> FRAME_LIMITS {30, 35, 40, 45, 50, 55, 60, 90,
+ constexpr std::array<const char*, 10> FRAME_LIMIT_LABELS {"30 FPS", "35 FPS", "40 FPS", "45 FPS", "50 FPS",
+                                                         "55 FPS", "60 FPS", "90 FPS", "120 FPS", "No limit"};
+ 
++// ASTROHYBRID_FPS_LIMIT: one of the listed values, or any whole number of frames per second from 10
++// to 240 (the launcher's frame-generation target divides the on-screen rate by the multiplier, e.g.
++// 50 on screen with 2x = 25). Ctrl+F2 then cycles the listed values as before.
++constexpr uint32_t    FRAME_LIMIT_CUSTOM = 1000;
++std::atomic<uint32_t> g_custom_frame_limit {0};
++char                  g_custom_frame_limit_label[16] {};
++
+ std::atomic<uint32_t>& FrameLimitChoice() {
+ 	static std::atomic<uint32_t> choice {[] {
+ 		const char* value = std::getenv("ASTROHYBRID_FPS_LIMIT");
+@@ -902,6 +909,14 @@ std::atomic<uint32_t>& FrameLimitChoice() {
+ 					return i;
+ 				}
+ 			}
++			char*      end    = nullptr;
++			const auto custom = std::strtoul(value, &end, 10);
++			if (end != value && *end == '\0' && custom >= 10 && custom <= 240) {
++				g_custom_frame_limit.store(static_cast<uint32_t>(custom), std::memory_order_relaxed);
++				std::snprintf(g_custom_frame_limit_label, sizeof(g_custom_frame_limit_label), "%lu FPS",
++				              custom);
++				return FRAME_LIMIT_CUSTOM;
++			}
+ 		}
+ 		return FRAME_LIMIT_DISABLED;
+ 	}()};
+@@ -987,7 +1002,9 @@ void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t l
+ 
+ const char* FrameLimitLabel() {
+ 	const auto choice = FrameLimitChoice().load(std::memory_order_relaxed);
+-	return choice == FRAME_LIMIT_DISABLED ? nullptr : FRAME_LIMIT_LABELS[choice];
++	return choice == FRAME_LIMIT_DISABLED ? nullptr
++	       : choice == FRAME_LIMIT_CUSTOM ? g_custom_frame_limit_label
++	                                      : FRAME_LIMIT_LABELS[choice];
+ }
+ 
+ bool CycleFrameLimit() {
+@@ -996,7 +1013,8 @@ bool CycleFrameLimit() {
+ 	if (choice == FRAME_LIMIT_DISABLED) {
+ 		return false;
+ 	}
+-	setting.store((choice + 1) % FRAME_LIMITS.size(), std::memory_order_relaxed);
++	setting.store(choice == FRAME_LIMIT_CUSTOM ? 0u : (choice + 1) % static_cast<uint32_t>(FRAME_LIMITS.size()),
++	              std::memory_order_relaxed);
+ 	return true;
+ }
+ 
+@@ -1061,7 +1079,10 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 			next_flip = 0;
+ 		}
+ 		const bool limit_enabled = choice != FRAME_LIMIT_DISABLED;
+-		const auto limit = limit_enabled ? FRAME_LIMITS[choice] : 0;
++		const auto limit = limit_enabled ? (choice == FRAME_LIMIT_CUSTOM
++		                                        ? g_custom_frame_limit.load(std::memory_order_relaxed)
++		                                        : FRAME_LIMITS[choice])
++		                                 : 0u;
+ 		const bool absolute = g_present_abs_vblank.On() ||
+ 		                      (limit_enabled && Config::GetPresentMode() == Config::PresentMode::Immediate);
+ 		bool       behind      = false; // a vblank deadline was missed: may present a blank frame
+-- 
+2.55.0.windows.5
+
+
+From cc09c69c6009bd7218e5c90eb385dd033b91f1fe Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Thu, 12 Nov 2026 23:45:13 +0000
+Subject: [PATCH 3/3] feat(hybrid): adaptive frame generation multiplier for an
+ on-screen target
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/host_gpu/renderer/frameGen.cpp | 75 ++++++++++++++++++++-
+ src/graphics/host_gpu/renderer/frameGen.h   |  3 +
+ 2 files changed, 76 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/frameGen.cpp b/src/graphics/host_gpu/renderer/frameGen.cpp
+index 619cf064..80f8eab1 100644
+--- a/src/graphics/host_gpu/renderer/frameGen.cpp
++++ b/src/graphics/host_gpu/renderer/frameGen.cpp
+@@ -162,6 +162,15 @@ struct State {
+ 	uint64_t              presents = 0, presented_frames = 0;
+ 	std::atomic<double>   shown_ratio {1.0};
+ 	int64_t               print_ns = 0;
++	// ASTROHYBRID_DLSSG_TARGET: adaptive multiplier (present thread, options under options_mutex).
++	std::mutex            options_mutex;
++	uint32_t              target_fps = 0;
++	uint32_t              max_frames = 3;
++	int64_t               window_ns = 0;
++	uint32_t              window_presents = 0;
++	uint32_t              lower_windows = 0;
++	double                game_fps = 0.0;
++	uint32_t              switches = 0;
+ };
+ 
+ State& Get() {
+@@ -197,6 +206,7 @@ void Marker(sl::PCLMarker marker, uint64_t frame) {
+ 
+ void ApplyOptions() {
+ 	auto&              s = Get();
++	std::scoped_lock   lock(s.options_mutex);
+ 	sl::ViewportHandle viewport {0};
+ 	sl::DLSSGOptions   options {};
+ 	options.mode                = sl::DLSSGMode::eOn;
+@@ -224,14 +234,16 @@ void Summary() {
+ 	sl::DLSSGState     state {};
+ 	const auto         result = s.api.dlssg_get_state(viewport, state, nullptr);
+ 	std::printf("DLSS-G 10s: %llu game presents, %llu frames shown (%.2f per game frame) | state %d status 0x%x, last %u, max generated %u, "
+-	            "VRAM %.0f MiB | tags %llu (failed %llu), reflex sleeps %llu, camera %s\n",
++	            "VRAM %.0f MiB | tags %llu (failed %llu), reflex sleeps %llu, camera %s | multiplier %ux, "
++	            "game %.1f FPS, %u switches\n",
+ 	            static_cast<unsigned long long>(s.presents), static_cast<unsigned long long>(s.presented_frames),
+ 	            s.presents == 0 ? 0.0 : static_cast<double>(s.presented_frames) / static_cast<double>(s.presents),
+ 	            static_cast<int>(result), static_cast<unsigned>(state.status),
+ 	            state.numFramesActuallyPresented, state.numFramesToGenerateMax,
+ 	            static_cast<double>(state.estimatedVRAMUsageInBytes) / 1048576.0,
+ 	            static_cast<unsigned long long>(s.tags), static_cast<unsigned long long>(s.tag_failures),
+-	            static_cast<unsigned long long>(s.sleeps), s.camera_valid ? "yes" : "no");
++	            static_cast<unsigned long long>(s.sleeps), s.camera_valid ? "yes" : "no",
++	            s.frames_generated + 1, s.game_fps, s.switches);
+ 	std::fflush(stdout);
+ 	s.tags = s.tag_failures = s.sleeps = 0;
+ 	s.presents = s.presented_frames = 0;
+@@ -302,6 +314,12 @@ PFN_vkGetInstanceProcAddr LoaderBeforeInstance() {
+ 	if (const char* value = std::getenv("ASTROHYBRID_DLSSG_FRAMES"); value != nullptr) {
+ 		s.frames_generated = std::max(1, std::atoi(value));
+ 	}
++	if (const char* value = std::getenv("ASTROHYBRID_DLSSG_TARGET"); value != nullptr) {
++		s.target_fps = static_cast<uint32_t>(std::clamp(std::atoi(value), 0, 400));
++	}
++	if (const char* value = std::getenv("ASTROHYBRID_DLSSG_MAX_FRAMES"); value != nullptr) {
++		s.max_frames = static_cast<uint32_t>(std::clamp(std::atoi(value), 1, 5));
++	}
+ 	std::printf("DLSS-G: Streamline initialised; Vulkan through sl.interposer.dll\n");
+ 	std::fflush(stdout);
+ 	return s.api.gipa;
+@@ -346,6 +364,13 @@ void OnDeviceReady() {
+ 		            state.numFramesToGenerateMax);
+ 		s.frames_generated = state.numFramesToGenerateMax;
+ 	}
++	if (state.numFramesToGenerateMax != 0) {
++		s.max_frames = std::min(s.max_frames, state.numFramesToGenerateMax);
++	}
++	if (s.target_fps != 0) {
++		std::printf("DLSS-G: adaptive multiplier, at least %u FPS on screen, up to %ux\n", s.target_fps,
++		            s.max_frames + 1);
++	}
+ 	s.active.store(true, std::memory_order_release);
+ 	ApplyOptions();
+ }
+@@ -378,6 +403,49 @@ void RenderSubmitted(uint64_t frame) {
+ 	Marker(sl::PCLMarker::eRenderSubmitStart, frame + 1);
+ }
+ 
++namespace {
++// ASTROHYBRID_DLSSG_TARGET: the smallest multiplier that keeps the screen at or above the target for
++// the game's measured frame rate (half-second windows); up after one short window, down only after
++// four windows (2 s) in which the lower multiplier would have been enough.
++void Adapt() {
++	auto&      s   = Get();
++	const auto now = NowNs();
++	s.window_presents++;
++	if (s.window_ns == 0) {
++		s.window_ns = now;
++		return;
++	}
++	const auto elapsed = now - s.window_ns;
++	if (elapsed < 500'000'000LL) {
++		return;
++	}
++	s.game_fps        = static_cast<double>(s.window_presents) * 1e9 / static_cast<double>(elapsed);
++	s.window_ns       = now;
++	s.window_presents = 0;
++	if (s.game_fps < 1.0) {
++		return;
++	}
++	const auto wanted = static_cast<uint32_t>(std::clamp(
++	    std::ceil(static_cast<double>(s.target_fps) / s.game_fps - 0.02) - 1.0, 1.0,
++	    static_cast<double>(s.max_frames)));
++	if (wanted > s.frames_generated) {
++		s.frames_generated = wanted;
++		s.lower_windows    = 0;
++		s.switches++;
++		ApplyOptions();
++	} else if (wanted < s.frames_generated) {
++		if (++s.lower_windows >= 4) {
++			s.frames_generated = wanted;
++			s.lower_windows    = 0;
++			s.switches++;
++			ApplyOptions();
++		}
++	} else {
++		s.lower_windows = 0;
++	}
++}
++} // namespace
++
+ void PresentStart(uint64_t frame) {
+ 	Marker(sl::PCLMarker::ePresentStart, frame);
+ }
+@@ -395,6 +463,9 @@ void PresentEnd(uint64_t frame) {
+ 			const double old   = s.shown_ratio.load(std::memory_order_relaxed);
+ 			s.shown_ratio.store(old + (shown - old) * 0.1, std::memory_order_relaxed);
+ 		}
++		if (s.target_fps != 0) {
++			Adapt();
++		}
+ 		Summary();
+ 	}
+ }
+diff --git a/src/graphics/host_gpu/renderer/frameGen.h b/src/graphics/host_gpu/renderer/frameGen.h
+index 972415e9..e3f33ab7 100644
+--- a/src/graphics/host_gpu/renderer/frameGen.h
++++ b/src/graphics/host_gpu/renderer/frameGen.h
+@@ -26,6 +26,9 @@
+ //  - the presenter marks present start and end with the presented flip's frame.
+ // ASTROHYBRID_DLSSG_FRAMES=n (default 1): frames generated per rendered frame, clamped to what the
+ // runtime reports (numFramesToGenerateMax). Dynamic multi frame generation is not used (D3D12 only).
++// ASTROHYBRID_DLSSG_TARGET=n (default 0 = fixed): adaptive whole multiplier instead: every half second
++// the smallest multiplier keeping the screen at or above n FPS for the game's measured rate (up at
++// once, down after 2 s), at most ASTROHYBRID_DLSSG_MAX_FRAMES (default 3) generated frames.
+ // One "DLSS-G 10s:" console line every 10 s with the runtime's status and frames presented.
+ namespace Libs::Graphics::FrameGen {
+ 
+-- 
+2.55.0.windows.5
+

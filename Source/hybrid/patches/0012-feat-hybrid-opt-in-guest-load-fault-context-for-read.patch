@@ -1,0 +1,71 @@
+From 758560a757111702eac72717e7b375f880cc0fb1 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Thu, 12 Nov 2026 02:32:45 +0000
+Subject: [PATCH] feat(hybrid): opt-in guest-load fault context for read faults
+ in the game image (ASTROHYBRID_GUEST_LOAD_FAULTS)
+
+The bridge's fault handler never published the native context, so KYTY_READ_FAULT_PUBLISHED could not engage in AstroBot.exe. Also records the faulting instruction for KYTY_FAULT_MAP.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/hybrid/kytyGpuBridge.cpp | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index e68eb740..677582ba 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -15,7 +15,9 @@
+ 
+ #include "common/abi.h"
+ #include "common/emulatorConfig.h"
++#include "common/guestLoad.h"
+ #include "common/hostException.h"
++#include "graphics/host_gpu/faultCost.h"
+ #include "graphics/host_gpu/pageManager.h"
+ #include "common/logging/log.h"
+ #include "common/profiler.h"
+@@ -32,6 +34,7 @@
+ #include "libs/padData.h"
+ #include "loader/symbolDatabase.h"
+ #include "loader/timer.h"
++#include "loader/x64InstructionEmulator.h"
+ 
+ #include <SDL3/SDL.h>
+ 
+@@ -481,6 +484,32 @@ bool BridgeGuestAccessFault(const Common::HostException::ExceptionInfo& info) {
+ 		case CoreAccess::Execute: access = GpuAccess::Execute; break;
+ 		default: return false;
+ 	}
++	if (Libs::Graphics::FaultCost::MapEnabled()) {
++		Libs::Graphics::FaultCost::SetFaultInstruction(info.exception_address);
++	}
++	// ASTROHYBRID_GUEST_LOAD_FAULTS=1 (default off): a read fault taken by the game's own code (an
++	// instruction inside the AstroBot executable image) publishes its native context, as
++	// kyty_emulator's handler does for guest code (runtimeLinker.cpp), so KYTY_READ_FAULT_PUBLISHED
++	// can complete a plain load in the handler instead of waiting for the GPU. Without it the
++	// bridge never published a context and that switch could not engage in AstroBot.exe.
++	static const bool guest_loads = [] {
++		const char* value = std::getenv("ASTROHYBRID_GUEST_LOAD_FAULTS");
++		if (value == nullptr || value[0] != '1') {
++			return false;
++		}
++		GuestLoad::Register(&Loader::X64InstructionEmulator::DecodeGuestLoad,
++		                    &Loader::X64InstructionEmulator::ApplyGuestLoad);
++		return true;
++	}();
++	bool guest_code = false;
++	if (guest_loads && access == GpuAccess::Read) {
++		static const HMODULE game = GetModuleHandleW(nullptr);
++		HMODULE              module = nullptr;
++		guest_code = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++		                                reinterpret_cast<LPCWSTR>(info.exception_address), &module) != 0 &&
++		             module == game;
++	}
++	const GuestLoad::FaultScope guest_load(guest_code ? info.native_context : nullptr);
+ 	return Libs::LibKernel::Memory::HandleGpuFault(access, info.access_violation_vaddr);
+ }
+ 
+-- 
+2.55.0.windows.5
+

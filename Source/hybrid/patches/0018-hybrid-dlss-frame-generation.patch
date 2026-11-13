@@ -1,0 +1,1127 @@
+From 5f942fb1075f406a47eb531e429e3c3afa414334 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Thu, 12 Nov 2026 22:13:44 +0000
+Subject: [PATCH] feat(hybrid): opt-in DLSS Frame Generation through Streamline
+
+ASTROHYBRID_DLSSG=1 (with a KYTY_STREAMLINE_DIR build) initialises
+Streamline before the Vulkan instance and takes Vulkan from
+sl.interposer.dll; the window surface is created through it so DLSS-G
+finds the window. Per guest frame: Streamline Reflex sleep and latency
+markers on the existing frame hooks, the game's camera from its per-view
+constants, depth and motion vectors tagged at the temporal upscale pass,
+and constants with previous-frame matrices. ASTROHYBRID_DLSSG_FRAMES
+selects the generated frames, clamped to the runtime's maximum. Also:
+the pass trace can scan bound buffers for projection matrices, and DLSS
+SR now defaults to non-inverted depth as the game's projection shows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                |   7 +
+ src/graphics/host_gpu/renderer/dlss.cpp       | 103 +++-
+ src/graphics/host_gpu/renderer/dlss.h         |   2 +-
+ src/graphics/host_gpu/renderer/frameGen.cpp   | 519 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/frameGen.h     |  70 +++
+ .../renderer/pipeline/descriptors.cpp         |  54 ++
+ src/graphics/host_gpu/renderer/render.h       |   4 +
+ src/graphics/host_gpu/renderer/renderDraw.cpp |   9 +-
+ .../presentation/window/lowLatency.cpp        |  47 +-
+ .../presentation/window/vulkanWindow.cpp      |  45 +-
+ 10 files changed, 845 insertions(+), 15 deletions(-)
+ create mode 100644 src/graphics/host_gpu/renderer/frameGen.cpp
+ create mode 100644 src/graphics/host_gpu/renderer/frameGen.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8d05e720..cca6f074 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2594,6 +2594,13 @@ if(KYTY_NGX_SDK_DIR)
+ 	target_include_directories(kyty_emulator PRIVATE "${KYTY_NGX_SDK_DIR}/include")
+ 	target_link_libraries(kyty_emulator "${KYTY_NGX_SDK_DIR}/lib/Windows_x86_64/nvsdk_ngx_d.lib")
+ endif()
++# AstroHybrid: DLSS Frame Generation through Streamline (renderer/frameGen.cpp), headers only;
++# sl.interposer.dll is loaded at run time. Empty: not built in.
++set(KYTY_STREAMLINE_DIR "" CACHE PATH "NVIDIA Streamline SDK folder (DLSS-G); empty to build without it")
++if(KYTY_STREAMLINE_DIR)
++	target_compile_definitions(kyty_emulator PRIVATE KYTY_STREAMLINE=1)
++	target_include_directories(kyty_emulator PRIVATE "${KYTY_STREAMLINE_DIR}/include")
++endif()
+ target_include_directories(kyty_emulator PRIVATE ${inc_headers})
+ 
+ clang_tidy_check(kyty_emulator "" "${check_headers}" "${inc_headers}")
+diff --git a/src/graphics/host_gpu/renderer/dlss.cpp b/src/graphics/host_gpu/renderer/dlss.cpp
+index 7cf7cdd4..d43372e6 100644
+--- a/src/graphics/host_gpu/renderer/dlss.cpp
++++ b/src/graphics/host_gpu/renderer/dlss.cpp
+@@ -1,4 +1,5 @@
+ #include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/frameGen.h"
+ 
+ #include "graphics/host_gpu/renderer/cache/textureCache.h"
+ #include "graphics/host_gpu/renderer/colorRenderTarget.h"
+@@ -24,6 +25,7 @@
+ #include <array>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -199,7 +201,7 @@ struct DepthPair {
+ struct State {
+ 	uint64_t pass_hash = 0x2936e5eca99d75e7ull;
+ 	float    jitter_sign = 1.0f;
+-	bool     depth_inverted = true;
++	bool     depth_inverted = false;
+ 	int      quality = 0; // 0 quality, 1 balanced, 2 performance, 3 dlaa
+ 	std::array<DepthPair, 16> depth_pairs {};
+ 	uint32_t depth_next = 0;
+@@ -279,8 +281,105 @@ bool Fail(State& s, Fallback reason) {
+ 
+ } // namespace
+ 
++void RenderExecutor::NoteFrameGenCamera(const PreparedBindings& stage) {
++	if (!FrameGen::CameraWanted()) {
++		return;
++	}
++	// The game's per-view constants: a perspective projection (16:9) at offset 128 of a 576-byte
++	// buffer, followed by the view matrix and the inverse projection (frameGen.h).
++	for (const auto& source: stage.buffer_sources) {
++		if (source.address == 0 || source.size != 576) {
++			continue;
++		}
++		const auto* m = reinterpret_cast<const float*>(source.address + 128);
++		const auto zero = [](float v) { return std::fabs(v) < 1e-6f; };
++		if (!(m[0] > 0.2f && m[5] > 0.2f) || m[5] / m[0] < 1.6f || m[5] / m[0] > 1.9f || !zero(m[1]) ||
++		    !zero(m[4]) || !zero(m[15]) || std::fabs(std::fabs(m[11]) - 1.0f) > 1e-5f) {
++			continue;
++		}
++		FrameGen::SetCamera(m);
++		return;
++	}
++}
++
++void RenderExecutor::TagFrameGen(CommandBuffer& buffer, PreparedBindings& pixel) {
++	if (!FrameGen::Active() || pixel.runtime == nullptr || !*pixel.runtime) {
++		return;
++	}
++	auto& s = Get();
++	if (pixel.runtime->program->shader_hash != s.pass_hash || pixel.images.size() < 2 ||
++	    pixel.buffer_sources.empty() || pixel.buffer_sources[0].address == 0 ||
++	    pixel.buffer_sources[0].size < 56) {
++		return;
++	}
++	const auto* cb = reinterpret_cast<const uint32_t*>(pixel.buffer_sources[0].address);
++	float       jitter_uv[2];
++	std::memcpy(jitter_uv, cb, sizeof(jitter_uv));
++	const uint32_t in_w = cb[6], in_h = cb[7];
++	auto&      cache    = m_context.GetTextureCache();
++	const auto mv_id    = pixel.images[0].image_id;
++	ImageId    depth_id {};
++	for (const auto& pair: s.depth_pairs) {
++		if (pair.color == mv_id) {
++			depth_id = pair.depth;
++		}
++	}
++	if (!depth_id || cache.m_slot_images.try_get(depth_id) == nullptr) {
++		return;
++	}
++	auto& mv    = cache.GetImage(mv_id);
++	auto& depth = cache.GetImage(depth_id);
++	if (mv.backing.image == nullptr || depth.backing.image == nullptr || mv.info.extent.width != in_w ||
++	    depth.info.extent.width != in_w) {
++		return;
++	}
++	buffer.EndRendering();
++	const auto cmd = buffer.Handle();
++	mv.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {}, cmd);
++	depth.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {},
++	              cmd);
++	const auto device = m_context.GetGraphics().device;
++	const auto make_view = [&](const Image& image, vk::ImageAspectFlags aspect) {
++		vk::ImageViewCreateInfo view_info {};
++		view_info.image            = image.backing.image;
++		view_info.viewType         = vk::ImageViewType::e2D;
++		view_info.format           = image.backing.format;
++		view_info.subresourceRange = vk::ImageSubresourceRange {aspect, 0, 1, 0, 1};
++		vk::ImageView view;
++		return device.createImageView(&view_info, nullptr, &view) == vk::Result::eSuccess
++		           ? view
++		           : vk::ImageView {};
++	};
++	const std::array<vk::ImageView, 2> views {make_view(depth, vk::ImageAspectFlagBits::eDepth),
++	                                          make_view(mv, vk::ImageAspectFlagBits::eColor)};
++	const auto input = [](const Image& image, vk::ImageView view) {
++		FrameGen::ImageInput in;
++		in.image  = static_cast<VkImage>(image.backing.image);
++		in.view   = static_cast<VkImageView>(view);
++		in.format = static_cast<VkFormat>(image.backing.format);
++		in.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++		in.width  = image.info.extent.width;
++		in.height = image.info.extent.height;
++		in.usage  = static_cast<uint32_t>(static_cast<VkImageUsageFlags>(image.backing.usage));
++		in.flags  = static_cast<uint32_t>(static_cast<VkImageCreateFlags>(image.backing.flags));
++		return in;
++	};
++	if (views[0] && views[1]) {
++		(void)FrameGen::TagFrame(static_cast<VkCommandBuffer>(cmd), input(depth, views[0]),
++		                         input(mv, views[1]), jitter_uv, in_w, in_h);
++	}
++	buffer.ForgetBoundState();
++	m_context.GetCommandScheduler().DeferOperation([device, views]() {
++		for (const auto view: views) {
++			if (view) {
++				device.destroyImageView(view);
++			}
++		}
++	});
++}
++
+ void RenderExecutor::NoteDlssTargets(std::span<const RenderColorInfo> colors, ImageId depth) {
+-	if (!Dlss::Requested() || !depth) {
++	if ((!Dlss::Requested() && !FrameGen::Requested()) || !depth) {
+ 		return;
+ 	}
+ 	auto& s = Get();
+diff --git a/src/graphics/host_gpu/renderer/dlss.h b/src/graphics/host_gpu/renderer/dlss.h
+index 62f20f52..ae1728a9 100644
+--- a/src/graphics/host_gpu/renderer/dlss.h
++++ b/src/graphics/host_gpu/renderer/dlss.h
+@@ -29,7 +29,7 @@
+ // device creation fails with the extension (ASTROHYBRID_DLSS_PROBE=1 reports it).
+ // Options: ASTROHYBRID_DLSS_QUALITY=quality|balanced|performance|dlaa (the DLSS preset family;
+ // default quality); ASTROHYBRID_DLSS_JITTER_SIGN=1|-1 (default 1); ASTROHYBRID_DLSS_DEPTH_INVERTED=1|0
+-// (default 1); ASTROHYBRID_DLSS_PATH: the folder holding nvngx_dlss.dll.
++// (default 0: the game's projection maps the near plane to depth 0); ASTROHYBRID_DLSS_PATH: the folder holding nvngx_dlss.dll.
+ // One "DLSS 10s:" console line every 10 s with evaluations and fallbacks by reason.
+ namespace Libs::Graphics::Dlss {
+ 
+diff --git a/src/graphics/host_gpu/renderer/frameGen.cpp b/src/graphics/host_gpu/renderer/frameGen.cpp
+new file mode 100644
+index 00000000..49717c4b
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/frameGen.cpp
+@@ -0,0 +1,519 @@
++#include "graphics/host_gpu/renderer/frameGen.h"
++
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <string>
++
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++
++#if KYTY_STREAMLINE
++#include <sl.h>
++#include <sl_consts.h>
++#include <sl_dlss_g.h>
++#include <sl_pcl.h>
++#include <sl_reflex.h>
++#endif
++
++namespace Libs::Graphics::FrameGen {
++
++bool Requested() {
++	static const bool requested = [] {
++		const char* value = std::getenv("ASTROHYBRID_DLSSG");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	return requested;
++}
++
++#if !KYTY_STREAMLINE
++
++PFN_vkGetInstanceProcAddr LoaderBeforeInstance() {
++	if (Requested()) {
++		std::printf("DLSS-G: not built in (KYTY_STREAMLINE_DIR)\n");
++	}
++	return nullptr;
++}
++void OnDeviceReady() {}
++bool Loaded() {
++	return false;
++}
++bool Active() {
++	return false;
++}
++void GuestFrameEnd(uint64_t) {}
++void RenderSubmitted(uint64_t) {}
++void PresentStart(uint64_t) {}
++void PresentEnd(uint64_t) {}
++uint64_t CurrentFrame() {
++	return 0;
++}
++bool CameraWanted() {
++	return false;
++}
++void SetCamera(const float*) {}
++bool TagFrame(VkCommandBuffer, const ImageInput&, const ImageInput&, const float*, uint32_t, uint32_t) {
++	return false;
++}
++
++#else
++
++namespace {
++
++using Mat = std::array<float, 16>; // row-major, row vectors (Streamline's convention)
++
++Mat Multiply(const Mat& a, const Mat& b) {
++	Mat r {};
++	for (int i = 0; i < 4; i++) {
++		for (int j = 0; j < 4; j++) {
++			float sum = 0;
++			for (int k = 0; k < 4; k++) {
++				sum += a[i * 4 + k] * b[k * 4 + j];
++			}
++			r[i * 4 + j] = sum;
++		}
++	}
++	return r;
++}
++
++bool Invert(const Mat& m, Mat& out) {
++	double inv[16];
++	const double* a = nullptr;
++	double        d[16];
++	for (int i = 0; i < 16; i++) {
++		d[i] = m[i];
++	}
++	a = d;
++	inv[0]  = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15] + a[9] * a[7] * a[14] + a[13] * a[6] * a[11] - a[13] * a[7] * a[10];
++	inv[4]  = -a[4] * a[10] * a[15] + a[4] * a[11] * a[14] + a[8] * a[6] * a[15] - a[8] * a[7] * a[14] - a[12] * a[6] * a[11] + a[12] * a[7] * a[10];
++	inv[8]  = a[4] * a[9] * a[15] - a[4] * a[11] * a[13] - a[8] * a[5] * a[15] + a[8] * a[7] * a[13] + a[12] * a[5] * a[11] - a[12] * a[7] * a[9];
++	inv[12] = -a[4] * a[9] * a[14] + a[4] * a[10] * a[13] + a[8] * a[5] * a[14] - a[8] * a[6] * a[13] - a[12] * a[5] * a[10] + a[12] * a[6] * a[9];
++	inv[1]  = -a[1] * a[10] * a[15] + a[1] * a[11] * a[14] + a[9] * a[2] * a[15] - a[9] * a[3] * a[14] - a[13] * a[2] * a[11] + a[13] * a[3] * a[10];
++	inv[5]  = a[0] * a[10] * a[15] - a[0] * a[11] * a[14] - a[8] * a[2] * a[15] + a[8] * a[3] * a[14] + a[12] * a[2] * a[11] - a[12] * a[3] * a[10];
++	inv[9]  = -a[0] * a[9] * a[15] + a[0] * a[11] * a[13] + a[8] * a[1] * a[15] - a[8] * a[3] * a[13] - a[12] * a[1] * a[11] + a[12] * a[3] * a[9];
++	inv[13] = a[0] * a[9] * a[14] - a[0] * a[10] * a[13] - a[8] * a[1] * a[14] + a[8] * a[2] * a[13] + a[12] * a[1] * a[10] - a[12] * a[2] * a[9];
++	inv[2]  = a[1] * a[6] * a[15] - a[1] * a[7] * a[14] - a[5] * a[2] * a[15] + a[5] * a[3] * a[14] + a[13] * a[2] * a[7] - a[13] * a[3] * a[6];
++	inv[6]  = -a[0] * a[6] * a[15] + a[0] * a[7] * a[14] + a[4] * a[2] * a[15] - a[4] * a[3] * a[14] - a[12] * a[2] * a[7] + a[12] * a[3] * a[6];
++	inv[10] = a[0] * a[5] * a[15] - a[0] * a[7] * a[13] - a[4] * a[1] * a[15] + a[4] * a[3] * a[13] + a[12] * a[1] * a[7] - a[12] * a[3] * a[5];
++	inv[14] = -a[0] * a[5] * a[14] + a[0] * a[6] * a[13] + a[4] * a[1] * a[14] - a[4] * a[2] * a[13] - a[12] * a[1] * a[6] + a[12] * a[2] * a[5];
++	inv[3]  = -a[1] * a[6] * a[11] + a[1] * a[7] * a[10] + a[5] * a[2] * a[11] - a[5] * a[3] * a[10] - a[9] * a[2] * a[7] + a[9] * a[3] * a[6];
++	inv[7]  = a[0] * a[6] * a[11] - a[0] * a[7] * a[10] - a[4] * a[2] * a[11] + a[4] * a[3] * a[10] + a[8] * a[2] * a[7] - a[8] * a[3] * a[6];
++	inv[11] = -a[0] * a[5] * a[11] + a[0] * a[7] * a[9] + a[4] * a[1] * a[11] - a[4] * a[3] * a[9] - a[8] * a[1] * a[7] + a[8] * a[3] * a[5];
++	inv[15] = a[0] * a[5] * a[10] - a[0] * a[6] * a[9] - a[4] * a[1] * a[10] + a[4] * a[2] * a[9] + a[8] * a[1] * a[6] - a[8] * a[2] * a[5];
++	const double det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
++	if (std::fabs(det) < 1e-20) {
++		return false;
++	}
++	for (int i = 0; i < 16; i++) {
++		out[i] = static_cast<float>(inv[i] / det);
++	}
++	return true;
++}
++
++void Copy(sl::float4x4& to, const Mat& from) {
++	for (int r = 0; r < 4; r++) {
++		to.row[r] = sl::float4(from[r * 4 + 0], from[r * 4 + 1], from[r * 4 + 2], from[r * 4 + 3]);
++	}
++}
++
++struct Api {
++	HMODULE                       module = nullptr;
++	PFun_slInit*                  init = nullptr;
++	PFun_slSetTagForFrame*        set_tag = nullptr;
++	PFun_slSetConstants*          set_constants = nullptr;
++	PFun_slGetNewFrameToken*      new_token = nullptr;
++	PFun_slGetFeatureFunction*    feature_function = nullptr;
++	PFun_slDLSSGSetOptions*       dlssg_set_options = nullptr;
++	PFun_slDLSSGGetState*         dlssg_get_state = nullptr;
++	PFun_slReflexSetOptions*      reflex_set_options = nullptr;
++	PFun_slReflexSleep*           reflex_sleep = nullptr;
++	PFun_slPCLSetMarker*          pcl_marker = nullptr;
++	PFN_vkGetInstanceProcAddr     gipa = nullptr;
++};
++
++struct State {
++	Api                   api;
++	std::atomic<bool>     active {false};
++	std::atomic<uint64_t> cp_frame {0};
++	std::mutex            camera_mutex;
++	bool                  camera_wanted = true;
++	bool                  camera_valid  = false;
++	bool                  previous_valid = false;
++	Mat                   projection {};   // unjittered, row-major row vectors
++	Mat                   view {};
++	Mat                   previous_view_projection {};
++	uint32_t              frames_generated = 1;
++	uint32_t              mvec_width = 0, mvec_height = 0;
++	uint64_t              tags = 0, tag_failures = 0, sleeps = 0;
++	uint64_t              presents = 0, presented_frames = 0;
++	int64_t               print_ns = 0;
++};
++
++State& Get() {
++	static State state;
++	return state;
++}
++
++int64_t NowNs() {
++	return std::chrono::duration_cast<std::chrono::nanoseconds>(
++	           std::chrono::steady_clock::now().time_since_epoch())
++	    .count();
++}
++
++sl::FrameToken* Token(uint64_t frame) {
++	auto& s = Get();
++	sl::FrameToken* token = nullptr;
++	const uint32_t  index = static_cast<uint32_t>(frame);
++	if (s.api.new_token(token, &index) != sl::Result::eOk) {
++		return nullptr;
++	}
++	return token;
++}
++
++void Marker(sl::PCLMarker marker, uint64_t frame) {
++	auto& s = Get();
++	if (!s.active.load(std::memory_order_acquire) || frame == 0) {
++		return;
++	}
++	if (auto* token = Token(frame); token != nullptr) {
++		s.api.pcl_marker(marker, *token);
++	}
++}
++
++void ApplyOptions() {
++	auto&              s = Get();
++	sl::ViewportHandle viewport {0};
++	sl::DLSSGOptions   options {};
++	options.mode                = sl::DLSSGMode::eOn;
++	options.numFramesToGenerate = s.frames_generated;
++	options.mvecDepthWidth      = s.mvec_width;
++	options.mvecDepthHeight     = s.mvec_height;
++	const auto result           = s.api.dlssg_set_options(viewport, options);
++	std::printf("DLSS-G: options mode on, %u generated frame(s) per frame, mvec/depth %ux%u -> %d\n",
++	            s.frames_generated, s.mvec_width, s.mvec_height, static_cast<int>(result));
++	std::fflush(stdout);
++}
++
++void Summary() {
++	auto&      s   = Get();
++	const auto now = NowNs();
++	if (s.print_ns == 0) {
++		s.print_ns = now;
++		return;
++	}
++	if (now - s.print_ns < 10'000'000'000LL) {
++		return;
++	}
++	s.print_ns = now;
++	sl::ViewportHandle viewport {0};
++	sl::DLSSGState     state {};
++	const auto         result = s.api.dlssg_get_state(viewport, state, nullptr);
++	std::printf("DLSS-G 10s: %llu game presents, %llu frames shown (%.2f per game frame) | state %d status 0x%x, last %u, max generated %u, "
++	            "VRAM %.0f MiB | tags %llu (failed %llu), reflex sleeps %llu, camera %s\n",
++	            static_cast<unsigned long long>(s.presents), static_cast<unsigned long long>(s.presented_frames),
++	            s.presents == 0 ? 0.0 : static_cast<double>(s.presented_frames) / static_cast<double>(s.presents),
++	            static_cast<int>(result), static_cast<unsigned>(state.status),
++	            state.numFramesActuallyPresented, state.numFramesToGenerateMax,
++	            static_cast<double>(state.estimatedVRAMUsageInBytes) / 1048576.0,
++	            static_cast<unsigned long long>(s.tags), static_cast<unsigned long long>(s.tag_failures),
++	            static_cast<unsigned long long>(s.sleeps), s.camera_valid ? "yes" : "no");
++	std::fflush(stdout);
++	s.tags = s.tag_failures = s.sleeps = 0;
++	s.presents = s.presented_frames = 0;
++}
++
++} // namespace
++
++PFN_vkGetInstanceProcAddr LoaderBeforeInstance() {
++	if (!Requested()) {
++		return nullptr;
++	}
++	auto&        s          = Get();
++	const char*  path_value = std::getenv("ASTROHYBRID_DLSS_PATH");
++	std::string  dir        = path_value != nullptr ? path_value
++	                                                : "E:\\AstroHybrid-Work\\sdk\\streamline-v2.14.16\\bin\\x64";
++	const auto   dll        = dir + "\\sl.interposer.dll";
++	s.api.module            = LoadLibraryA(dll.c_str());
++	if (s.api.module == nullptr) {
++		std::printf("DLSS-G: cannot load %s (%lu)\n", dll.c_str(), GetLastError());
++		return nullptr;
++	}
++	const auto symbol = [&](const char* name) { return reinterpret_cast<void*>(GetProcAddress(s.api.module, name)); };
++	s.api.init             = reinterpret_cast<PFun_slInit*>(symbol("slInit"));
++	s.api.set_tag          = reinterpret_cast<PFun_slSetTagForFrame*>(symbol("slSetTagForFrame"));
++	s.api.set_constants    = reinterpret_cast<PFun_slSetConstants*>(symbol("slSetConstants"));
++	s.api.new_token        = reinterpret_cast<PFun_slGetNewFrameToken*>(symbol("slGetNewFrameToken"));
++	s.api.feature_function = reinterpret_cast<PFun_slGetFeatureFunction*>(symbol("slGetFeatureFunction"));
++	s.api.gipa             = reinterpret_cast<PFN_vkGetInstanceProcAddr>(symbol("vkGetInstanceProcAddr"));
++	if (s.api.init == nullptr || s.api.set_tag == nullptr || s.api.set_constants == nullptr ||
++	    s.api.new_token == nullptr || s.api.feature_function == nullptr || s.api.gipa == nullptr) {
++		std::printf("DLSS-G: sl.interposer.dll lacks an entry point\n");
++		return nullptr;
++	}
++	static std::wstring          wide(dir.begin(), dir.end());
++	static const wchar_t*        paths[] = {wide.c_str()};
++	static const sl::Feature     features[] = {sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL};
++	sl::Preferences              prefs {};
++	prefs.showConsole        = false;
++	prefs.logLevel           = sl::LogLevel::eDefault;
++	prefs.pathsToPlugins     = paths;
++	prefs.numPathsToPlugins  = 1;
++	prefs.pathToLogsAndData  = nullptr;
++	// Streamline's warnings and errors on the console (ASTROHYBRID_DLSSG_LOG=1: everything).
++	static const bool verbose = [] {
++		const char* value = std::getenv("ASTROHYBRID_DLSSG_LOG");
++		return value != nullptr && value[0] == '1';
++	}();
++	prefs.logLevel           = verbose ? sl::LogLevel::eVerbose : sl::LogLevel::eDefault;
++	prefs.logMessageCallback = [](sl::LogType type, const char* message) {
++		if (type != sl::LogType::eInfo || verbose) {
++			std::printf("SL: %s", message);
++			std::fflush(stdout);
++		}
++	};
++	prefs.flags              = sl::PreferenceFlags::eDisableCLStateTracking |
++	                           sl::PreferenceFlags::eUseFrameBasedResourceTagging;
++	prefs.featuresToLoad     = features;
++	prefs.numFeaturesToLoad  = 3;
++	prefs.engine             = sl::EngineType::eCustom;
++	prefs.engineVersion      = "1.0";
++	prefs.projectId          = "8e5a33f4-7e0f-4c5b-9a5c-1c2e7d4b3a10";
++	prefs.renderAPI          = sl::RenderAPI::eVulkan;
++	const auto result        = s.api.init(prefs, sl::kSDKVersion);
++	if (result != sl::Result::eOk) {
++		std::printf("DLSS-G: slInit failed (%d)\n", static_cast<int>(result));
++		return nullptr;
++	}
++	if (const char* value = std::getenv("ASTROHYBRID_DLSSG_FRAMES"); value != nullptr) {
++		s.frames_generated = std::max(1, std::atoi(value));
++	}
++	std::printf("DLSS-G: Streamline initialised; Vulkan through sl.interposer.dll\n");
++	std::fflush(stdout);
++	return s.api.gipa;
++}
++
++void OnDeviceReady() {
++	auto& s = Get();
++	if (s.api.gipa == nullptr) {
++		return;
++	}
++	const auto fetch = [&](sl::Feature feature, const char* name) {
++		void* function = nullptr;
++		return s.api.feature_function(feature, name, function) == sl::Result::eOk ? function : nullptr;
++	};
++	s.api.dlssg_set_options  = reinterpret_cast<PFun_slDLSSGSetOptions*>(fetch(sl::kFeatureDLSS_G, "slDLSSGSetOptions"));
++	s.api.dlssg_get_state    = reinterpret_cast<PFun_slDLSSGGetState*>(fetch(sl::kFeatureDLSS_G, "slDLSSGGetState"));
++	s.api.reflex_set_options = reinterpret_cast<PFun_slReflexSetOptions*>(fetch(sl::kFeatureReflex, "slReflexSetOptions"));
++	s.api.reflex_sleep       = reinterpret_cast<PFun_slReflexSleep*>(fetch(sl::kFeatureReflex, "slReflexSleep"));
++	s.api.pcl_marker         = reinterpret_cast<PFun_slPCLSetMarker*>(fetch(sl::kFeaturePCL, "slPCLSetMarker"));
++	if (s.api.dlssg_set_options == nullptr || s.api.dlssg_get_state == nullptr ||
++	    s.api.reflex_set_options == nullptr || s.api.reflex_sleep == nullptr || s.api.pcl_marker == nullptr) {
++		std::printf("DLSS-G: feature functions unavailable (DLSS-G %p/%p, Reflex %p/%p, PCL %p): off\n",
++		            reinterpret_cast<void*>(s.api.dlssg_set_options), reinterpret_cast<void*>(s.api.dlssg_get_state),
++		            reinterpret_cast<void*>(s.api.reflex_set_options), reinterpret_cast<void*>(s.api.reflex_sleep),
++		            reinterpret_cast<void*>(s.api.pcl_marker));
++		std::fflush(stdout);
++		return;
++	}
++	sl::ReflexOptions reflex {};
++	reflex.mode = sl::ReflexMode::eLowLatency;
++	const auto reflex_result = s.api.reflex_set_options(reflex);
++	sl::ViewportHandle viewport {0};
++	sl::DLSSGState     state {};
++	const auto         state_result = s.api.dlssg_get_state(viewport, state, nullptr);
++	std::printf("DLSS-G: Reflex low latency -> %d; runtime state -> %d, status 0x%x, max generated frames "
++	            "%u, dynamic MFG supported %d\n",
++	            static_cast<int>(reflex_result), static_cast<int>(state_result),
++	            static_cast<unsigned>(state.status), state.numFramesToGenerateMax,
++	            static_cast<int>(state.bIsDynamicMFGSupported));
++	if (state.numFramesToGenerateMax != 0 && s.frames_generated > state.numFramesToGenerateMax) {
++		std::printf("DLSS-G: %u generated frames requested, the runtime allows %u\n", s.frames_generated,
++		            state.numFramesToGenerateMax);
++		s.frames_generated = state.numFramesToGenerateMax;
++	}
++	s.active.store(true, std::memory_order_release);
++	ApplyOptions();
++}
++
++bool Loaded() {
++	return Get().api.gipa != nullptr;
++}
++
++bool Active() {
++	return Get().active.load(std::memory_order_acquire);
++}
++
++void GuestFrameEnd(uint64_t frame) {
++	auto& s = Get();
++	if (!Active()) {
++		return;
++	}
++	Marker(sl::PCLMarker::eSimulationEnd, frame);
++	if (auto* token = Token(frame + 1); token != nullptr) {
++		s.api.reflex_sleep(*token);
++		s.sleeps++;
++	}
++	Marker(sl::PCLMarker::eSimulationStart, frame + 1);
++}
++
++void RenderSubmitted(uint64_t frame) {
++	auto& s = Get();
++	s.cp_frame.store(frame, std::memory_order_release);
++	Marker(sl::PCLMarker::eRenderSubmitEnd, frame);
++	Marker(sl::PCLMarker::eRenderSubmitStart, frame + 1);
++}
++
++void PresentStart(uint64_t frame) {
++	Marker(sl::PCLMarker::ePresentStart, frame);
++}
++
++void PresentEnd(uint64_t frame) {
++	Marker(sl::PCLMarker::ePresentEnd, frame);
++	if (Active()) {
++		auto&              s = Get();
++		sl::ViewportHandle viewport {0};
++		sl::DLSSGState     state {};
++		if (s.api.dlssg_get_state(viewport, state, nullptr) == sl::Result::eOk) {
++			s.presents++;
++			s.presented_frames += state.numFramesActuallyPresented;
++		}
++		Summary();
++	}
++}
++
++uint64_t CurrentFrame() {
++	return Get().cp_frame.load(std::memory_order_acquire) + 1;
++}
++
++bool CameraWanted() {
++	auto& s = Get();
++	return Active() && s.camera_wanted;
++}
++
++void SetCamera(const float* c) {
++	auto&            s = Get();
++	std::scoped_lock lock(s.camera_mutex);
++	Mat projection {};
++	Mat view {};
++	std::memcpy(projection.data(), c, sizeof(projection));
++	std::memcpy(view.data(), c + 16, sizeof(view));
++	projection[8] = 0.0f;
++	projection[9] = 0.0f;
++	s.projection    = projection;
++	s.view          = view;
++	s.camera_valid  = true;
++	s.camera_wanted = false;
++}
++
++bool TagFrame(VkCommandBuffer cmd, const ImageInput& depth, const ImageInput& motion,
++              const float jitter_uv[2], uint32_t width, uint32_t height) {
++	auto& s = Get();
++	if (!Active()) {
++		return false;
++	}
++	const uint64_t frame = CurrentFrame();
++	auto*          token = Token(frame);
++	if (token == nullptr) {
++		s.tag_failures++;
++		return false;
++	}
++	if (s.mvec_width != width || s.mvec_height != height) {
++		s.mvec_width  = width;
++		s.mvec_height = height;
++		ApplyOptions();
++	}
++	const auto resource = [](const ImageInput& in) {
++		sl::Resource r(sl::ResourceType::eTex2d, reinterpret_cast<void*>(in.image), nullptr,
++		               reinterpret_cast<void*>(in.view), static_cast<uint32_t>(in.layout));
++		r.width        = in.width;
++		r.height       = in.height;
++		r.nativeFormat = static_cast<uint32_t>(in.format);
++		r.mipLevels    = 1;
++		r.arrayLayers  = 1;
++		r.flags        = in.flags;
++		r.usage        = in.usage;
++		return r;
++	};
++	sl::Resource       depth_res  = resource(depth);
++	sl::Resource       motion_res = resource(motion);
++	sl::ResourceTag    tags[]     = {
++        sl::ResourceTag(&depth_res, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow),
++        sl::ResourceTag(&motion_res, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow)};
++	sl::ViewportHandle viewport {0};
++	if (s.api.set_tag(*token, viewport, tags, 2, reinterpret_cast<sl::CommandBuffer*>(cmd)) !=
++	    sl::Result::eOk) {
++		s.tag_failures++;
++		return false;
++	}
++	sl::Constants consts {};
++	{
++		std::scoped_lock lock(s.camera_mutex);
++		const Mat identity {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
++		Mat       inverse_projection = identity;
++		Mat       inverse_view       = identity;
++		Invert(s.projection, inverse_projection);
++		Invert(s.view, inverse_view);
++		const Mat view_projection = Multiply(s.view, s.projection);
++		Mat       inverse_view_projection = identity;
++		Invert(view_projection, inverse_view_projection);
++		Mat clip_to_prev = identity;
++		if (s.previous_valid) {
++			clip_to_prev = Multiply(inverse_view_projection, s.previous_view_projection);
++		}
++		Mat prev_to_clip = identity;
++		Invert(clip_to_prev, prev_to_clip);
++		Copy(consts.cameraViewToClip, s.projection);
++		Copy(consts.clipToCameraView, inverse_projection);
++		Copy(consts.clipToLensClip, identity);
++		Copy(consts.clipToPrevClip, clip_to_prev);
++		Copy(consts.prevClipToClip, prev_to_clip);
++		consts.cameraRight = sl::float3(inverse_view[0], inverse_view[1], inverse_view[2]);
++		consts.cameraUp    = sl::float3(inverse_view[4], inverse_view[5], inverse_view[6]);
++		consts.cameraFwd   = sl::float3(-inverse_view[8], -inverse_view[9], -inverse_view[10]);
++		consts.cameraPos   = sl::float3(inverse_view[12], inverse_view[13], inverse_view[14]);
++		const float a = s.projection[10];
++		const float b = s.projection[14];
++		consts.cameraNear        = (a != 0.0f) ? b / a : 0.1f;
++		consts.cameraFar         = (a + 1.0f != 0.0f) ? b / (a + 1.0f) : 1000.0f;
++		consts.cameraFOV         = 2.0f * std::atan(1.0f / s.projection[5]);
++		consts.cameraAspectRatio = s.projection[5] != 0.0f ? s.projection[5] / s.projection[0] : 1.0f;
++		consts.depthInverted     = sl::Boolean::eFalse;
++		consts.reset             = s.previous_valid && s.camera_valid ? sl::Boolean::eFalse : sl::Boolean::eTrue;
++		s.previous_view_projection = view_projection;
++		s.previous_valid           = s.camera_valid;
++		s.camera_wanted            = true;
++	}
++	const float jitter_sign = [] {
++		const char* value = std::getenv("ASTROHYBRID_DLSS_JITTER_SIGN");
++		return value != nullptr && std::strtof(value, nullptr) < 0 ? -1.0f : 1.0f;
++	}();
++	consts.jitterOffset              = sl::float2(jitter_sign * jitter_uv[0] * static_cast<float>(width),
++	                                              jitter_sign * jitter_uv[1] * static_cast<float>(height));
++	consts.mvecScale                 = sl::float2(-1.0f, -1.0f);
++	consts.cameraPinholeOffset       = sl::float2(0.0f, 0.0f);
++	consts.cameraMotionIncluded      = sl::Boolean::eTrue;
++	consts.motionVectors3D           = sl::Boolean::eFalse;
++	consts.orthographicProjection    = sl::Boolean::eFalse;
++	consts.motionVectorsDilated      = sl::Boolean::eFalse;
++	consts.motionVectorsJittered     = sl::Boolean::eTrue;
++	if (s.api.set_constants(consts, *token, viewport) != sl::Result::eOk) {
++		s.tag_failures++;
++		return false;
++	}
++	s.tags++;
++	return true;
++}
++
++#endif
++
++} // namespace Libs::Graphics::FrameGen
+diff --git a/src/graphics/host_gpu/renderer/frameGen.h b/src/graphics/host_gpu/renderer/frameGen.h
+new file mode 100644
+index 00000000..0d9fd563
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/frameGen.h
+@@ -0,0 +1,70 @@
++#ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_FRAMEGEN_H_
++#define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_FRAMEGEN_H_
++
++#include <cstdint>
++
++#include <vulkan/vulkan_core.h>
++
++// ASTROHYBRID_DLSSG=1 (default 0; needs a build with KYTY_STREAMLINE_DIR and the Streamline runtime
++// in ASTROHYBRID_DLSS_PATH, plus ASTROHYBRID_CUDA_HOLE=1 like DLSS): NVIDIA DLSS Frame Generation
++// through Streamline (frameGen.cpp).
++//
++// Streamline is initialised before Kyty's Vulkan instance (Vulkan, features DLSS-G, Reflex and PC
++// latency; no over-the-air updates or downloaded plugins) and Kyty's dispatcher then takes its
++// entry points from sl.interposer.dll, so Streamline adds what DLSS-G needs to the instance and
++// device (extensions, the optical-flow queue) and intercepts the swapchain and presents.
++//
++// Per guest frame (numbered by flips, as for ASTROHYBRID_LOW_LATENCY, whose markers it takes over:
++// the Vulkan low-latency path stays off while DLSS-G is on):
++//  - the guest render thread ends the frame with Streamline's Reflex sleep and simulation markers;
++//  - the command processor marks render submission at each reserved flip;
++//  - the camera: the game's per-view constants (the projection with and without jitter, the view
++//    matrix and the inverse projection, 48 floats) captured from the first draw of the frame that
++//    binds them; the previous frame's are kept here for the clip-to-previous-clip matrices;
++//  - at the game's temporal upscale pass: depth and motion vectors tagged (valid only now, copied by
++//    Streamline in the command buffer) and the constants set for the frame;
++//  - the presenter marks present start and end with the presented flip's frame.
++// ASTROHYBRID_DLSSG_FRAMES=n (default 1): frames generated per rendered frame, clamped to what the
++// runtime reports (numFramesToGenerateMax). Dynamic multi frame generation is not used (D3D12 only).
++// One "DLSS-G 10s:" console line every 10 s with the runtime's status and frames presented.
++namespace Libs::Graphics::FrameGen {
++
++[[nodiscard]] bool Requested();
++// Before the Vulkan instance: Streamline's vkGetInstanceProcAddr, or null (not requested, not
++// built in or initialisation failed: the normal loader is used and DLSS-G stays off).
++[[nodiscard]] PFN_vkGetInstanceProcAddr LoaderBeforeInstance();
++// Streamline's interposer is Kyty's Vulkan loader (surfaces must then be created through it, so
++// Streamline can associate the swapchain with its window).
++[[nodiscard]] bool Loaded();
++// After the device: Reflex, DLSS-G options and the runtime state.
++void OnDeviceReady();
++[[nodiscard]] bool Active();
++
++// Frame events (frame numbers as in lowLatency.h).
++void GuestFrameEnd(uint64_t frame);
++void RenderSubmitted(uint64_t frame);
++void PresentStart(uint64_t frame);
++void PresentEnd(uint64_t frame);
++// The frame the command processor is working on (the next flip).
++[[nodiscard]] uint64_t CurrentFrame();
++
++// Command processor.
++[[nodiscard]] bool CameraWanted();
++void SetCamera(const float* constants);
++struct ImageInput {
++	VkImage     image  = VK_NULL_HANDLE;
++	VkImageView view   = VK_NULL_HANDLE;
++	VkFormat    format = VK_FORMAT_UNDEFINED;
++	VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
++	uint32_t    width  = 0;
++	uint32_t    height = 0;
++	uint32_t    usage  = 0;
++	uint32_t    flags  = 0;
++};
++// At the temporal upscale pass: tags and constants for CurrentFrame(); false when not done.
++bool TagFrame(VkCommandBuffer cmd, const ImageInput& depth, const ImageInput& motion,
++              const float jitter_uv[2], uint32_t width, uint32_t height);
++
++} // namespace Libs::Graphics::FrameGen
++
++#endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_FRAMEGEN_H_
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+index 1115eb46..e7fa0596 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+@@ -2107,6 +2107,60 @@ void TracePass(TextureCache& cache, const char* kind, std::span<PreparedBindings
+ 			image_text(binding.desc.type == TextureCache::BindingType::Storage ? 'S' : 'T',
+ 			           binding.image_id);
+ 		}
++		// ASTROHYBRID_PASS_TRACE_MATRIX=1: every bound buffer (first 64 KiB) is scanned for
++		// perspective projections (two scales whose ratio is 1.6-1.9, a +-1 in the w row or column,
++		// zero w-w); each new hit prints its address and the 48 floats from it.
++		static const bool scan_matrices = [] {
++			const char* value = std::getenv("ASTROHYBRID_PASS_TRACE_MATRIX");
++			return value != nullptr && value[0] == '1';
++		}();
++		if (scan_matrices) {
++			static std::vector<uint64_t> seen;
++			for (const auto& source: stage->buffer_sources) {
++				if (source.address == 0 || source.size < 64) {
++					continue;
++				}
++				const auto* f     = reinterpret_cast<const float*>(source.address);
++				const auto  count = std::min<uint64_t>(source.size, 65536) / 4;
++				for (uint64_t i = 0; i + 16 <= count; i++) {
++					const float* m      = f + i;
++					const auto   near_0 = [](float v) { return std::fabs(v) < 1e-6f; };
++					const auto   unit   = [](float v) { return std::fabs(std::fabs(v) - 1.0f) < 1e-5f; };
++					const float  sx = m[0], sy = m[5];
++					if (!(sx > 0.2f && sx < 20.0f && sy > 0.2f && sy < 20.0f)) {
++						continue;
++					}
++					const float ratio = sy / sx;
++					if (ratio < 1.6f || ratio > 1.9f || !near_0(m[15]) || !near_0(m[1]) ||
++					    !near_0(m[4])) {
++						continue;
++					}
++					const bool row_w = unit(m[14]) && near_0(m[12]) && near_0(m[13]);
++					const bool col_w = unit(m[11]) && near_0(m[3]) && near_0(m[7]);
++					if (!row_w && !col_w) {
++						continue;
++					}
++					const uint64_t key = source.address + i * 4;
++					if (std::find(seen.begin(), seen.end(), key) != seen.end() || seen.size() > 64) {
++						continue;
++					}
++					seen.push_back(key);
++					std::string text;
++					const auto  around = std::min<uint64_t>(48, count - i);
++					for (uint64_t k = 0; k < around; k++) {
++						std::snprintf(part, sizeof(part), " %g", static_cast<double>(m[k]));
++						text += part;
++					}
++					std::printf("PassTrace matrix st%d %016llx buffer %llx+%llu offset %llu (%s):%s\n",
++					            static_cast<int>(program.stage),
++					            static_cast<unsigned long long>(program.shader_hash),
++					            static_cast<unsigned long long>(source.address),
++					            static_cast<unsigned long long>(source.size),
++					            static_cast<unsigned long long>(i * 4), row_w ? "w row" : "w column",
++					            text.c_str());
++				}
++			}
++		}
+ 		// ASTROHYBRID_PASS_TRACE_CB=<hex hash>: that shader's buffers, first 24 dwords each.
+ 		static const uint64_t cb_hash = [] {
+ 			const char* value = std::getenv("ASTROHYBRID_PASS_TRACE_CB");
+diff --git a/src/graphics/host_gpu/renderer/render.h b/src/graphics/host_gpu/renderer/render.h
+index dc36c0a6..ded9d461 100644
+--- a/src/graphics/host_gpu/renderer/render.h
++++ b/src/graphics/host_gpu/renderer/render.h
+@@ -1187,6 +1187,10 @@ private:
+ 	void NoteDlssTargets(std::span<const RenderColorInfo> colors, ImageId depth);
+ 	[[nodiscard]] bool TryDlssUpscale(CommandBuffer& buffer, PreparedBindings& pixel,
+ 	                                  ImageId output);
++	// ASTROHYBRID_DLSSG (frameGen.h): the camera from a draw's bound constants, and the frame's
++	// depth, motion vectors and constants at the temporal upscale pass.
++	void NoteFrameGenCamera(const PreparedBindings& stage);
++	void TagFrameGen(CommandBuffer& buffer, PreparedBindings& pixel);
+ 	void                      ResetBindings();
+ 	// `site` names the caller's stage and table kind; it only selects the entry checked first.
+ 	// *fresh (optional): set when the returned range was allocated by this call (no earlier upload
+diff --git a/src/graphics/host_gpu/renderer/renderDraw.cpp b/src/graphics/host_gpu/renderer/renderDraw.cpp
+index 39861a35..25b4d339 100644
+--- a/src/graphics/host_gpu/renderer/renderDraw.cpp
++++ b/src/graphics/host_gpu/renderer/renderDraw.cpp
+@@ -25,6 +25,7 @@
+ #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+ #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
+ #include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/frameGen.h"
+ #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
+ #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
+ #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
+@@ -4165,10 +4166,14 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 	// ASTROHYBRID_DLSS (dlss.h): depth attachments by colour target, and the game's temporal
+ 	// upscale replaced by DLSS Super Resolution. A replaced draw records nothing else; like a
+ 	// skipped one (KYTY_PIPELINE_SKIP below) no run record may be continued across it.
+-	if (Dlss::Requested()) [[unlikely]] {
++	if (Dlss::Requested() || FrameGen::Requested()) [[unlikely]] {
+ 		NoteDlssTargets(std::span<const RenderColorInfo> {state.color_info, state.color_count},
+ 		                state.depth_info.image_id);
+-		if (state.ps_active && bindings.pixel.has_value() && state.color_count != 0 &&
++		if (FrameGen::Active() && state.ps_active && bindings.pixel.has_value()) {
++			NoteFrameGenCamera(*bindings.pixel);
++			TagFrameGen(buffer, *bindings.pixel);
++		}
++		if (Dlss::Requested() && state.ps_active && bindings.pixel.has_value() && state.color_count != 0 &&
+ 		    TryDlssUpscale(buffer, *bindings.pixel, state.color_info[0].image_id)) {
+ 			m_run.valid        = false;
+ 			m_run_active       = false;
+diff --git a/src/graphics/presentation/window/lowLatency.cpp b/src/graphics/presentation/window/lowLatency.cpp
+index fe23dea6..5ff926ce 100644
+--- a/src/graphics/presentation/window/lowLatency.cpp
++++ b/src/graphics/presentation/window/lowLatency.cpp
+@@ -1,5 +1,6 @@
+ #include "graphics/presentation/window/lowLatency.h"
+ 
++#include "graphics/host_gpu/renderer/frameGen.h"
+ #include "graphics/host_gpu/vulkanCommon.h"
+ 
+ #include <atomic>
+@@ -74,6 +75,10 @@ void Mark(uint64_t frame, VkLatencyMarkerNV marker) {
+ // The end of guest frame `frame`: its marker, the driver's sleep, the next frame's start.
+ void EndGuestFrame(uint64_t frame) {
+ 	auto& s = Get();
++	if (FrameGen::Active()) {
++		FrameGen::GuestFrameEnd(frame);
++		return;
++	}
+ 	Mark(frame, VK_LATENCY_MARKER_SIMULATION_END_NV);
+ 	uint64_t value = 0;
+ 	{
+@@ -199,6 +204,10 @@ bool WantExtensions(bool has_low_latency2, bool has_present_id) {
+ 	if (!Requested()) {
+ 		return false;
+ 	}
++	if (FrameGen::Requested()) {
++		std::printf("LowLatency: DLSS-G takes over the markers through Streamline's Reflex\n");
++		return false;
++	}
+ 	if (!has_low_latency2 || !has_present_id) {
+ 		std::printf("LowLatency: requested but unavailable (VK_NV_low_latency2 %d, VK_KHR_present_id "
+ 		            "%d): off\n",
+@@ -285,14 +294,20 @@ void OnSwapchainDestroyed(VkSwapchainKHR swapchain) {
+ 	}
+ }
+ 
++namespace {
++bool Counting() {
++	return Enabled() || FrameGen::Active();
++}
++} // namespace
++
+ void NoteFlipPacket() {
+-	if (Enabled()) {
++	if (Counting()) {
+ 		Get().flips_set.fetch_add(1, std::memory_order_acq_rel);
+ 	}
+ }
+ 
+ void AfterDcbSubmit() {
+-	if (!Enabled()) {
++	if (!Counting()) {
+ 		return;
+ 	}
+ 	auto&      s   = Get();
+@@ -314,7 +329,7 @@ thread_local uint64_t t_cpu_flip_frame = 0;
+ } // namespace
+ 
+ uint64_t BeginCpuFlip() {
+-	if (!Enabled()) {
++	if (!Counting()) {
+ 		return 0;
+ 	}
+ 	t_cpu_flip_frame = Get().guest_frame.fetch_add(1, std::memory_order_acq_rel) + 1;
+@@ -328,30 +343,45 @@ uint64_t TakeCpuFlipFrame() {
+ }
+ 
+ void EndCpuFlip(uint64_t frame) {
+-	if (Enabled() && frame != 0) {
++	if (Counting() && frame != 0) {
+ 		EndGuestFrame(frame);
+ 	}
+ }
+ 
+ uint64_t OnGpuFlipReserved() {
+-	if (!Enabled()) {
++	if (!Counting()) {
+ 		return 0;
+ 	}
+ 	auto&      s     = Get();
+ 	const auto frame = s.gpu_frame.fetch_add(1, std::memory_order_acq_rel) + 1;
++	if (FrameGen::Active()) {
++		FrameGen::RenderSubmitted(frame);
++		return frame;
++	}
+ 	std::lock_guard<std::mutex> lock(s.mutex);
+ 	MarkLocked(s, frame, VK_LATENCY_MARKER_RENDERSUBMIT_END_NV);
+ 	MarkLocked(s, frame + 1, VK_LATENCY_MARKER_RENDERSUBMIT_START_NV);
+ 	return frame;
+ }
+ 
++namespace {
++thread_local uint64_t t_frame_gen_present = 0;
++} // namespace
++
+ void SetNextPresentFrame(uint64_t frame) {
+-	if (Enabled()) {
++	if (Counting()) {
+ 		Get().next_present_frame = frame;
+ 	}
+ }
+ 
+ uint64_t BeginPresent(VkSwapchainKHR swapchain) {
++	if (FrameGen::Active()) {
++		auto& s              = Get();
++		t_frame_gen_present  = s.next_present_frame;
++		s.next_present_frame = 0;
++		FrameGen::PresentStart(t_frame_gen_present);
++		return 0;
++	}
+ 	if (!Enabled()) {
+ 		return 0;
+ 	}
+@@ -372,6 +402,11 @@ uint64_t BeginPresent(VkSwapchainKHR swapchain) {
+ }
+ 
+ void EndPresent(VkSwapchainKHR swapchain, uint64_t present_id) {
++	if (FrameGen::Active()) {
++		FrameGen::PresentEnd(t_frame_gen_present);
++		t_frame_gen_present = 0;
++		return;
++	}
+ 	if (!Enabled()) {
+ 		return;
+ 	}
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index 1a8c48e3..21165e69 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -33,6 +33,7 @@
+ #include "graphics/presentation/window.h"
+ #include "graphics/presentation/window/lowLatency.h"
+ #include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/frameGen.h"
+ #include "graphics/presentation/window/windowInternal.h"
+ #include "graphics/shader/recompiler/CodegenOptions.h"
+ #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+@@ -1858,6 +1859,39 @@ static void VulkanCheckInstanceVersion() {
+ 	}
+ }
+ 
++// ASTROHYBRID_DLSSG (renderer/frameGen.h): with Streamline as the loader, the window surface is
++// created through it (from SDL's window handles), so Streamline knows which window a swapchain
++// presents to; otherwise SDL creates it as before.
++static bool CreateWindowSurface(SDL_Window* sdl_window, vk::Instance instance, VkSurfaceKHR* out) {
++	if (!FrameGen::Loaded()) {
++		return SDL_Vulkan_CreateSurface(sdl_window, static_cast<vk::Instance::CType>(instance), nullptr,
++		                                out);
++	}
++	struct Win32SurfaceCreateInfo {
++		VkStructureType sType;
++		const void*     pNext;
++		VkFlags         flags;
++		void*           hinstance;
++		void*           hwnd;
++	};
++	using CreateWin32Surface = VkResult(VKAPI_PTR*)(VkInstance, const Win32SurfaceCreateInfo*,
++	                                                const VkAllocationCallbacks*, VkSurfaceKHR*);
++	const auto properties = SDL_GetWindowProperties(sdl_window);
++	Win32SurfaceCreateInfo info {};
++	info.sType     = static_cast<VkStructureType>(1000009000); // VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR
++	info.hinstance = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, nullptr);
++	info.hwnd      = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
++	const auto create = reinterpret_cast<CreateWin32Surface>(VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(
++	    static_cast<VkInstance>(instance), "vkCreateWin32SurfaceKHR"));
++	if (create == nullptr || info.hwnd == nullptr) {
++		std::printf("DLSS-G: no window handle or vkCreateWin32SurfaceKHR for the surface\n");
++		return false;
++	}
++	const auto result = create(static_cast<VkInstance>(instance), &info, nullptr, out);
++	std::printf("DLSS-G: window surface created through Streamline -> %d\n", static_cast<int>(result));
++	return result == VK_SUCCESS;
++}
++
+ void WindowContext::CreateVulkan() {
+ 	EXIT_IF(window == nullptr);
+ 	EXIT_IF(graphic_ctx.instance != nullptr);
+@@ -1867,6 +1901,10 @@ void WindowContext::CreateVulkan() {
+ 
+ 	auto get_instance_proc_addr =
+ 	    reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
++	// ASTROHYBRID_DLSSG (renderer/frameGen.h): Vulkan through Streamline's interposer.
++	if (const auto streamline = FrameGen::LoaderBeforeInstance(); streamline != nullptr) {
++		get_instance_proc_addr = streamline;
++	}
+ 	if (get_instance_proc_addr == nullptr) {
+ 		EXIT("Could not load Vulkan: %s\n", SDL_GetError());
+ 	}
+@@ -1968,8 +2006,7 @@ void WindowContext::CreateVulkan() {
+ 	}
+ 
+ 	vk::SurfaceKHR::CType native_surface = VK_NULL_HANDLE;
+-	if (!SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
+-	                              nullptr, &native_surface)) {
++	if (!CreateWindowSurface(window, graphic_ctx.instance, &native_surface)) {
+ 		EXIT("Could not create a Vulkan surface");
+ 	}
+ 	surface = native_surface;
+@@ -2203,6 +2240,7 @@ void WindowContext::CreateVulkan() {
+ 	if (HasExtension(device_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME)) {
+ 		LowLatency::OnDeviceCreated(static_cast<VkDevice>(graphic_ctx.device));
+ 	}
++	FrameGen::OnDeviceReady();
+ 	// Diagnostic only (KYTY_GPU_OP_PROFILE / KYTY_GPU_OP_COUNTERS): wraps dispatcher entries.
+ 	GpuOpProfiler::InstallHooks(graphic_ctx);
+ 	// KYTY_CP_RECORDER_VERIFY ownership hooks wrap the GpuOpProfiler's.
+@@ -2259,8 +2297,7 @@ void WindowContext::RecreateSurface() {
+ 		surface = nullptr;
+ 	}
+ 	vk::SurfaceKHR::CType native_surface = VK_NULL_HANDLE;
+-	if (!SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphic_ctx.instance),
+-	                              nullptr, &native_surface)) {
++	if (!CreateWindowSurface(window, graphic_ctx.instance, &native_surface)) {
+ 		EXIT("Could not recreate the Vulkan surface: %s\n", SDL_GetError());
+ 	}
+ 	surface = native_surface;
+-- 
+2.55.0.windows.5
+

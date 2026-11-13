@@ -1,0 +1,98 @@
+From 91b297038bb881ac962985dad88c12832301dfd7 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Thu, 12 Nov 2026 14:03:20 +0000
+Subject: [PATCH] feat(hybrid): opt-in relay of pad motion sensors to the host
+ (ABI 1.5)
+
+ASTROHYBRID_PAD_MOTION=1 passes the controller's accelerometer and gyroscope
+to the host's pad library through the new publish_pad_motion callback.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/hybrid/kytyGpuApi.h      | 13 ++++++++++++-
+ src/hybrid/kytyGpuBridge.cpp | 24 ++++++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/src/hybrid/kytyGpuApi.h b/src/hybrid/kytyGpuApi.h
+index a1e1c261..295bdf38 100644
+--- a/src/hybrid/kytyGpuApi.h
++++ b/src/hybrid/kytyGpuApi.h
+@@ -21,7 +21,7 @@ extern "C" {
+ #endif
+ 
+ #define KYTY_GPU_ABI_VERSION_MAJOR 1u
+-#define KYTY_GPU_ABI_VERSION_MINOR 4u
++#define KYTY_GPU_ABI_VERSION_MINOR 5u
+ #define KYTY_GPU_ABI_VERSION ((KYTY_GPU_ABI_VERSION_MAJOR << 16u) | KYTY_GPU_ABI_VERSION_MINOR)
+ 
+ #if defined(_WIN32)
+@@ -104,6 +104,13 @@ typedef struct KytyGpuPadOutput {
+ 	uint8_t  trigger_command[2][56];
+ } KytyGpuPadOutput;
+ 
++/* ABI 1.5: one pad's motion sensors as the controller reports them (SDL axes): acceleration in
++ * m/s^2 including gravity, angular velocity in rad/s. */
++typedef struct KytyGpuPadMotion {
++	float acceleration[3];
++	float angular_velocity[3];
++} KytyGpuPadMotion;
++
+ typedef struct KytyGpuHostCallbacks {
+ 	uint32_t struct_size; /* sizeof(KytyGpuHostCallbacks) on the host */
+ 	uint32_t abi_version; /* KYTY_GPU_ABI_VERSION of the host */
+@@ -150,6 +157,10 @@ typedef struct KytyGpuHostCallbacks {
+ 	 * *seen) when it changed, 0 when not. Kyty owns the physical controller, so the DLL applies it
+ 	 * (rumble, light bar, DualSense trigger effects). May be null, as in a 1.3 host's table. */
+ 	int (*fetch_pad_output)(void* user, int port, uint32_t* seen, KytyGpuPadOutput* out);
++
++	/* ABI 1.5. The pad's motion sensors, called right before publish_pad for the same port; the
++	 * host's pad library derives the orientation. May be null, as in a 1.4 host's table. */
++	void (*publish_pad_motion)(void* user, int port, const KytyGpuPadMotion* motion);
+ } KytyGpuHostCallbacks;
+ 
+ /* The callback table of a 1.3 host, the oldest the DLL accepts. */
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 677582ba..666efc59 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -287,6 +287,12 @@ void Relay() {
+ 	}
+ 	Log(0, "input relay: Kyty pad %d for user %d -> host port 0%s", handle, user,
+ 	    g_host.fetch_pad_output != nullptr ? ", rumble, light bar and trigger effects <- host" : "");
++	// ASTROHYBRID_PAD_MOTION=1: the controller's accelerometer and gyroscope reach the host's pad
++	// library too (ABI 1.5), for games that read shaking or tilting. Off by default.
++	const char* motion_env = std::getenv("ASTROHYBRID_PAD_MOTION");
++	const bool  motion     = motion_env != nullptr && motion_env[0] == '1' && g_host.publish_pad_motion != nullptr;
++	bool        motion_seen = false;
++	Log(0, "input relay: motion sensors %s", motion ? "-> host" : "not relayed");
+ 	uint32_t         output_seen = 0;
+ 	KytyGpuPadOutput output_applied {};
+ 	while (!g_relay_stop.load(std::memory_order_acquire)) {
+@@ -307,6 +313,24 @@ void Relay() {
+ 				state.touch[i].y      = data.touch_data.touch[i].y;
+ 				state.touch[i].id     = data.touch_data.touch[i].id;
+ 			}
++			if (motion) {
++				constexpr float  gravity = 9.80665f;
++				KytyGpuPadMotion sensors {};
++				sensors.acceleration[0]     = data.acceleration_x * gravity;
++				sensors.acceleration[1]     = data.acceleration_y * gravity;
++				sensors.acceleration[2]     = data.acceleration_z * gravity;
++				sensors.angular_velocity[0] = data.angular_velocity_x;
++				sensors.angular_velocity[1] = data.angular_velocity_y;
++				sensors.angular_velocity[2] = data.angular_velocity_z;
++				if (!motion_seen && (sensors.angular_velocity[0] != 0.0f || sensors.angular_velocity[1] != 0.0f ||
++				                     sensors.angular_velocity[2] != 0.0f)) {
++					motion_seen = true;
++					Log(0, "input relay: first motion sample, accel %.2f %.2f %.2f m/s^2, gyro %.3f %.3f %.3f rad/s",
++					    sensors.acceleration[0], sensors.acceleration[1], sensors.acceleration[2],
++					    sensors.angular_velocity[0], sensors.angular_velocity[1], sensors.angular_velocity[2]);
++				}
++				g_host.publish_pad_motion(g_host.user, 0, &sensors);
++			}
+ 			g_host.publish_pad(g_host.user, 0, &state);
+ 		}
+ 		ApplyPadOutput(handle, output_seen, output_applied);
+-- 
+2.55.0.windows.5
+

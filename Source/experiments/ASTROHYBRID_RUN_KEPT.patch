@@ -1,0 +1,65 @@
+diff --git a/src/graphics/host_gpu/renderer/render.h b/src/graphics/host_gpu/renderer/render.h
+index 8bebefa1..addf3744 100644
+--- a/src/graphics/host_gpu/renderer/render.h
++++ b/src/graphics/host_gpu/renderer/render.h
+@@ -1487,7 +1487,10 @@ private:
+ 			m_run_prev_valid = false;
+ 		}
+ 	}
+-	std::array<DrawRunRecord, 32> m_run_kept;
++	// ASTROHYBRID_RUN_KEPT (startup, default 32, 1..256): how many of these entries are in use.
++	std::array<DrawRunRecord, 256> m_run_kept;
++	uint32_t                      m_run_kept_count = DrawRunKeptCount();
++	[[nodiscard]] static uint32_t DrawRunKeptCount();
+ 	uint32_t                     m_run_kept_next = 0;
+ 	bool                         m_run_recall    = false;
+ 	bool                         m_run_keepable  = false;
+diff --git a/src/graphics/host_gpu/renderer/renderDraw.cpp b/src/graphics/host_gpu/renderer/renderDraw.cpp
+index ad642673..9497abdc 100644
+--- a/src/graphics/host_gpu/renderer/renderDraw.cpp
++++ b/src/graphics/host_gpu/renderer/renderDraw.cpp
+@@ -2936,7 +2936,7 @@ bool RenderExecutor::DrawRunRecallCandidate(const CommandBuffer& buffer, DrawRen
+ 		return false;
+ 	}
+ 	DrawRunRecord* kept = nullptr;
+-	for (auto& record: m_run_kept) {
++	for (auto& record: std::span(m_run_kept).first(m_run_kept_count)) {
+ 		if (record.valid && record.key == m_run_key) {
+ 			kept = &record;
+ 			break;
+@@ -3030,6 +3030,18 @@ bool RenderExecutor::DrawRunRecallCandidate(const CommandBuffer& buffer, DrawRen
+ 	return true;
+ }
+ 
++// ASTROHYBRID_RUN_KEPT=<1..256> (startup, default 32, the original size): the number of kept draw-run
++// records KYTY_DRAW_RUN_RECALL searches. Only the store's size changes; a recall's certificate is
++// the same.
++uint32_t RenderExecutor::DrawRunKeptCount() {
++	static const uint32_t count = [] {
++		const char* value  = std::getenv("ASTROHYBRID_RUN_KEPT");
++		const auto  parsed = value != nullptr ? std::strtoul(value, nullptr, 10) : 0ul;
++		return parsed >= 1 && parsed <= 256 ? static_cast<uint32_t>(parsed) : 32u;
++	}();
++	return count;
++}
++
+ // KYTY_DRAW_RUN_RECALL: before a draw records a new run, the record it replaces is kept (in the
+ // entry of the same key, else the next one in turn).
+ void RenderExecutor::DrawRunKeep() {
+@@ -3038,14 +3050,14 @@ void RenderExecutor::DrawRunKeep() {
+ 	}
+ 	m_run_keepable = false;
+ 	auto slot      = m_run_kept_next;
+-	for (uint32_t i = 0; i < m_run_kept.size(); i++) {
++	for (uint32_t i = 0; i < m_run_kept_count; i++) {
+ 		if (m_run_kept[i].key == m_run.key) {
+ 			slot = i;
+ 			break;
+ 		}
+ 	}
+ 	if (slot == m_run_kept_next) {
+-		m_run_kept_next = (m_run_kept_next + 1) % static_cast<uint32_t>(m_run_kept.size());
++		m_run_kept_next = (m_run_kept_next + 1) % m_run_kept_count;
+ 	}
+ 	std::swap(m_run, m_run_kept[slot]);
+ 	m_run_kept[slot].valid = true;

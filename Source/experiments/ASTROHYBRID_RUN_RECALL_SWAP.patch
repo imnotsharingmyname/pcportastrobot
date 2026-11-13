@@ -1,0 +1,142 @@
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawRun.cpp b/src/graphics/host_gpu/renderer/drawPrep/drawRun.cpp
+index 3b559788..c71affe5 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawRun.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawRun.cpp
+@@ -86,6 +86,14 @@ Live::Switch g_pipeswap("KYTY_DRAW_RUN_PIPESWAP", Live::ParseDefaultOff,
+ 
+ } // namespace Detail
+ 
++bool RecallSwapEnabled() {
++	static const bool enabled = [] {
++		const auto* value = std::getenv("ASTROHYBRID_RUN_RECALL_SWAP");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	return enabled;
++}
++
+ namespace {
+ 
+ std::atomic<uint64_t> g_activity {1};
+@@ -513,6 +521,16 @@ void PrintSummary() {
+ 	    g_totals.swap_matches.load(std::memory_order_relaxed),
+ 	    g_totals.swapped.load(std::memory_order_relaxed),
+ 	    g_totals.swap_incompatible.load(std::memory_order_relaxed)};
++	if (RecallSwapEnabled()) {
++		static uint64_t last_matches = 0;
++		static uint64_t last_swapped = 0;
++		const auto      matches      = g_totals.recall_swap_matches.load(std::memory_order_relaxed);
++		const auto      swapped      = g_totals.recall_swapped.load(std::memory_order_relaxed);
++		std::printf("DrawRun recall-swap: %" PRIu64 " matches, %" PRIu64 " recalled\n",
++		            matches - last_matches, swapped - last_swapped);
++		last_matches = matches;
++		last_swapped = swapped;
++	}
+ 	std::array<uint64_t, 27> delta {};
+ 	for (size_t i = 0; i < values.size(); i++) {
+ 		delta[i] = values[i] - last[i];
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawRun.h b/src/graphics/host_gpu/renderer/drawPrep/drawRun.h
+index 9b210c89..fecb3363 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawRun.h
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawRun.h
+@@ -234,6 +234,18 @@ extern Live::Switch g_pipeswap;      // KYTY_DRAW_RUN_PIPESWAP
+ 	return Detail::g_pipeswap.On();
+ }
+ 
++// ASTROHYBRID_RUN_RECALL_SWAP=1 (default 0; needs KYTY_DRAW_RUN_RECALL and KYTY_DRAW_RUN_PIPESWAP):
++// a draw that matches no kept record by its structure key may recall a kept record whose swap key
++// (the key without the vertex program) equals its own, i.e. a recall and a pipeline swap at once.
++// At the Sky Garden ~186 draws a frame differ from the previous draw in the vertex program and the
++// pixel T# words, which neither path takes alone. Conditions: every condition of a recall but the
++// vertex program, which must be run-eligible without writes, declare no images or samplers (as
++// must the record's, so there is no vertex-stage binding to take back) and export a viewport
++// index exactly when the record's does. The draw then behaves as a recall (whole push, dynamic
++// state recorded again, its own planned pipeline) and the record takes the new vertex program and
++// pipeline layout as after a swap.
++[[nodiscard]] bool RecallSwapEnabled();
++
+ // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the
+ // GPU thread; other threads only bump it.
+ // KYTY_DRAW_RUN_QUIET_OPS (default on): two kinds of command-processor work between draws do not
+@@ -310,6 +322,8 @@ struct Totals {
+ 	std::atomic<uint64_t> swap_matches {0};        // KYTY_DRAW_RUN_PIPESWAP: the swap key matched
+ 	std::atomic<uint64_t> swapped {0};             // continued with a pipeline swap (verify: would have)
+ 	std::atomic<uint64_t> swap_incompatible {0};   // vertex programs' bindings or outputs differ
++	std::atomic<uint64_t> recall_swap_matches {0}; // ASTROHYBRID_RUN_RECALL_SWAP: a kept record's swap key matched
++	std::atomic<uint64_t> recall_swapped {0};      // recalled with a pipeline swap (verify: would have)
+ 	std::atomic<uint64_t> verify_checks {0};
+ 	std::atomic<uint64_t> verify_mismatches {0};
+ 	std::atomic<uint64_t> misses[static_cast<uint32_t>(Miss::Count)] {};
+diff --git a/src/graphics/host_gpu/renderer/renderDraw.cpp b/src/graphics/host_gpu/renderer/renderDraw.cpp
+index ad642673..d1f68309 100644
+--- a/src/graphics/host_gpu/renderer/renderDraw.cpp
++++ b/src/graphics/host_gpu/renderer/renderDraw.cpp
+@@ -2942,11 +2942,28 @@ bool RenderExecutor::DrawRunRecallCandidate(const CommandBuffer& buffer, DrawRen
+ 			break;
+ 		}
+ 	}
++	auto& totals = DrawRun::GetTotals();
++	// ASTROHYBRID_RUN_RECALL_SWAP (drawPrep/drawRun.h): no record of this key, but one of its swap key.
++	bool swap = false;
++	if (kept == nullptr && m_run_swap_key != 0 && DrawRun::RecallSwapEnabled() &&
++	    DrawRun::PipeSwapEnabled()) {
++		for (auto& candidate: m_run_kept) {
++			if (candidate.valid && candidate.swap_key == m_run_swap_key) {
++				kept = &candidate;
++				swap = true;
++				break;
++			}
++		}
++		if (swap) {
++			totals.recall_swap_matches.fetch_add(1, std::memory_order_relaxed);
++		}
++	}
+ 	if (kept == nullptr) {
+ 		return false;
+ 	}
+-	auto& totals = DrawRun::GetTotals();
+-	totals.recall_matches.fetch_add(1, std::memory_order_relaxed);
++	if (!swap) {
++		totals.recall_matches.fetch_add(1, std::memory_order_relaxed);
++	}
+ 	auto& record = *kept;
+ 	if (DrawRun::ActivityEpoch() != record.activity || buffer.Identity() != record.command ||
+ 	    m_context.GetCommandScheduler().CurrentTick() != record.tick ||
+@@ -2960,10 +2977,23 @@ bool RenderExecutor::DrawRunRecallCandidate(const CommandBuffer& buffer, DrawRen
+ 	    record.colors.size() != record.color_count || !m_prepared_validated ||
+ 	    state.ps_active != record.ps_active || render_target_slice_offset != record.slice_offset ||
+ 	    state.vertex_stages_written != 1 ||
+-	    state.vertex_info[0].stage.program != record.vertex_program || pixel != record.pixel_program ||
++	    (!swap && state.vertex_info[0].stage.program != record.vertex_program) ||
++	    pixel != record.pixel_program ||
+ 	    (state.ps_active && !m_graphics_bindings.pixel.has_value())) {
+ 		return false;
+ 	}
++	if (swap) {
++		const auto* recorded = static_cast<const ShaderRecompiler::IR::CompiledShaderInfo*>(
++		    record.vertex_program);
++		const auto& program = *state.vertex_info[0].stage.program;
++		if (recorded == nullptr || recorded == &program || !recorded->info.images.empty() ||
++		    !recorded->info.samplers.empty() || !program.info.images.empty() ||
++		    !program.info.samplers.empty() || record.recall_vertex_textures != 0 ||
++		    record.recall_vertex_samplers != 0 || !DrawRunPipeSwapCompatible(*recorded, program) ||
++		    !DrawRunProgramEligible(program)) {
++			return false;
++		}
++	}
+ 	const auto vertex_textures = std::span(record.recall_textures).first(record.recall_vertex_textures);
+ 	const auto pixel_textures  = std::span(record.recall_textures).subspan(record.recall_vertex_textures);
+ 	auto&      vertex          = m_graphics_bindings.vertex[0];
+@@ -2997,7 +3027,12 @@ bool RenderExecutor::DrawRunRecallCandidate(const CommandBuffer& buffer, DrawRen
+ 	m_run_prev_valid = true;
+ 	m_run_keepable   = true;
+ 	m_run_recall     = true;
+-	totals.recalled.fetch_add(1, std::memory_order_relaxed);
++	m_run_pipeswap   = swap;
++	if (swap) {
++		totals.recall_swapped.fetch_add(1, std::memory_order_relaxed);
++	} else {
++		totals.recalled.fetch_add(1, std::memory_order_relaxed);
++	}
+ 	if (DrawRun::GetMode() != DrawRun::Mode::On) {
+ 		return true; // verify: the normal path runs and is compared with the record
+ 	}

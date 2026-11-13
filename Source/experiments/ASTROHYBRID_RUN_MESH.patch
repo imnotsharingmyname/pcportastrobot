@@ -1,0 +1,101 @@
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawRun.cpp b/src/graphics/host_gpu/renderer/drawPrep/drawRun.cpp
+index 3b559788..cec8288e 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawRun.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawRun.cpp
+@@ -86,6 +86,14 @@ Live::Switch g_pipeswap("KYTY_DRAW_RUN_PIPESWAP", Live::ParseDefaultOff,
+ 
+ } // namespace Detail
+ 
++bool MeshRunsEnabled() {
++	static const bool enabled = [] {
++		const auto* value = std::getenv("ASTROHYBRID_RUN_MESH");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	return enabled;
++}
++
+ namespace {
+ 
+ std::atomic<uint64_t> g_activity {1};
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawRun.h b/src/graphics/host_gpu/renderer/drawPrep/drawRun.h
+index 9b210c89..6afaa1f4 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawRun.h
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawRun.h
+@@ -234,6 +234,20 @@ extern Live::Switch g_pipeswap;      // KYTY_DRAW_RUN_PIPESWAP
+ 	return Detail::g_pipeswap.On();
+ }
+ 
++// ASTROHYBRID_RUN_MESH=1 (default 0): a mesh-shader draw without indirect arguments may record a run
++// (and so be continued). Its stage information is a function of the registers and device limits
++// (FinishMeshStage), which the structure key covers, and its per-draw work (index segments, group
++// counts, draw dwords, the index range for the shader's reads) runs on every draw, continuation or
++// not. A mesh draw with indirect arguments ends the rendering instance to convert them, so it never
++// records a run and never continues one (it falls back late). At the Sky Garden ~155 draws a frame
++// are mesh draws, ~93 of them with the previous draw's structure key.
++// Mesh programs read their indices by address, so they bind the fault buffer: with the switch on,
++// a program without address writes that binds it may form runs too (draws of any stage). The
++// shaders only mark missing pages there; the buffer is processed at the next garbage collection,
++// not per draw, and each draw's address ranges are still synchronized (PrepareBda) as on the
++// normal path.
++[[nodiscard]] bool MeshRunsEnabled();
++
+ // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the
+ // GPU thread; other threads only bump it.
+ // KYTY_DRAW_RUN_QUIET_OPS (default on): two kinds of command-processor work between draws do not
+diff --git a/src/graphics/host_gpu/renderer/renderDraw.cpp b/src/graphics/host_gpu/renderer/renderDraw.cpp
+index ad642673..d260244d 100644
+--- a/src/graphics/host_gpu/renderer/renderDraw.cpp
++++ b/src/graphics/host_gpu/renderer/renderDraw.cpp
+@@ -2328,8 +2328,11 @@ static bool DrawRunProgramEligible(const ShaderRecompiler::IR::CompiledShaderInf
+ 			return false;
+ 		}
+ 	}
++	// ASTROHYBRID_RUN_MESH (drawRun.h): a program that only reads guest memory by address binds the
++	// fault buffer too; it only marks missing pages, processed at the next garbage collection.
++	const bool fault_reads = DrawRun::MeshRunsEnabled();
+ 	for (const auto& binding: program.bindings.descriptors) {
+-		if (binding.kind == Kind::Gds || binding.kind == Kind::FaultBuffer) {
++		if (binding.kind == Kind::Gds || (binding.kind == Kind::FaultBuffer && !fault_reads)) {
+ 			return false;
+ 		}
+ 	}
+@@ -4075,8 +4078,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 	// bindings, which are made again after it (their reservations follow the image identities).
+ 	// KYTY_DRAW_RUN_INDIRECT: an indirect continuation also needs the argument barrier of this
+ 	// rendering instance (recording one ends rendering, which a continuation never does).
++	// ASTROHYBRID_RUN_MESH: a mesh draw with indirect arguments ends the rendering instance.
+ 	const bool run_indirect_barrier =
+-	    indirect != nullptr && buffer.ActiveRenderingSerial() != m_indirect_barrier_rendering;
++	    (indirect != nullptr && buffer.ActiveRenderingSerial() != m_indirect_barrier_rendering) ||
++	    mesh_indirect;
+ 	// KYTY_DRAW_RUN_TARGETS: kept targets whose attachments changed during the buffer work are
+ 	// resolved now, with the same repeated binding work as a continuation's fallback.
+ 	const bool targets_late = m_run_targets_kept &&
+@@ -4283,7 +4288,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 		// (Verify mode checks a would-be continuation's acquisition as the continuation's.)
+ 		CommitStats::SubScope candidate_scope(CommitStats::Sub::AcqCandidate);
+ 		const bool acquire_reuse =
+-		    DrawRun::Enabled() && DrawRun::AcquireReuseEnabled() && !m_run_verify &&
++		    DrawRun::Enabled() && DrawRun::AcquireReuseEnabled() && !m_run_verify && !mesh_indirect &&
+ 		    DrawRunAcquireCandidate(buffer, state, stages, bounded ? &written : nullptr);
+ 		candidate_scope.Stop();
+ 		if (acquire_reuse) {
+@@ -4678,7 +4683,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 		// KYTY_DRAW_RUN_WRITES: buffer writes (shader_write_stages only ever holds those) may seed a run.
+ 		const bool writes_ok = DrawRun::WritesEnabled();
+ 		bool eligible = m_in_engine_commit && m_prepared_validated && m_run_key != 0 &&
+-		                !mesh_active &&
++		                (!mesh_active || (DrawRun::MeshRunsEnabled() && indirect == nullptr)) &&
+ 		                (indirect == nullptr || DrawRun::IndirectRunsEnabled()) &&
+ 		                vertex_stages.size() == 1 &&
+ 		                (!shader_write_stages || writes_ok) && !feedback_aspects &&
+@@ -4737,7 +4742,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 				reason = !m_in_engine_commit                                          ? Inelig::NotEngine
+ 				         : !m_prepared_validated                                      ? Inelig::NotValidated
+ 				         : m_run_key == 0                                             ? Inelig::NoKey
+-				         : mesh_active                                                ? Inelig::Mesh
++				         : (mesh_active && indirect != nullptr)                       ? Inelig::Indirect
++				         : (mesh_active && !DrawRun::MeshRunsEnabled())               ? Inelig::Mesh
+ 				         : (indirect != nullptr && !DrawRun::IndirectRunsEnabled())   ? Inelig::Indirect
+ 				         : vertex_stages.size() != 1                                  ? Inelig::VertexStages
+ 				         : (shader_write_stages && !writes_ok)                        ? Inelig::Writes
