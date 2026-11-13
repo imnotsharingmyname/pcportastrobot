@@ -1,0 +1,6 @@
+bin/
+obj/
+*.user
+# Made from the game's own icon art: kept local, never published (the app uses astrohybrid.ico).
+Resources/astrobot.ico
+Resources/logo.png

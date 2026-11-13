@@ -1,0 +1,18 @@
+<Application x:Class="AstroHybrid.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:AstroHybrid.App"
+             xmlns:views="clr-namespace:AstroHybrid.App.Views">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Resources/Styles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <views:EnumToBoolConverter x:Key="EnumToBoolConverter"/>
+            <views:BoolToProgressConverter x:Key="BoolToProgressConverter"/>
+            <views:PageTemplateSelector x:Key="PageTemplateSelector"/>
+            <views:PageVisibilityConverter x:Key="PageVisibilityConverter"/>
+            <views:StatusToBrushConverter x:Key="StatusToBrushConverter"/>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

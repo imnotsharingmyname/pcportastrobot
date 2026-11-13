@@ -1,0 +1,132 @@
+<UserControl x:Class="AstroHybrid.App.Views.InstallationView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:local="clr-namespace:AstroHybrid.App.Views"
+             xmlns:vm="clr-namespace:AstroHybrid.App.ViewModels"
+             mc:Ignorable="d"
+             d:DesignHeight="600" d:DesignWidth="800">
+
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="0,0,0,20">
+            <!-- Installation Status -->
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
+                <StackPanel>
+                    <TextBlock Text="Installation Status" Style="{StaticResource SectionHeaderStyle}"/>
+
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource MutedTextStyle}" Text="Status:" Width="150"/>
+                        <TextBlock Grid.Row="0" Grid.Column="1" Style="{StaticResource BodyTextStyle}" FontWeight="SemiBold"
+                                   Text="{Binding State.IsInstalled, Converter={StaticResource BoolToStatusConverter}}"
+                                   Foreground="{Binding State.IsInstalled, Converter={StaticResource BoolToStatusBrushConverter}}"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource MutedTextStyle}" Text="Install Path:" Width="150"/>
+                        <TextBlock Grid.Row="1" Grid.Column="1" Style="{StaticResource BodyTextStyle}" Text="{Binding InstallPath}" TextWrapping="Wrap"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource MutedTextStyle}" Text="Game Dump:" Width="150"/>
+                        <TextBlock Grid.Row="2" Grid.Column="1" Style="{StaticResource BodyTextStyle}" Text="{Binding GameDumpPath}" TextWrapping="Wrap"/>
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource MutedTextStyle}" Text="Game Version:" Width="150"/>
+                        <TextBlock Grid.Row="3" Grid.Column="1" Style="{StaticResource BodyTextStyle}" Text="{Binding GameVersion}"/>
+
+                        <TextBlock Grid.Row="4" Grid.Column="0" Style="{StaticResource MutedTextStyle}" Text="Title ID:" Width="150"/>
+                        <TextBlock Grid.Row="4" Grid.Column="1" Style="{StaticResource BodyTextStyle}" Text="{Binding GameTitleId}"/>
+
+                        <TextBlock Grid.Row="5" Grid.Column="0" Style="{StaticResource MutedTextStyle}" Text="Installed:" Width="150"/>
+                        <TextBlock Grid.Row="5" Grid.Column="1" Style="{StaticResource BodyTextStyle}" Text="{Binding InstalledAt}"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Installation Size -->
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
+                <StackPanel>
+                    <TextBlock Text="Installation Size" Style="{StaticResource SectionHeaderStyle}"/>
+                    <TextBlock Text="{Binding InstallSize}" Style="{StaticResource BodyTextStyle}" FontSize="24" FontWeight="Bold" Foreground="{StaticResource PrimaryBrush}" Margin="0,10,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Tool Versions -->
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
+                <StackPanel>
+                    <TextBlock Text="Tool Versions" Style="{StaticResource SectionHeaderStyle}"/>
+
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource MutedTextStyle}" Text="AnyPS5:" Width="150"/>
+                        <TextBlock Grid.Row="0" Grid.Column="1" Style="{StaticResource BodyTextStyle}" Text="{Binding AnyPs5Version}"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource MutedTextStyle}" Text="Kyty GPU:" Width="150"/>
+                        <TextBlock Grid.Row="1" Grid.Column="1" Style="{StaticResource BodyTextStyle}" Text="{Binding KytyVersion}"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Actions -->
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
+                <StackPanel>
+                    <TextBlock Text="Actions" Style="{StaticResource SectionHeaderStyle}"/>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <Button Content="Repair Installation" Command="{Binding RepairCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0"/>
+                        <Button Content="Rebuild Installation" Command="{Binding RebuildCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0"/>
+                        <Button Content="Change Location" Command="{Binding ChangeLocationCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}"/>
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <Button Content="Open Install Folder" Command="{Binding OpenInstallFolderCommand}"
+                                Style="{StaticResource TextButtonStyle}" Margin="0,0,10,0"/>
+                        <Button Content="Open Log Folder" Command="{Binding OpenLogFolderCommand}"
+                                Style="{StaticResource TextButtonStyle}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Danger Zone -->
+            <Border Style="{StaticResource CardStyle}" BorderBrush="{StaticResource ErrorBrush}">
+                <StackPanel>
+                    <TextBlock Text="⚠ Danger Zone" Style="{StaticResource SectionHeaderStyle}" Foreground="{StaticResource ErrorBrush}"/>
+
+                    <TextBlock Style="{StaticResource MutedTextStyle}" Margin="0,10,0,10" TextWrapping="Wrap">
+                        These actions are irreversible. Your original game dump will NOT be deleted.
+                    </TextBlock>
+
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="Run Setup Again" Command="{Binding RunSetupAgainCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0"
+                                Background="#33AA0000" BorderBrush="#AA0000" Foreground="#FFAA00"/>
+                        <Button Content="Uninstall AstroHybrid" Command="{Binding UninstallCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}"
+                                Background="#33AA0000" BorderBrush="#AA0000" Foreground="#FFAA00"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

@@ -360,13 +360,21 @@ static class AstroBotLauncher
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        psi.EnvironmentVariables["ASTROHYBRID_EXE"] = LightingExes[lighting.SelectedIndex];
+        // Game builds made by the AstroHybrid app's setup from another game version record what they
+        // support in astrohybrid-game.json: the faster-lighting exe may be missing, and real-time speed
+        // (one global at a fixed address) is only known for 01.019.000. No file: the original install.
+        string runHybrid = Path.Combine(root, @"Build\RunHybrid");
+        string features = "";
+        try { features = File.ReadAllText(Path.Combine(runHybrid, "astrohybrid-game.json")); } catch { }
+        bool realTimeKnown = features.Length == 0 || Regex.IsMatch(features, "\"RealTimeSpeed\"\\s*:\\s*true");
+        string exeName = LightingExes[lighting.SelectedIndex];
+        psi.EnvironmentVariables["ASTROHYBRID_EXE"] = File.Exists(Path.Combine(runHybrid, exeName)) ? exeName : "AstroBot.exe";
         psi.EnvironmentVariables["ASTROHYBRID_FPS_LIMIT"] = FpsValues[fps.SelectedIndex];
         psi.EnvironmentVariables["KYTY_GPU_WIDTH"] = SizeValues[size.SelectedIndex, 0].ToString();
         psi.EnvironmentVariables["KYTY_GPU_HEIGHT"] = SizeValues[size.SelectedIndex, 1].ToString();
         psi.EnvironmentVariables["KYTY_GPU_FULLSCREEN"] = fullscreen.Checked ? "1" : "0";
         // Real-time game speed and the commit fast path (OVERNIGHT.md 2026-11-11, 0 mismatches) are always on.
-        psi.EnvironmentVariables["ASTROHYBRID_GAME_SPEED"] = "1";
+        psi.EnvironmentVariables["ASTROHYBRID_GAME_SPEED"] = realTimeKnown ? "1" : "0";
         psi.EnvironmentVariables["ASTROHYBRID_COMMIT_EPOCH_FASTPATH"] = "1";
         psi.EnvironmentVariables["ASTROHYBRID_PAD_PREFER"] = PadValues[pad.SelectedIndex];
         psi.EnvironmentVariables["ASTROHYBRID_RUMBLE_SCALE"] = RumbleValues[rumble.SelectedIndex];

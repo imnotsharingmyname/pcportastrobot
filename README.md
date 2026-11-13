@@ -9,8 +9,37 @@
 A personal research project: running my own legally owned PS5 copy of **Astro Bot** (PPSA21567, v01.019.000)
 natively on Windows, with NVIDIA DLSS Super Resolution, DLSS (Multi) Frame Generation and Reflex added on top.
 
-**No game files are in this repository**, and none will be: no executable, assets, shaders, keys, saves,
-screenshots, NVIDIA runtime files or SDK material. You need your own dumped copy of the game to use any of this.
+**No game files are in this repository or in the download**, and none will be: no game executable, assets,
+shaders, keys, saves or game artwork. You need your own decrypted dump of the game; the setup converts it on your PC.
+
+## Download and play
+
+1. Download **AstroBotPC-AstroHybrid-1.0.0.zip** from the [latest release](https://github.com/imnotsharingmyname/pcportastrobot/releases/latest)
+   and extract it anywhere with about 1 GB free (the game itself stays where your dump is).
+2. Start **AstroHybrid.exe**. Setup asks for your Astro Bot dump folder (the one with `eboot.bin`, `sce_module`,
+   `sce_sys`) and builds the Windows version of the game from it in about two minutes. Your dump is only read.
+3. The app picks the best settings for your PC once (graphics card, CPU, RAM, display); change anything on the
+   Graphics, Controller and Advanced pages.
+4. Press **Play**.
+
+The download is the same build as the development PC: the same PS5 system libraries, `kyty_gpu.dll` (DLSS,
+frame generation, Reflex, controller fixes), the same launcher settings, and setup makes the same `AstroBot.exe`
+byte for byte from a 01.019.000 dump. Other Astro Bot versions are accepted: the faster-lighting patch and
+real-time game speed switch themselves off when that version's code differs (they depend on exact code
+locations); everything else works the same way. Only 01.019.000 has been tested.
+
+Requirements: Windows 10/11 x64, a Vulkan GPU; DLSS needs an RTX card, frame generation an RTX 40 or 50.
+Controllers: DualSense, DualShock 4, Xbox, Switch Pro and compatible pads, generic pads (the one you press plays).
+Command line: `AstroHybrid.exe --setup "<dump folder>"` runs the setup without a window; `--remove-game` removes
+what setup built. The classic one-window launcher (`AstroBot Launcher.exe`) is included too.
+
+### Screenshots
+
+| Home | Graphics |
+|---|---|
+| ![Home page](docs/screenshots/app-home.png) | ![Graphics page](docs/screenshots/app-graphics.png) |
+| **Controller** | **Advanced** |
+| ![Controller page](docs/screenshots/app-controller.png) | ![Advanced page](docs/screenshots/app-advanced.png) |
 
 ## What it is
 
@@ -103,6 +132,8 @@ All new behaviour is behind environment switches that are off by default; the la
 | `Tests` | Benchmarks and A/B test scripts |
 | `Docs` | Handover, plans, and the full results log (`OVERNIGHT.md`, every measurement good or bad) |
 | `Run-AstroHybrid*.bat` | Start scripts: plain, DLSS, Frame Generation |
+| `AstroHybrid.App` | The AstroHybrid app (WPF, .NET Framework 4.8): setup from a dump (`Services/GameSetup.cs`, a C# port of AnyPS5's `unwrap_self.py`), settings, best settings for the PC, launch |
+| `Tools/release` | `make_release.ps1` builds the download from a working install (with a guard against game files); `make_icon.ps1` draws the app icon |
 
 ## Status
 
