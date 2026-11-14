@@ -29,6 +29,25 @@ Controllers: DualSense, DualShock 4, Xbox, Switch Pro and compatible pads, gener
 Command line: `AstroHybrid.exe --setup "<dump folder>"` runs the setup without a window; `--remove-game` removes
 what setup built. The classic one-window launcher (`AstroBot Launcher.exe`) is included too.
 
+## Linux (experimental)
+
+The native Linux build uses AnyPS5 for the PS5 system libraries and Kyty's GPU stack as `kyty_gpu.so`. The
+2026-11 test boot reached the title screen, the worldmap and the Crash Site tutorial on CachyOS with an AMD
+RX 9070 XT (RADV) at about 50 FPS in the tested scenes. NVIDIA DLSS, Frame Generation and Reflex are
+Windows-only and are not part of this build.
+
+Requirements: x86-64 Linux, Vulkan 1.3+, Clang, CMake, Ninja, Python 3, and your own extracted PPSA21567
+dump (01.019.000 tested). With `Game/PPSA21567-app` in place:
+
+```sh
+Tools/linux/build.sh hybrid
+Tools/linux/run.sh run --hybrid
+Tools/linux/launch-gui.sh   # Avalonia launcher
+```
+
+The Windows app and runtime are unchanged. Full instructions, layout and troubleshooting are in
+[Docs/LINUX.md](Docs/LINUX.md).
+
 ### Screenshots
 
 | Home | Graphics |
@@ -121,10 +140,16 @@ All new behaviour is behind environment switches that are off by default; the la
 | Folder | Contents |
 |---|---|
 | `Source/patches` | AnyPS5 patch series (native libraries, AstroHybrid host, DualSense input/rumble/triggers/motion, CUDA address window) |
+| `Source/anyps5` | The same AnyPS5 series under its verified names, used by the Linux build |
+| `Source/anyps5-linux` | Linux host patches: `dlopen` GPU-module loading, `KytyGpuGetNid`, staged APR reads |
 | `Source/hybrid/patches` | KytyPS5 patch series for `kyty_gpu.dll` (frame pacing, real-time speed, fast path, Reflex, DLSS, Frame Generation, overlay, controllers) |
+| `Source/kyty-hybrid` | The complete KytyPS5 hybrid series used by the Linux build |
+| `Source/kyty-hybrid-linux` | Linux build fixes and the `kyty_gpu.so` embedding changes |
 | `Source/game-patches` | Small optional byte patches applied at load time (lighting mode, GI probes, fixed 1080p) |
 | `Source/experiments` | Measured experiments that were not kept, with their patches |
 | `Tools/hybrid` | Launcher, run-folder builder, Kyty build script, reverse-engineering helpers |
+| `Tools/linux` | Linux build, patch, setup, hybrid-layout and launch scripts |
+| `AstroHybrid.App.Avalonia` | The Linux launcher (Avalonia/.NET 8): setup, graphics/controller settings, Play/Stop and logs |
 | `Tests` | Benchmarks and A/B test scripts |
 | `Docs` | Build instructions, technical plans, reverse-engineering notes, and the full results log (`OVERNIGHT.md`) |
 | `Run-AstroHybrid*.bat` | Start scripts: plain, DLSS, Frame Generation |
