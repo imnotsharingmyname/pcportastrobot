@@ -19,6 +19,8 @@ public sealed class AppSettings
     public bool Fullscreen { get; set; }
     public bool GameSpeed { get; set; } = true;
     public bool PadMotion { get; set; }
+    public bool DirectAudio { get; set; } = true;
+    public string AudioSink { get; set; } = "";
     public string ExtraEnv { get; set; } = "";
 }
 
@@ -124,6 +126,15 @@ public sealed class Backend
         }
 
         var arguments = new List<string> { Script, "run", "--hybrid", "--game", settings.GamePath };
+        if (settings.DirectAudio)
+        {
+            arguments.Add("--direct-audio");
+            if (!string.IsNullOrWhiteSpace(settings.AudioSink))
+            {
+                arguments.Add("--audio-sink");
+                arguments.Add(settings.AudioSink.Trim());
+            }
+        }
         arguments.Add("--env");
         arguments.Add("APS5_HOST_IMPORT_MIB");
         arguments.Add("11264");

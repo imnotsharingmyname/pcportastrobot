@@ -207,6 +207,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     binary = run / "AstroBot"
     if not binary.is_file():
         fail(f"{binary} is missing; run 'astrohybrid.py setup' first")
+    if args.direct_audio:
+        helper = ROOT / "Tools" / "linux" / "route-audio.py"
+        if helper.is_file():
+            command = [sys.executable, str(helper), "--quiet"]
+            if args.audio_sink:
+                command += ["--sink", args.audio_sink]
+            try:
+                subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+            except OSError:
+                pass
     env = os.environ.copy()
     if args.hybrid:
         env.setdefault("APS5_GPU_ENGINE", "kyty")
@@ -241,6 +252,9 @@ def main(argv: list[str]) -> int:
     p_run = sub.add_parser("run", help="launch the converted title")
     add_common(p_run)
     p_run.add_argument("--env", nargs=2, action="append", default=[], metavar=("NAME", "VALUE"))
+    p_run.add_argument("--direct-audio", action="store_true",
+                       help="route the game's stream to the default sink, bypassing filter chains")
+    p_run.add_argument("--audio-sink", default="", help="PipeWire sink name for --direct-audio")
     p_run.add_argument("extra", nargs=argparse.REMAINDER)
     p_run.set_defaults(func=cmd_run)
 

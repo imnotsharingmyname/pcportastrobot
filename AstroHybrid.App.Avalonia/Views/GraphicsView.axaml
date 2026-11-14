@@ -45,6 +45,16 @@
       </StackPanel>
 
       <Border Classes="card">
+        <StackPanel Spacing="8">
+          <TextBlock Text="Audio" Classes="label" />
+          <CheckBox x:Name="DirectAudioBox" Content="Route game audio directly to the default sink" />
+          <TextBlock Classes="muted" FontSize="12"
+                     Text="Bypasses desktop filter chains such as JamesDSP / virtual surround, which can add a lot of latency. The sink below is optional; empty uses the current default sink." />
+          <TextBox x:Name="AudioSinkBox" Watermark="alsa_output.… (optional)" />
+        </StackPanel>
+      </Border>
+
+      <Border Classes="card">
         <StackPanel Spacing="6">
           <TextBlock Text="What is not here" Classes="label" />
           <TextBlock Classes="muted"

@@ -1,0 +1,38 @@
+From 70217ffee5397821a0b1ebe6412da8306263510a Mon Sep 17 00:00:00 2001
+From: DieMitchell <mitchell030504@gmail.com>
+Date: Sat, 14 Nov 2026 01:55:21 +0100
+Subject: [PATCH] linux: log the per-second frame rate for long-run diagnosis
+
+---
+ src/graphics/presentation/window/window.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/graphics/presentation/window/window.cpp b/src/graphics/presentation/window/window.cpp
+index ae017617..758565b0 100644
+--- a/src/graphics/presentation/window/window.cpp
++++ b/src/graphics/presentation/window/window.cpp
+@@ -25,6 +25,7 @@
+ #include "loader/systemContent.h"
+ 
+ #include <SDL3/SDL.h>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <filesystem>
+@@ -1045,6 +1046,13 @@ void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
+ 	}
+ 
+ 	SDL_SetWindowTitle(window, text.c_str());
++
++	static const bool fps_log = std::getenv("ASTROHYBRID_FPS_LOG") != nullptr;
++	if (fps_log) {
++		std::fprintf(stderr, "[fps] frame=%llu fps=%.1f\n",
++		             static_cast<unsigned long long>(frame_num), current_fps);
++		std::fflush(stderr);
++	}
+ }
+ 
+ } // namespace Libs::Graphics
+-- 
+2.56.1
+

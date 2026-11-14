@@ -93,6 +93,28 @@ Game/PPSA21567-app/           extracted dump (ignored)
 - `libAstroHybridHost.prx` supplies the event-queue, guest-memory and pad
   callbacks to Kyty.
 
+## Audio routing
+
+PipeWire can restore the game's stream into a desktop filter sink such as JamesDSP or a virtual
+surround chain. Those filters add latency and make the audio sound late even when the game's own
+audio queue is small (the AudioOut2 trace shows about 53 ms unread in the tested build).
+
+`astrohybrid.py run --direct-audio` (and the GUI's Graphics page, which enables it by default) starts
+`Tools/linux/route-audio.py`. That helper waits for the game's PipeWire client, disconnects it from
+the filter sink and links `AstroBot:output_FL/FR` directly to the default sink. Pass
+`--audio-sink <name>` (or fill the sink field in the GUI) to select a specific sink. The helper is a
+no-op when `pactl`/`pw-link` are absent.
+
+For a quick manual check while the game is running:
+
+```sh
+pactl list short sink-inputs
+pw-link -l | grep -A2 AstroBot
+```
+
+`ASTROHYBRID_FPS_LOG=1` prints the window's per-second `frame=… fps=…` line to stderr, which is useful
+for finding frame-rate drops in a long run.
+
 ## What is not in the Linux build
 
 - NVIDIA DLSS Super Resolution, DLSS Frame Generation and Reflex. Those are
@@ -113,6 +135,9 @@ Game/PPSA21567-app/           extracted dump (ignored)
   `libkernel.prx` from `Build/anyps5-hybrid` is installed, not the stock one.
 - `APS5_GPU_ENGINE=kyty` is set by `astrohybrid.py run --hybrid`; launching
   `Build/RunHybrid/AstroBot` by hand needs it and `KYTY_GPU_HOST_MODULE`.
+- Audio sounds late: check `pw-link -l` for `AstroBot -> jamesdsp_sink` or another filter sink and
+  use `--direct-audio` (or the GUI's Audio option). `route-audio.py --sink <name>` can move a running
+  stream.
 
 ## Upstream work
 
