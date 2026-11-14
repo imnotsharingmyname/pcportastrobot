@@ -1,0 +1,202 @@
+From 52cfc3e2c0b4f4fc7a375c13551ac6d6f72c60ef Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Sat, 14 Nov 2026 00:56:20 +0100
+Subject: [PATCH] linux: load the host module with dlopen and adopt donated
+ guest ranges
+
+---
+ src/hybrid/kytyGpuBridge.cpp      | 84 +++++++++++++++++++++++++++++--
+ src/kernel/memoryAddressSpace.inc |  9 ++++
+ 2 files changed, 89 insertions(+), 4 deletions(-)
+
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 8f4a8b97..f06f722c 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -53,6 +53,8 @@
+ 
+ #if defined(_WIN32)
+ #include <windows.h>
++#else
++#include <dlfcn.h>
+ #endif
+ 
+ namespace Libs {
+@@ -85,6 +87,9 @@ KytyGpuNidInfo        g_info[g_row_count];
+ KytyGpuHostCallbacks  g_host {};
+ std::atomic<State>    g_state {State::Loaded};
+ std::mutex            g_lifecycle;
++#if !defined(_WIN32)
++void*                 g_host_module = nullptr;
++#endif
+ 
+ void Log(int level, const char* format, ...) {
+ 	char text[1024];
+@@ -104,7 +109,7 @@ void Log(int level, const char* format, ...) {
+ extern "C" {
+ 
+ // One slot per export; the thunks read them with a RIP-relative indirect jump.
+-__attribute__((used)) void* g_kyty_gpu_slots[g_row_count];
++__attribute__((used, visibility("hidden"))) void* g_kyty_gpu_slots[g_row_count];
+ 
+ [[noreturn]] void KytyGpuUnboundNid(uint32_t index) {
+ 	const char* nid      = index < g_row_count ? g_rows[index].nid : "?";
+@@ -128,6 +133,12 @@ void* KytyGpuLazyResolve(uint32_t index);
+ // Microsoft x64 resolver with a 16-byte aligned stack and its shadow space, restores the
+ // registers and jumps to the bound implementation, so the call proceeds as if it had gone there
+ // directly. The resolver starts Kyty on first use or stops the process with the NID's name.
++#if defined(_WIN32)
++#define KYTY_GPU_TRAP_INDEX_REGISTER "movl %r11d, %ecx\n\t"
++#else
++#define KYTY_GPU_TRAP_INDEX_REGISTER "movl %r11d, %edi\n\t"
++#endif
++
+ __attribute__((naked)) void KytyGpuUnboundTrap() {
+ 	__asm__ volatile("pushq %rdi\n\t"
+ 	                 "pushq %rsi\n\t"
+@@ -145,7 +156,7 @@ __attribute__((naked)) void KytyGpuUnboundTrap() {
+ 	                 "movdqu %xmm5, 112(%rsp)\n\t"
+ 	                 "movdqu %xmm6, 128(%rsp)\n\t"
+ 	                 "movdqu %xmm7, 144(%rsp)\n\t"
+-	                 "movl %r11d, %ecx\n\t"
++	                 KYTY_GPU_TRAP_INDEX_REGISTER
+ 	                 "callq KytyGpuLazyResolve\n\t"
+ 	                 "movq %rax, %r11\n\t"
+ 	                 "movdqu 32(%rsp), %xmm0\n\t"
+@@ -555,6 +566,7 @@ bool BridgeGuestAccessFault(const Common::HostException::ExceptionInfo& info) {
+ 		return true;
+ 	}();
+ 	bool guest_code = false;
++#if defined(_WIN32)
+ 	if (guest_loads && access == GpuAccess::Read) {
+ 		static const HMODULE game = GetModuleHandleW(nullptr);
+ 		HMODULE              module = nullptr;
+@@ -562,6 +574,9 @@ bool BridgeGuestAccessFault(const Common::HostException::ExceptionInfo& info) {
+ 		                                reinterpret_cast<LPCWSTR>(info.exception_address), &module) != 0 &&
+ 		             module == game;
+ 	}
++#else
++	(void)guest_loads;
++#endif
+ 	const GuestLoad::FaultScope guest_load(guest_code ? info.native_context : nullptr);
+ 	return Libs::LibKernel::Memory::HandleGpuFault(access, info.access_violation_vaddr);
+ }
+@@ -699,10 +714,17 @@ int ApiStartGraphics() {
+ 	if (g_host.publish_pad != nullptr) {
+ 		g_relay = std::thread(Relay);
+ 	}
++#if defined(_WIN32)
+ 	if (!Common::HostException::InstallFirstAccessHandler(BridgeGuestAccessFault)) {
+ 		Log(2, "start_graphics: Kyty's guest memory fault handler could not be installed");
+ 		return KYTY_GPU_E_STATE;
+ 	}
++#else
++	if (!Common::HostException::InstallHandler(BridgeGuestAccessFault)) {
++		Log(2, "start_graphics: Kyty's guest memory fault handler could not be installed");
++		return KYTY_GPU_E_STATE;
++	}
++#endif
+ 	g_state.store(State::Graphics);
+ 	Log(0, "start_graphics: Kyty renderer running (%lld ms)",
+ 	    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+@@ -790,14 +812,38 @@ const KytyGpuNidInfo* ApiFindNid(const char* nid) {
+ std::mutex g_lazy;
+ 
+ const KytyGpuHostCallbacks* FindHost() {
+-	const char* name   = std::getenv("KYTY_GPU_HOST_MODULE");
+-	HMODULE     module = LoadLibraryA(name != nullptr ? name : KYTY_GPU_HOST_MODULE_DEFAULT);
++	const char* name = std::getenv("KYTY_GPU_HOST_MODULE");
++#if defined(_WIN32)
++	HMODULE module = LoadLibraryA(name != nullptr ? name : KYTY_GPU_HOST_MODULE_DEFAULT);
+ 	if (module == nullptr) {
+ 		return nullptr;
+ 	}
+ 	const auto entry = reinterpret_cast<KytyGpuHostEntryFn>(
+ 	    reinterpret_cast<void*>(GetProcAddress(module, KYTY_GPU_HOST_ENTRY)));
+ 	return entry != nullptr ? entry() : nullptr;
++#else
++	const char* candidates[] = {
++	    name,
++	    KYTY_GPU_HOST_MODULE_DEFAULT,
++	    "libs/" KYTY_GPU_HOST_MODULE_DEFAULT,
++	    "./libs/" KYTY_GPU_HOST_MODULE_DEFAULT,
++	    "astrohybrid_host.so",
++	    "libs/astrohybrid_host.so",
++	    "./libs/astrohybrid_host.so",
++	    nullptr,
++	};
++	void* module = nullptr;
++	for (const char** candidate = candidates; *candidate != nullptr && module == nullptr; ++candidate) {
++		if (**candidate == '\0') continue;
++		module = dlopen(*candidate, RTLD_NOW | RTLD_LOCAL);
++	}
++	if (module == nullptr) {
++		return nullptr;
++	}
++	g_host_module = module;
++	const auto entry = reinterpret_cast<KytyGpuHostEntryFn>(dlsym(module, KYTY_GPU_HOST_ENTRY));
++	return entry != nullptr ? entry() : nullptr;
++#endif
+ }
+ 
+ struct Tables {
+@@ -819,6 +865,36 @@ const KytyGpuApi g_api = {
+ 
+ } // namespace
+ 
++#if !defined(_WIN32)
++// The two libSceAgcDriver exports that are AnyPS5 host calls instead of Kyty implementations.
++// kyty_gpu.so is installed as libSceAgcDriver.prx, so it must export them too.
++extern "C" void KytyGpuAstroHdr(void* status) {
++	if (g_host_module == nullptr) {
++		(void)FindHost();
++	}
++	if (g_host_module == nullptr) {
++		return;
++	}
++	using Fn = void (*)(void*);
++	if (auto fn = reinterpret_cast<Fn>(dlsym(g_host_module, "AstroHybridHostHdr_nid_no_patch"))) {
++		fn(status);
++	}
++}
++
++extern "C" void KytyGpuAstroToneMapPeak(float nits) {
++	if (g_host_module == nullptr) {
++		(void)FindHost();
++	}
++	if (g_host_module == nullptr) {
++		return;
++	}
++	using Fn = void (*)(float);
++	if (auto fn = reinterpret_cast<Fn>(dlsym(g_host_module, "AstroHybridNoteReportedToneMapPeak_nid_no_patch"))) {
++		fn(nits);
++	}
++}
++#endif
++
+ // Game code reached an export no host has bound yet: AstroBot.exe loads the shims and calls
+ // straight in. Find the host module, bind the exports and start the renderer, once.
+ extern "C" __attribute__((used)) void* KytyGpuLazyResolve(uint32_t index) {
+diff --git a/src/kernel/memoryAddressSpace.inc b/src/kernel/memoryAddressSpace.inc
+index 24f538d2..249b7668 100644
+--- a/src/kernel/memoryAddressSpace.inc
++++ b/src/kernel/memoryAddressSpace.inc
+@@ -1931,6 +1931,15 @@ private:
+ 		    {HOST_USER_MIN, HOST_USER_MAX + 1u},
+ 		}};
+ 
++		// AstroHybrid: ranges the host's guest arena already holds as PROT_NONE reservations.
++		// Adopting them as free lets Kyty's mprotect/mmap use them without reserving them first.
++		for (const auto& [start, size]: g_host_placeholders) {
++			EXIT_IF(size == 0);
++			AddFreeUnlocked(start, size);
++			m_owned.emplace_back(start, size);
++			m_adopted.emplace_back(start, size);
++		}
++
+ #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+ 		std::vector<std::pair<uint64_t, uint64_t>> occupied;
+ 		FILE*                                      maps = fopen("/proc/self/maps", "r");
+-- 
+2.56.1
+
