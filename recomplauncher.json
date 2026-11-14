@@ -1,0 +1,138 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Astro Bot (AstroHybrid)",
+  "repo": "innateessence/pcportastrobot",
+  "game": {
+    "kind": "folder",
+    "label": "Your decrypted PS5 Astro Bot dump folder with eboot.bin, sce_module, sce_sys and data (tested: PPSA21567, v01.019.000).",
+    "check": { "file": "eboot.bin" }
+  },
+  "prepare": {
+    "program": ["AstroHybrid.exe"],
+    "args": ["--setup", "{game}"],
+    "label": "Building Astro Bot for Windows from your dump",
+    "timeout": 600
+  },
+  "start": {
+    "program": ["AstroHybrid.exe"],
+    "args": ["--play"]
+  },
+  "config": [
+    {
+      "format": "json",
+      "file": [{ "path": "{install}/Build/astrohybrid-settings.json" }],
+      "game_path": "gameDumpPath"
+    }
+  ],
+  "settings": [
+    {
+      "id": "resolution",
+      "label": "Window size",
+      "group": "Graphics",
+      "choices": [
+        { "label": "1280 x 720", "set": { "size": "0" } },
+        { "label": "1600 x 900", "set": { "size": "1" } },
+        { "label": "1920 x 1080", "set": { "size": "2" } },
+        { "label": "2560 x 1440", "set": { "size": "3" } }
+      ],
+      "defaults": { "size": "2" }
+    },
+    {
+      "id": "fullscreen",
+      "label": "Window mode",
+      "group": "Graphics",
+      "choices": [
+        { "label": "Fullscreen", "set": { "fullscreen": "true" } },
+        { "label": "Windowed", "set": { "fullscreen": "false" } }
+      ],
+      "defaults": { "fullscreen": "true" }
+    },
+    {
+      "id": "vsync",
+      "label": "VSync",
+      "group": "Graphics",
+      "choices": [
+        { "label": "Off", "set": { "vsync": "false" } },
+        { "label": "On", "set": { "vsync": "true" } }
+      ],
+      "defaults": { "vsync": "false" }
+    },
+    {
+      "id": "fps",
+      "label": "Game frame rate",
+      "help": "Frame generation uses its own target; 30 FPS gives steadier pacing on CPU-limited PCs.",
+      "group": "Graphics",
+      "when": { "fgmode": "0" },
+      "choices": [
+        { "label": "30 FPS", "set": { "fps": "0" } },
+        { "label": "35 FPS", "set": { "fps": "1" } },
+        { "label": "45 FPS", "set": { "fps": "2" } },
+        { "label": "50 FPS", "set": { "fps": "3" } },
+        { "label": "55 FPS", "set": { "fps": "4" } },
+        { "label": "60 FPS", "set": { "fps": "5" } },
+        { "label": "Unlimited", "set": { "fps": "6" } }
+      ],
+      "defaults": { "fps": "0", "fgmode": "0" }
+    },
+    {
+      "id": "upscaler",
+      "label": "Upscaling",
+      "help": "DLSS requires an NVIDIA RTX card.",
+      "group": "NVIDIA RTX",
+      "choices": [
+        { "label": "Game's own", "set": { "upscale": "0" } },
+        { "label": "DLSS", "set": { "upscale": "1" } }
+      ],
+      "defaults": { "upscale": "0" }
+    },
+    {
+      "id": "framegen",
+      "label": "Frame generation",
+      "help": "Requires RTX 40 or newer; 3x and 4x require RTX 50. Auto can use up to 4x.",
+      "group": "NVIDIA RTX",
+      "choices": [
+        { "label": "Off", "set": { "fgmode": "0" } },
+        { "label": "Auto", "set": { "fgmode": "1" } },
+        { "label": "2x", "set": { "fgmode": "2" } },
+        { "label": "3x", "set": { "fgmode": "3" } },
+        { "label": "4x", "set": { "fgmode": "4" } }
+      ],
+      "defaults": { "fgmode": "0" }
+    },
+    {
+      "id": "framegen-target",
+      "label": "On-screen target",
+      "group": "NVIDIA RTX",
+      "choices": [
+        { "label": "Unlimited", "set": { "fgtarget": "0" } },
+        { "label": "50 FPS", "set": { "fgtarget": "1" } },
+        { "label": "60 FPS", "set": { "fgtarget": "2" } },
+        { "label": "90 FPS", "set": { "fgtarget": "3" } },
+        { "label": "120 FPS", "set": { "fgtarget": "4" } },
+        { "label": "144 FPS", "set": { "fgtarget": "5" } },
+        { "label": "165 FPS", "set": { "fgtarget": "6" } }
+      ],
+      "defaults": { "fgtarget": "2" }
+    },
+    {
+      "id": "reflex",
+      "label": "NVIDIA Reflex",
+      "help": "Requires an NVIDIA RTX card.",
+      "group": "NVIDIA RTX",
+      "choices": [
+        { "label": "Off", "set": { "lowlatency": "false" } },
+        { "label": "On", "set": { "lowlatency": "true" } }
+      ],
+      "defaults": { "lowlatency": "false" }
+    }
+  ],
+  "saves": [
+    "{install}/Build/RunHybrid/_sd_mem",
+    "{install}/Build/RunHybrid/_trophy",
+    "{install}/Build/astrohybrid-settings.json"
+  ],
+  "folders": {
+    "logs": [{ "path": "{install}/Logs" }]
+  }
+}

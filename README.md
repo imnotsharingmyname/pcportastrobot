@@ -27,7 +27,28 @@ locations); everything else works the same way. Only 01.019.000 has been tested.
 Requirements: Windows 10/11 x64, a Vulkan GPU; DLSS needs an RTX card, frame generation an RTX 40 or 50.
 Controllers: DualSense, DualShock 4, Xbox, Switch Pro and compatible pads, generic pads (the one you press plays).
 Command line: `AstroHybrid.exe --setup "<dump folder>"` runs the setup without a window; `--remove-game` removes
-what setup built. The classic one-window launcher (`AstroBot Launcher.exe`) is included too.
+what setup built. `AstroHybrid.exe --play` starts the installed game without a launcher window, uses the saved
+settings, waits for the game to close and returns its exit code. The classic one-window launcher
+(`AstroBot Launcher.exe`) is included too.
+
+### RecompLauncher
+
+Release ZIPs include [`recomplauncher.json`](recomplauncher.json) beside `AstroHybrid.exe` and use a
+`AstroBotPC-AstroHybrid-<version>-Windows-x64.zip` filename. The profile lets RecompLauncher ask for your decrypted
+dump folder, run setup once, edit graphics settings and start the game directly. It also identifies saves and
+logs. Setup checks the dump with the same validator as the app; only v01.019.000 has been tested.
+
+Direct play uses saved settings (or the app's defaults) without applying hardware recommendations, so choices
+made in RecompLauncher stay in effect. DLSS and Reflex require RTX hardware; frame generation needs RTX 40 or
+newer, and 3x/4x need RTX 50. The AstroHybrid app still provides the full settings UI.
+
+To test a release locally, enable Developer tools in RecompLauncher and use **Add a build** to select the
+extracted release folder, then check its Developer tab and try setup and Play. On Windows, after building the
+app in Release, run `python Tests/test_recomplauncher_launch.py` for a smoke test without game files.
+
+For the project to appear in Discover, submit `https://github.com/innateessence/pcportastrobot` through
+**Submit a Game** at [recomplauncher.com](https://recomplauncher.com). Shipping the profile does not itself register
+the repository in the catalog. See the [RecompLauncher developer guide](https://github.com/elripalda/RecompLauncher/blob/main/docs/DEVELOPERS.md).
 
 ### Screenshots
 
