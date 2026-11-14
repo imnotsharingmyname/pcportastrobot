@@ -1,0 +1,60 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.HomeView">
+  <ScrollViewer>
+    <StackPanel Margin="28,24" Spacing="18">
+      <StackPanel Spacing="4">
+        <TextBlock Text="ASTRO BOT" Classes="h1" />
+        <TextBlock x:Name="Subtitle" Classes="muted"
+                   Text="Native Linux port · Kyty GPU stack · no game files included" />
+      </StackPanel>
+
+      <Border Classes="card">
+        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" RowSpacing="12">
+          <StackPanel Grid.Row="0" Grid.Column="0" Spacing="5">
+            <TextBlock Text="Installation" Classes="label" />
+            <TextBlock x:Name="StatusText" Text="Checking the runtime..." Classes="h2" />
+            <TextBlock x:Name="GamePathText" Classes="muted" />
+          </StackPanel>
+          <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                      VerticalAlignment="Center">
+            <Button x:Name="PlayButton" Classes="primary" Content="Play" Click="Play" />
+            <Button x:Name="StopButton" Classes="danger" Content="Stop" Click="Stop" IsEnabled="False" />
+          </StackPanel>
+          <Border Grid.Row="1" Grid.ColumnSpan="2" Background="{StaticResource SurfaceRaised}"
+                  CornerRadius="8" Padding="12" IsVisible="False" x:Name="NoticeCard">
+            <TextBlock x:Name="NoticeText" Classes="muted" TextWrapping="Wrap" />
+          </Border>
+        </Grid>
+      </Border>
+
+      <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
+        <Border Grid.Column="0" Classes="card">
+          <StackPanel Spacing="6">
+            <TextBlock Text="This PC" Classes="label" />
+            <TextBlock x:Name="HardwareText" Classes="muted" />
+          </StackPanel>
+        </Border>
+        <Border Grid.Column="1" Classes="card">
+          <StackPanel Spacing="6">
+            <TextBlock Text="Runtime" Classes="label" />
+            <TextBlock x:Name="RuntimeText" Classes="muted" />
+          </StackPanel>
+        </Border>
+      </Grid>
+
+      <Border Classes="card">
+        <Grid RowDefinitions="Auto,*" RowSpacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Grid.Column="0" Text="Log" Classes="label" VerticalAlignment="Center" />
+            <Button Grid.Column="1" Content="Clear" Click="ClearLog" Padding="10,5" />
+          </Grid>
+          <TextBox Grid.Row="1" x:Name="LogBox" Height="190" IsReadOnly="True"
+                   AcceptsReturn="True" TextWrapping="NoWrap"
+                   FontFamily="JetBrains Mono, monospace" FontSize="11"
+                   Background="#090E1B" />
+        </Grid>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

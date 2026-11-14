@@ -1,0 +1,54 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="AstroHybrid.App.Avalonia.MainWindow"
+        Title="AstroHybrid"
+        Width="1120" Height="740"
+        MinWidth="920" MinHeight="600"
+        WindowStartupLocation="CenterScreen"
+        Icon="/Assets/astrohybrid.png">
+  <Grid ColumnDefinitions="250,*">
+    <Border Grid.Column="0" Background="{StaticResource Surface}"
+            BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+      <Grid RowDefinitions="Auto,*,Auto">
+        <Border Grid.Row="0" Padding="20,22,20,18"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <Border Width="42" Height="42" CornerRadius="9" Background="{StaticResource Accent}">
+              <TextBlock Text="A" FontSize="24" FontWeight="Bold"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White" />
+            </Border>
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock Text="AstroHybrid" FontSize="16" FontWeight="SemiBold" />
+              <TextBlock Text="Linux launcher" Classes="muted" FontSize="12" />
+            </StackPanel>
+          </StackPanel>
+        </Border>
+
+        <StackPanel Grid.Row="1" Margin="12,16" Spacing="4">
+          <Button x:Name="NavHome" Classes="nav active" Click="ShowHome">
+            <TextBlock Text="Home" />
+          </Button>
+          <Button x:Name="NavSetup" Classes="nav" Click="ShowSetup">
+            <TextBlock Text="Setup" />
+          </Button>
+          <Button x:Name="NavGraphics" Classes="nav" Click="ShowGraphics">
+            <TextBlock Text="Graphics" />
+          </Button>
+          <Button x:Name="NavController" Classes="nav" Click="ShowController">
+            <TextBlock Text="Controller" />
+          </Button>
+          <Button x:Name="NavAdvanced" Classes="nav" Click="ShowAdvanced">
+            <TextBlock Text="Advanced" />
+          </Button>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Margin="20,0,20,18" Spacing="4">
+          <TextBlock x:Name="BuildLabel" Classes="muted" FontSize="11" Text="Linux native port" />
+          <TextBlock Text="No game files included" Classes="muted" FontSize="11" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <ContentControl Grid.Column="1" Name="PageHost" />
+  </Grid>
+</Window>

@@ -1,0 +1,66 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.GraphicsView">
+  <ScrollViewer>
+    <StackPanel Margin="28,24" Spacing="18">
+      <StackPanel Spacing="4">
+        <TextBlock Text="Graphics" Classes="h1" />
+        <TextBlock Classes="muted"
+                   Text="The Linux port uses the game's own upscaler and Kyty's Vulkan renderer. DLSS, Frame Generation and Reflex are Windows/NVIDIA-only and are not part of this build." />
+      </StackPanel>
+
+      <Border Classes="card">
+        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="12">
+          <StackPanel Grid.Row="0" Grid.Column="0" Spacing="4">
+            <TextBlock Text="Window resolution" Classes="label" />
+            <TextBlock Text="Sets the Kyty window and swapchain; the game still renders its internal 4K targets." Classes="muted" FontSize="12" />
+          </StackPanel>
+          <ComboBox Grid.Row="0" Grid.Column="1" x:Name="ResolutionBox" Width="180" />
+
+          <StackPanel Grid.Row="1" Grid.Column="0" Spacing="4">
+            <TextBlock Text="Frame limit" Classes="label" />
+            <TextBlock Text="The port is CPU-limited; a 60 FPS cap usually gives steadier pacing." Classes="muted" FontSize="12" />
+          </StackPanel>
+          <ComboBox Grid.Row="1" Grid.Column="1" x:Name="FpsBox" Width="180" />
+
+          <StackPanel Grid.Row="2" Grid.Column="0" Spacing="4">
+            <TextBlock Text="Fullscreen" Classes="label" />
+            <TextBlock Text="Start the Kyty window in desktop fullscreen; F11 or Alt+Enter toggles it." Classes="muted" FontSize="12" />
+          </StackPanel>
+          <CheckBox Grid.Row="2" Grid.Column="1" x:Name="FullscreenBox" Content="Start fullscreen"
+                    HorizontalAlignment="Right" />
+
+          <StackPanel Grid.Row="3" Grid.Column="0" Spacing="4">
+            <TextBlock Text="Real-time game speed" Classes="label" />
+            <TextBlock Text="Rewrites the game's frame-rate block so below-60 FPS does not run in slow motion." Classes="muted" FontSize="12" />
+          </StackPanel>
+          <CheckBox Grid.Row="3" Grid.Column="1" x:Name="GameSpeedBox" Content="Keep real time"
+                    HorizontalAlignment="Right" />
+        </Grid>
+      </Border>
+
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <Button Classes="primary" Content="Save settings" Click="Save" />
+        <TextBlock x:Name="SaveStatus" Classes="muted" VerticalAlignment="Center" />
+      </StackPanel>
+
+      <Border Classes="card">
+        <StackPanel Spacing="8">
+          <TextBlock Text="Audio" Classes="label" />
+          <CheckBox x:Name="DirectAudioBox" Content="Route game audio directly to the default sink" />
+          <TextBlock Classes="muted" FontSize="12"
+                     Text="Bypasses desktop filter chains such as JamesDSP / virtual surround, which can add a lot of latency. The sink below is optional; empty uses the current default sink." />
+          <TextBox x:Name="AudioSinkBox" Watermark="alsa_output.… (optional)" />
+        </StackPanel>
+      </Border>
+
+      <Border Classes="card">
+        <StackPanel Spacing="6">
+          <TextBlock Text="What is not here" Classes="label" />
+          <TextBlock Classes="muted"
+                     Text="NVIDIA DLSS Super Resolution, DLSS Frame Generation and Reflex need NVIDIA's Windows runtime. The Linux build on AMD or NVIDIA uses the game's own temporal upscale and the Vulkan driver as-is." />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

@@ -1,0 +1,40 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.SetupView">
+  <ScrollViewer>
+    <StackPanel Margin="28,24" Spacing="18">
+      <StackPanel Spacing="4">
+        <TextBlock Text="Setup" Classes="h1" />
+        <TextBlock Classes="muted"
+                   Text="Point AstroHybrid at your own extracted PPSA21567 dump. Setup unwraps the SELF containers and relinks the game; it never copies game files into this project." />
+      </StackPanel>
+
+      <Border Classes="card">
+        <StackPanel Spacing="12">
+          <TextBlock Text="Game dump" Classes="label" />
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+            <TextBox Grid.Column="0" x:Name="GamePathBox" Watermark="…/PPSA21567-app" />
+            <Button Grid.Column="1" Content="Browse…" Click="Browse" />
+          </Grid>
+          <TextBlock Classes="muted" FontSize="12"
+                     Text="The folder must contain eboot.bin, sce_module and sce_sys. Version 01.019.000 is the tested build." />
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <Button Content="Check folder" Click="Check" />
+            <Button x:Name="InstallButton" Classes="primary" Content="Install / rebuild" Click="Install" />
+          </StackPanel>
+          <ProgressBar x:Name="Progress" IsIndeterminate="True" IsVisible="False" Height="4" />
+        </StackPanel>
+      </Border>
+
+      <Border Classes="card">
+        <StackPanel Spacing="8">
+          <TextBlock Text="Output" Classes="label" />
+          <TextBox x:Name="OutputBox" Height="280" IsReadOnly="True"
+                   AcceptsReturn="True" TextWrapping="NoWrap"
+                   FontFamily="JetBrains Mono, monospace" FontSize="11"
+                   Background="#090E1B" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

@@ -1,0 +1,137 @@
+From 1860f9a1f78ea93a2e4caaa6429c67ca74930554 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Sat, 14 Nov 2026 01:22:10 +0100
+Subject: [PATCH] fix(libkernel): load the hybrid GPU module and stage APR
+ reads on Linux
+
+---
+ core/libs/prx/libkernel/Apr/src/Apr.cpp       |  8 +--
+ .../prx/libkernel/DirectMemory/Export.cpp     | 68 ++++++++++++++++++-
+ 2 files changed, 69 insertions(+), 7 deletions(-)
+
+diff --git a/core/libs/prx/libkernel/Apr/src/Apr.cpp b/core/libs/prx/libkernel/Apr/src/Apr.cpp
+index 0ba7bbafeb..65fe713ea6 100644
+--- a/core/libs/prx/libkernel/Apr/src/Apr.cpp
++++ b/core/libs/prx/libkernel/Apr/src/Apr.cpp
+@@ -166,7 +166,8 @@ void _readFile(const Apr::ReadFileCommand& command) {
+     stream.seekg(static_cast<std::streamoff>(command.offset));
+     const GuestArena::HostWrite destination(reinterpret_cast<void*>(command.destination), command.size);
+     if (!destination.Open()) throw std::runtime_error("APR: the read destination of " + file.path.string() + " is not writable guest memory");
+-#ifdef _WIN32
++    // Read into a host buffer and copy in: a read(2) straight into a guest page that Kyty has
++    // write-protected returns EFAULT and sets badbit.  The memcpy triggers the fault handler.
+     std::vector<char> staging(static_cast<std::size_t>(std::min<std::uint64_t>(command.size, 64u * 1024u)));
+     std::uint64_t read = 0;
+     while (read < command.size) {
+@@ -178,11 +179,6 @@ void _readFile(const Apr::ReadFileCommand& command) {
+         if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
+         if (obtained != static_cast<std::uint64_t>(wanted)) break;
+     }
+-#else
+-    stream.read(reinterpret_cast<char*>(command.destination), static_cast<std::streamsize>(command.size));
+-    if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
+-    const auto read = static_cast<std::uint64_t>(stream.gcount());
+-#endif
+     if (read != command.size && (!stream.eof() || command.offset + read < std::filesystem::file_size(file.path))) throw std::runtime_error("APR: read of " + file.path.string() + " at offset " + std::to_string(command.offset) + " returned " + std::to_string(read) + " of " + std::to_string(command.size) + " bytes");
+     if (read != command.size) std::memset(reinterpret_cast<char*>(command.destination) + read, 0, static_cast<std::size_t>(command.size - read));
+ }
+diff --git a/core/libs/prx/libkernel/DirectMemory/Export.cpp b/core/libs/prx/libkernel/DirectMemory/Export.cpp
+index 8ac62570a5..cfaeb1830d 100644
+--- a/core/libs/prx/libkernel/DirectMemory/Export.cpp
++++ b/core/libs/prx/libkernel/DirectMemory/Export.cpp
+@@ -21,10 +21,13 @@
+ #include <windows.h>
+ #else
+ #include <cerrno>
++#include <dlfcn.h>
+ #include <fstream>
++#include <link.h>
+ #include <sstream>
+ #include <sys/mman.h>
+ #include <sys/resource.h>
++#include <unistd.h>
+ #ifdef __APPLE__
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
+@@ -235,6 +238,54 @@ bool KytyGpuEngine() {
+     return enabled;
+ }
+ 
++#ifndef _WIN32
++const char* FindLoadedModule(const char* needle) {
++    struct State {
++        const char* needle;
++        const char* path;
++    } state {needle, nullptr};
++    dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
++        auto* state = static_cast<State*>(data);
++        if (info->dlpi_name != nullptr && info->dlpi_name[0] != '\0' &&
++            std::strstr(info->dlpi_name, state->needle) != nullptr) {
++            state->path = info->dlpi_name;
++            return 1;
++        }
++        return 0;
++    }, &state);
++    return state.path;
++}
++
++void* KytyGpuModule() {
++    static void* module = [] {
++        const char* env = std::getenv("KYTY_GPU_MODULE");
++        const char* candidates[] = {env, "./libs/libSceVideoOut.prx", "libs/libSceVideoOut.prx",
++                                    "./libs/libSceAgc.prx", "libs/libSceAgc.prx", "kyty_gpu.so",
++                                    "./libs/kyty_gpu.so", nullptr};
++        if (env != nullptr && env[0] != '\0') {
++            if (void* handle = dlopen(env, RTLD_NOW | RTLD_LOCAL)) return handle;
++        }
++        // libkernel's constructor runs before the graphics shim's own initializer, but the shim
++        // is already mapped as a DT_NEEDED object.  Find its exact loader path instead of asking
++        // dlopen to load a second copy (the library has a static TLS block and cannot be opened
++        // late on this glibc).
++        for (const char* needle: {"libSceVideoOut.prx", "libSceAgc.prx", "kyty_gpu.so"}) {
++            if (const char* path = FindLoadedModule(needle)) {
++                if (void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL)) return handle;
++                std::fprintf(stderr, "[gpu-engine] cannot open loaded %s: %s\n", path, dlerror());
++            }
++        }
++        for (const char** candidate = candidates; *candidate != nullptr; ++candidate) {
++            if (**candidate == '\0') continue;
++            if (void* handle = dlopen(*candidate, RTLD_NOW | RTLD_LOCAL)) return handle;
++            std::fprintf(stderr, "[gpu-engine] cannot load %s: %s\n", *candidate, dlerror());
++        }
++        return static_cast<void*>(nullptr);
++    }();
++    return module;
++}
++#endif
++
+ template <typename Function>
+ Function KytyGpuExport(const char* nid) {
+ #ifdef _WIN32
+@@ -245,7 +296,22 @@ Function KytyGpuExport(const char* nid) {
+     if (function == nullptr) throw std::runtime_error(std::string("APS5_GPU_ENGINE=kyty: kyty_gpu.dll does not export ") + nid);
+     return reinterpret_cast<Function>(reinterpret_cast<void*>(function));
+ #else
+-    throw std::runtime_error(std::string("APS5_GPU_ENGINE=kyty is Windows only: ") + nid);
++    void* module = KytyGpuModule();
++    if (module == nullptr) {
++        const char* error = dlerror();
++        throw std::runtime_error(std::string("APS5_GPU_ENGINE=kyty: kyty_gpu.so is not loadable: ") +
++                                 (error != nullptr ? error : "unknown error"));
++    }
++    using GetNidFn = void* (*)(const char*);
++    static const auto get_nid = reinterpret_cast<GetNidFn>(dlsym(module, "KytyGpuGetNid"));
++    if (get_nid == nullptr) {
++        throw std::runtime_error("APS5_GPU_ENGINE=kyty: kyty_gpu.so does not export KytyGpuGetNid");
++    }
++    void* function = get_nid(nid);
++    if (function == nullptr) {
++        throw std::runtime_error(std::string("APS5_GPU_ENGINE=kyty: kyty_gpu.so has no NID ") + nid);
++    }
++    return reinterpret_cast<Function>(function);
+ #endif
+ }
+ 
+-- 
+2.56.1
+

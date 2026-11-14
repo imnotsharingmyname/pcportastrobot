@@ -1,0 +1,34 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.ControllerView">
+  <ScrollViewer>
+    <StackPanel Margin="28,24" Spacing="18">
+      <StackPanel Spacing="4">
+        <TextBlock Text="Controller" Classes="h1" />
+        <TextBlock Classes="muted"
+                   Text="Kyty owns the physical controller; the relay publishes its state to the game's pad library. The pad you press becomes player 1." />
+      </StackPanel>
+
+      <Border Classes="card">
+        <StackPanel Spacing="10">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Grid.Column="0" Text="Detected pads" Classes="label" VerticalAlignment="Center" />
+            <Button Grid.Column="1" Content="Refresh" Click="Refresh" Padding="10,5" />
+          </Grid>
+          <ListBox x:Name="PadList" MinHeight="80" Background="{StaticResource SurfaceRaised}" />
+          <TextBlock x:Name="EmptyText" Classes="muted" Text="No gamepad with a joystick device was found." IsVisible="False" />
+        </StackPanel>
+      </Border>
+
+      <Border Classes="card">
+        <StackPanel Spacing="8">
+          <CheckBox x:Name="MotionBox" Content="Relay pad motion sensors (experimental)" />
+          <TextBlock Classes="muted" FontSize="12"
+                     Text="Passes accelerometer and gyroscope data to the game's pad library (ASTROHYBRID_PAD_MOTION=1). Leave it off if the game reads a resting controller as tilted." />
+          <Button Content="Save" Click="Save" HorizontalAlignment="Left" />
+          <TextBlock x:Name="Status" Classes="muted" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
