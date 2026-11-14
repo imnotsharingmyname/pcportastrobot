@@ -39,7 +39,15 @@ namespace AstroHybrid.App
             // success; progress and errors in Logs\setup.log).
             if (e.Args.Length == 2 && e.Args[0] == "--setup")
             {
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
                 RunSetupWithoutWindow(e.Args[1]);
+                return;
+            }
+            // Stay alive until the game exits so external launchers can track play time and back up saves.
+            if (e.Args.Length == 1 && e.Args[0] == "--play")
+            {
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                RunGameWithoutWindow();
                 return;
             }
             // AstroHybrid.exe --remove-game: removes what the setup built (Installation page, Uninstall).
@@ -123,6 +131,9 @@ namespace AstroHybrid.App
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(log)!);
+                var info = await new GameValidator().ValidateGameDumpAsync(dump);
+                if (!info.IsValid)
+                    throw new InvalidOperationException(info.ValidationError ?? "That folder is not an Astro Bot dump.");
                 var progress = new Progress<(int Percent, string Message)>(p =>
                     File.AppendAllText(log, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {p.Percent,3}% {p.Message}\r\n"));
                 var features = await new GameSetup(root).RunAsync(dump, progress);
@@ -138,6 +149,24 @@ namespace AstroHybrid.App
             catch (Exception ex)
             {
                 File.AppendAllText(log, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] FAILED: {ex}\r\n");
+                Shutdown(2);
+            }
+        }
+
+        private async void RunGameWithoutWindow()
+        {
+            try
+            {
+                InitializeSettings();
+                // Use the saved settings, including choices written by RecompLauncher. Do not replace them
+                // with the main window's first-run hardware recommendations on a later interactive launch.
+                _settings.ApplyBestOnStart = false;
+                int exitCode = await new LauncherService(GetRootDirectory()).LaunchGameAsync(_settings);
+                Shutdown(exitCode);
+            }
+            catch (Exception ex)
+            {
+                LogException(ex);
                 Shutdown(2);
             }
         }

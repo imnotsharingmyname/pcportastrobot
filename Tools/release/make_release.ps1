@@ -10,7 +10,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$name = "AstroBotPC-AstroHybrid-$Version"
+$name = "AstroBotPC-AstroHybrid-$Version-Windows-x64"
 $stage = Join-Path $Out $name
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $run = Join-Path $stage 'Build\RunHybrid'
@@ -24,6 +24,7 @@ $config = Join-Path $root 'AstroHybrid.App\obj\Release\AstroHybrid.exe.config'
 if (-not (Select-String -Path $config -Pattern 'bindingRedirect' -Quiet)) { throw 'generated config has no binding redirects' }
 Copy-Item $config (Join-Path $stage 'AstroHybrid.exe.config')
 Copy-Item (Join-Path $root 'Run-AstroHybrid.bat') $stage
+Copy-Item (Join-Path $root 'recomplauncher.json') $stage
 # The classic launcher, built with AstroHybrid's own icon (no game artwork in the download).
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $res = Join-Path $root 'AstroHybrid.App\Resources'
