@@ -1,0 +1,1894 @@
+From 2f9ad326b78b0f4f71459df0a6eb78df96eafd84 Mon Sep 17 00:00:00 2001
+From: DieMitchell <mitchell030504@gmail.com>
+Date: Sat, 14 Nov 2026 02:24:53 +0100
+Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
+
+---
+ CMakeLists.txt                                |   1 +
+ src/fsr4/include/ffx_api.h                    | 213 ++++++++
+ src/fsr4/include/ffx_api_types.h              | 257 +++++++++
+ src/fsr4/include/ffx_upscale.h                | 230 ++++++++
+ src/fsr4/include/vk/ffx_api_vk.h              | 308 +++++++++++
+ .../host_gpu/renderer/cache/textureCache.cpp  |  42 ++
+ src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
+ .../host_gpu/renderer/eopTimestamps.cpp       |  31 ++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 507 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.h         |  17 +
+ src/graphics/host_gpu/renderer/render.h       |   5 +
+ src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
+ .../presentation/window/vulkanWindow.cpp      |  39 ++
+ 13 files changed, 1673 insertions(+), 4 deletions(-)
+ create mode 100644 src/fsr4/include/ffx_api.h
+ create mode 100644 src/fsr4/include/ffx_api_types.h
+ create mode 100644 src/fsr4/include/ffx_upscale.h
+ create mode 100644 src/fsr4/include/vk/ffx_api_vk.h
+ create mode 100644 src/graphics/host_gpu/renderer/fsr4.cpp
+ create mode 100644 src/graphics/host_gpu/renderer/fsr4.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cca6f074..cf515df1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2542,6 +2542,7 @@ if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+ endif()
+ 
+ add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
++target_include_directories(kyty_emulator PRIVATE "${KYTY_SOURCE_DIR}/fsr4/include")
+ configure_macos_guest_address_space(kyty_emulator)
+ 
+ option(KYTY_EMULATOR_IPO "Enable release interprocedural optimization for the emulator target" OFF)
+diff --git a/src/fsr4/include/ffx_api.h b/src/fsr4/include/ffx_api.h
+new file mode 100644
+index 00000000..d351c168
+--- /dev/null
++++ b/src/fsr4/include/ffx_api.h
+@@ -0,0 +1,213 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2026 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++
++#if defined(__cplusplus)
++extern "C" {
++#endif  // #if defined(__cplusplus)
++
++#define FFX_API_ENTRY __declspec(dllexport)
++
++#include <stdint.h>
++
++enum FfxApiReturnCodes
++{
++    FFX_API_RETURN_OK                     = 0, ///< The oparation was successful.
++    FFX_API_RETURN_ERROR                  = 1, ///< An error occurred that is not further specified.
++    FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE = 2, ///< The structure type given was not recognized for the function or context with which it was used. This is likely a programming error.
++    FFX_API_RETURN_ERROR_RUNTIME_ERROR    = 3, ///< The underlying runtime (e.g. D3D12, Vulkan) or effect returned an error code.
++    FFX_API_RETURN_NO_PROVIDER            = 4, ///< No provider was found for the given structure type. This is likely a programming error.
++    FFX_API_RETURN_ERROR_MEMORY           = 5, ///< A memory allocation failed.
++    FFX_API_RETURN_ERROR_PARAMETER        = 6, ///< A parameter was invalid, e.g. a null pointer, empty resource or out-of-bounds enum value.
++    FFX_API_RETURN_PROVIDER_NO_SUPPORT_NEW_DESCTYPE = 7, ///< The structure type given is new and not supported in the old provider. This is likely fixed with driver upgrade or effect DLL upgrade.
++};
++
++typedef void* ffxContext;
++typedef uint32_t ffxReturnCode_t;
++
++#define FFX_API_EFFECT_MASK         0x00ff0000u
++#define FFX_API_BACKEND_MASK        0xff000000u
++#define FFX_API_EFFECT_ID_GENERAL   0x00000000u
++
++// Base Descriptor types
++typedef uint64_t ffxStructType_t;
++typedef struct ffxApiHeader
++{
++    ffxStructType_t      type;  ///< The structure type. Must always be set to the corresponding value for any structure (found nearby with a similar name).
++    struct ffxApiHeader* pNext; ///< Pointer to next structure, used for optional parameters and extensions. Can be null.
++} ffxApiHeader;
++
++typedef ffxApiHeader ffxCreateContextDescHeader;
++typedef ffxApiHeader ffxConfigureDescHeader;
++typedef ffxApiHeader ffxQueryDescHeader;
++typedef ffxApiHeader ffxDispatchDescHeader;
++
++// Extensions for global debug
++#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_SILENCE  0x0000000u
++#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_ERRORS   0x0000001u
++#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_WARNINGS 0x0000002u
++#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_VERBOSE  0xfffffffu
++
++enum FfxApiMsgType
++{
++    FFX_API_MESSAGE_TYPE_ERROR   = 0,
++    FFX_API_MESSAGE_TYPE_WARNING = 1,
++    FFX_API_MESSAGE_TYPE_COUNT
++};
++
++typedef void (*ffxApiMessage)(uint32_t type, const wchar_t* message);
++
++#define FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG 7u
++struct ffxConfigureDescGlobalDebug
++{
++    ffxConfigureDescHeader header;
++    uint64_t               effectId;
++    ffxApiMessage          fpMessage;  ///< A pointer to a function that can receive messages from the runtime. May be null.
++    uint32_t               debugLevel;
++};
++
++#define FFX_API_QUERY_DESC_TYPE_GET_VERSIONS 4u
++struct ffxQueryDescGetVersions
++{
++    ffxQueryDescHeader header;
++    uint64_t createDescType;    ///< Create description for the effect whose versions should be enumerated.
++    void* device;               ///< For DX12: pointer to ID3D12Device. For VK, pointer to VkDeviceContext.
++    uint64_t *outputCount;      ///< Input capacity of id and name arrays. Output number of returned versions. If initially zero, output is number of available versions.
++    uint64_t *versionIds;       ///< Output array of version ids to be used as version overrides. If null, only names and count are returned.
++    const char** versionNames;  ///< Output array of version names for display. If null, only ids and count are returned. If both this and versionIds are null, only count is returned.
++};
++
++#define FFX_API_DESC_TYPE_OVERRIDE_VERSION 5u
++struct ffxOverrideVersion
++{
++    ffxApiHeader header;
++    uint64_t versionId;  ///< Id of version to use. Must be a value returned from a query in ffxQueryDescGetVersions.versionIds array.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION 6u
++struct ffxQueryGetProviderVersion
++{
++    ffxQueryDescHeader header;
++    uint64_t versionId;      ///< Id of provider being used for queried context. 0 if invalid.
++    const char* versionName; ///< Version name for display. If nullptr, the query was invalid.
++};
++
++// Memory allocation function. Must return a valid pointer to at least size bytes of memory aligned to hold any type.
++// May return null to indicate failure. Standard library malloc fulfills this requirement.
++typedef void* (*ffxAlloc)(void* pUserData, uint64_t size);
++
++// Memory deallocation function. May be called with null pointer as second argument.
++typedef void (*ffxDealloc)(void* pUserData, void* pMem);
++
++typedef struct ffxAllocationCallbacks
++{
++    void* pUserData;
++    ffxAlloc alloc;
++    ffxDealloc dealloc;
++} ffxAllocationCallbacks;
++
++// Creates a FFX object context.
++// Depending on the desc structures provided to this function, the context will be created with the desired version and attributes.
++// Non-zero return indicates error code.
++// Pointers passed in desc must remain live until ffxDestroyContext is called on the context.
++// MemCb may be null; the system allocator (malloc/free) will be used in this case.
++FFX_API_ENTRY ffxReturnCode_t ffxCreateContext(ffxContext* context, ffxCreateContextDescHeader* desc, const ffxAllocationCallbacks* memCb);
++typedef ffxReturnCode_t (*PfnFfxCreateContext)(ffxContext* context, ffxCreateContextDescHeader* desc, const ffxAllocationCallbacks* memCb);
++
++// Destroys an FFX object context.
++// Non-zero return indicates error code.
++// MemCb must be compatible with the callbacks passed into ffxCreateContext.
++FFX_API_ENTRY ffxReturnCode_t ffxDestroyContext(ffxContext* context, const ffxAllocationCallbacks* memCb);
++typedef ffxReturnCode_t (*PfnFfxDestroyContext)(ffxContext* context, const ffxAllocationCallbacks* memCb);
++
++// Configures the provided FFX object context.
++// If context is null, configure operates on any global state.
++// Non-zero return indicates error code.
++FFX_API_ENTRY ffxReturnCode_t ffxConfigure(ffxContext* context, const ffxConfigureDescHeader* desc);
++typedef ffxReturnCode_t (*PfnFfxConfigure)(ffxContext* context, const ffxConfigureDescHeader* desc);
++
++// Queries the provided FFX object context.
++// If context is null, query operates on any global state.
++// Non-zero return indicates error code.
++FFX_API_ENTRY ffxReturnCode_t ffxQuery(ffxContext* context, ffxQueryDescHeader* desc);
++typedef ffxReturnCode_t (*PfnFfxQuery)(ffxContext* context, ffxQueryDescHeader* desc);
++
++// Dispatches work on the given FFX object context defined by the dispatch descriptor.
++// Non-zero return indicates error code.
++FFX_API_ENTRY ffxReturnCode_t ffxDispatch(ffxContext* context, const ffxDispatchDescHeader* desc);
++typedef ffxReturnCode_t (*PfnFfxDispatch)(ffxContext* context, const ffxDispatchDescHeader* desc);
++
++// FFX_API_EFFECT_IDs
++#define FFX_API_EFFECT_ID_UPSCALE                       	0x00010000u
++#define FFX_API_EFFECT_ID_FRAMEGENERATION               	0x00020000u
++#define FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN      	0x00030000u
++// Need to keep this ID around for the deprecated VK frame gen swapchain 
++#define FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK       0x00040000u
++#define FFX_API_EFFECT_ID_DENOISER                      	0x00050000u
++#define FFX_API_EFFECT_ID_RADIANCECACHE                   	0x00060000u
++#define FFX_API_EFFECT_COUNT                                6u
++
++#define FFX_API_MAKE_EFFECT_SUB_ID(effectId, subversion) ((effectId & FFX_API_EFFECT_MASK) | (subversion & ~FFX_API_EFFECT_MASK))
++
++// FFX_APID_BACKEND_IDs
++#define FFX_API_BACKEND_ID_DX12               0x00000000u
++#define FFX_API_BACKEND_ID_VK                 0x01000000u  // For new effects going forward, please use this backend ID for vulkan specifics
++#define FFX_API_BACKEND_ID_XBOX               0x02000000u  
++
++#define FFX_API_MAKE_BACKEND_SUB_ID(backendId, subversion) ((backendId & FFX_API_BACKEND_MASK) | (subversion & ~FFX_API_BACKEND_MASK))
++
++// Combiner for BACKEND-specific EFFECT sub-Ids
++#define FFX_API_MAKE_BACKEND_EFFECT_SUB_ID(backendId, effectId, subversion) ((subversion & ~FFX_API_EFFECT_MASK) | (effectId & FFX_API_EFFECT_MASK) | (backendId & FFX_API_BACKEND_MASK) | (subversion & ~(FFX_API_BACKEND_MASK | FFX_API_EFFECT_MASK)))
++
++// Pragma macros for controlling warnings so that deprecations take affect externally but can be suppressed internally.
++// This is so we can maintain the API/ABI until we are ready to make the breaking change.
++// These are sadly compiler specific.
++#if defined(_MSC_VER) && !defined(__clang__) && !defined(__GNUC__) && !defined(__INTEL_COMPILER)
++#define FFX_PRAGMA_WARNING_PUSH warning( push )
++#define FFX_PRAGMA_WARNING_POP warning( pop )
++#define FFX_PRAGMA_WARNING_DISABLE_DEPRECATIONS warning( disable: 4996 )
++#define FFX_PRAGMA_WARNING_WARN_DEPRECATIONS warning( default: 4996 )
++#elif defined(__clang__) || defined(__GNUC__)
++#define FFX_PRAGMA_WARNING_PUSH GCC diagnostic push
++#define FFX_PRAGMA_WARNING_POP GCC diagnostic pop
++#define FFX_PRAGMA_WARNING_DISABLE_DEPRECATIONS GCC diagnostic ignored "-Wdeprecated"
++#define FFX_PRAGMA_WARNING_WARN_DEPRECATIONS GCC diagnostic warning "-Wdeprecated"
++#else
++#define FFX_PRAGMA_WARNING_PUSH 
++#define FFX_PRAGMA_WARNING_POP 
++#define FFX_PRAGMA_WARNING_DISABLE_DEPRECATIONS 
++#endif
++
++#define FFX_DEPRECATION(message) [[deprecated(message)]]
++
++#define FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1 0x0000001u
++struct FFX_DEPRECATION("Use ffxConfigureDescGlobalDebug instead of ffxConfigureDescGlobalDebug1.") ffxConfigureDescGlobalDebug1
++{
++    ffxConfigureDescHeader header;
++    ffxApiMessage          fpMessage;
++    uint32_t               debugLevel;
++};
++
++#if defined(__cplusplus)
++}
++#endif  // #if defined(__cplusplus)
+diff --git a/src/fsr4/include/ffx_api_types.h b/src/fsr4/include/ffx_api_types.h
+new file mode 100644
+index 00000000..380c4c0a
+--- /dev/null
++++ b/src/fsr4/include/ffx_api_types.h
+@@ -0,0 +1,257 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2026 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++
++#include <stdint.h>
++#include <stdbool.h>
++
++/// An enumeration of surface formats. Needs to match enum FfxApiSurfaceFormat
++enum FfxApiSurfaceFormat
++{
++    FFX_API_SURFACE_FORMAT_UNKNOWN,                     ///< Unknown format
++    FFX_API_SURFACE_FORMAT_R32G32B32A32_TYPELESS,       ///< 32 bit per channel, 4 channel typeless format
++    FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT,           ///< 32 bit per channel, 4 channel uint format
++    FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT,          ///< 32 bit per channel, 4 channel float format
++    FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT,          ///< 16 bit per channel, 4 channel float format
++    FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT,             ///< 32 bit per channel, 3 channel float format
++    FFX_API_SURFACE_FORMAT_R32G32_FLOAT,                ///< 32 bit per channel, 2 channel float format
++    FFX_API_SURFACE_FORMAT_R8_UINT,                     ///< 8 bit per channel, 1 channel float format
++    FFX_API_SURFACE_FORMAT_R32_UINT,                    ///< 32 bit per channel, 1 channel float format
++    FFX_API_SURFACE_FORMAT_R8G8B8A8_TYPELESS,           ///<  8 bit per channel, 4 channel typeless format
++    FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM,              ///<  8 bit per channel, 4 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_R8G8B8A8_SNORM,              ///<  8 bit per channel, 4 channel signed normalized format
++    FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB,               ///<  8 bit per channel, 4 channel srgb normalized
++    FFX_API_SURFACE_FORMAT_B8G8R8A8_TYPELESS,           ///<  8 bit per channel, 4 channel typeless format
++    FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM,              ///<  8 bit per channel, 4 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB,               ///<  8 bit per channel, 4 channel srgb normalized
++    FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT,             ///< 32 bit 3 channel float format
++    FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM,           ///< 10 bit per 3 channel, 2 bit for 1 channel normalized format
++    FFX_API_SURFACE_FORMAT_R16G16_FLOAT,                ///< 16 bit per channel, 2 channel float format
++    FFX_API_SURFACE_FORMAT_R16G16_UINT,                 ///< 16 bit per channel, 2 channel unsigned int format
++    FFX_API_SURFACE_FORMAT_R16G16_SINT,                 ///< 16 bit per channel, 2 channel signed int format
++    FFX_API_SURFACE_FORMAT_R16_FLOAT,                   ///< 16 bit per channel, 1 channel float format
++    FFX_API_SURFACE_FORMAT_R16_UINT,                    ///< 16 bit per channel, 1 channel unsigned int format
++    FFX_API_SURFACE_FORMAT_R16_UNORM,                   ///< 16 bit per channel, 1 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_R16_SNORM,                   ///< 16 bit per channel, 1 channel signed normalized format
++    FFX_API_SURFACE_FORMAT_R8_UNORM,                    ///<  8 bit per channel, 1 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_R8G8_UNORM,                  ///<  8 bit per channel, 2 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_R8G8_UINT,                   ///<  8 bit per channel, 2 channel unsigned integer format
++    FFX_API_SURFACE_FORMAT_R32_FLOAT,                   ///< 32 bit per channel, 1 channel float format
++    FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP,          ///<  9 bit per channel, 5 bit exponent format
++
++    FFX_API_SURFACE_FORMAT_R16G16B16A16_TYPELESS,       ///< 16 bit per channel, 4 channel typeless format
++    FFX_API_SURFACE_FORMAT_R32G32_TYPELESS,             ///< 32 bit per channel, 2 channel typeless format
++    FFX_API_SURFACE_FORMAT_R10G10B10A2_TYPELESS,        ///< 10 bit per 3 channel, 2 bit for 1 channel typeless format
++    FFX_API_SURFACE_FORMAT_R16G16_TYPELESS,             ///< 16 bit per channel, 2 channel typless format
++    FFX_API_SURFACE_FORMAT_R16_TYPELESS,                ///< 16 bit per channel, 1 channel typeless format
++    FFX_API_SURFACE_FORMAT_R8_TYPELESS,                 ///<  8 bit per channel, 1 channel typeless format
++    FFX_API_SURFACE_FORMAT_R8G8_TYPELESS,               ///<  8 bit per channel, 2 channel typeless format
++    FFX_API_SURFACE_FORMAT_R32_TYPELESS,                ///< 32 bit per channel, 1 channel typeless format
++    FFX_API_SURFACE_FORMAT_R32G32_UINT,                 ///< 32 bit per channel, 2 channel uint format
++    
++    FFX_API_SURFACE_FORMAT_R8_SNORM,                    ///<  8 bit per channel, 1 channel signed normalized format
++};
++
++/// An enumeration of resource usage.
++enum FfxApiResourceUsage
++{
++    FFX_API_RESOURCE_USAGE_READ_ONLY = 0,                   ///< No usage flags indicate a resource is read only.
++    FFX_API_RESOURCE_USAGE_RENDERTARGET = (1<<0),           ///< Indicates a resource will be used as render target.
++    FFX_API_RESOURCE_USAGE_UAV = (1<<1),                    ///< Indicates a resource will be used as UAV.
++    FFX_API_RESOURCE_USAGE_DEPTHTARGET = (1<<2),            ///< Indicates a resource will be used as depth target.
++    FFX_API_RESOURCE_USAGE_INDIRECT = (1<<3),               ///< Indicates a resource will be used as indirect argument buffer
++    FFX_API_RESOURCE_USAGE_ARRAYVIEW = (1<<4),              ///< Indicates a resource that will generate array views. Works on 2D and cubemap textures
++    FFX_API_RESOURCE_USAGE_STENCILTARGET = (1<<5),          ///< Indicates a resource will be used as stencil target.
++
++    FFX_API_RESOURCE_USAGE_DCC_RENDERTARGET = (1<<15),      ///< Indicates a resource that should specify optimal render target memory access flags (for console use)
++};
++
++
++/// An enumeration of resource states.
++enum FfxApiResourceState
++{
++    FFX_API_RESOURCE_STATE_COMMON               = (1 << 0),
++    FFX_API_RESOURCE_STATE_UNORDERED_ACCESS     = (1 << 1), ///< Indicates a resource is in the state to be used as UAV.
++    FFX_API_RESOURCE_STATE_COMPUTE_READ         = (1 << 2), ///< Indicates a resource is in the state to be read by compute shaders.
++    FFX_API_RESOURCE_STATE_PIXEL_READ           = (1 << 3), ///< Indicates a resource is in the state to be read by pixel shaders.
++    FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ   = (FFX_API_RESOURCE_STATE_PIXEL_READ | FFX_API_RESOURCE_STATE_COMPUTE_READ), ///< Indicates a resource is in the state to be read by pixel or compute shaders.
++    FFX_API_RESOURCE_STATE_COPY_SRC             = (1 << 4), ///< Indicates a resource is in the state to be used as source in a copy command.
++    FFX_API_RESOURCE_STATE_COPY_DEST            = (1 << 5), ///< Indicates a resource is in the state to be used as destination in a copy command.
++    FFX_API_RESOURCE_STATE_GENERIC_READ         = (FFX_API_RESOURCE_STATE_COPY_SRC | FFX_API_RESOURCE_STATE_COMPUTE_READ),  ///< Indicates a resource is in generic (slow) read state.
++    FFX_API_RESOURCE_STATE_INDIRECT_ARGUMENT    = (1 << 6), ///< Indicates a resource is in the state to be used as an indirect command argument
++    FFX_API_RESOURCE_STATE_PRESENT              = (1 << 7), ///< Indicates a resource is in the state to be used to present to the swap chain
++    FFX_API_RESOURCE_STATE_RENDER_TARGET        = (1 << 8), ///< Indicates a resource is in the state to be used as render target
++    FFX_API_RESOURCE_STATE_DEPTH_ATTACHMENT     = (1 << 9), ///< Indicates a resource is in the state to be used as depth attachment
++};
++
++/// An enumeration of surface dimensions.
++enum FfxApiResourceDimension
++{
++    FFX_API_RESOURCE_DIMENSION_TEXTURE_1D,              ///< A resource with a single dimension.
++    FFX_API_RESOURCE_DIMENSION_TEXTURE_2D,              ///< A resource with two dimensions.
++};
++
++/// An enumeration of resource flags.
++enum FfxApiResourceFlags
++{
++    FFX_API_RESOURCE_FLAGS_NONE             = 0,            ///< No flags.
++    FFX_API_RESOURCE_FLAGS_ALIASABLE        = (1 << 0),     ///< A bit indicating a resource does not need to persist across frames.
++    FFX_API_RESOURCE_FLAGS_UNDEFINED        = (1 << 1),     ///< Special case flag used internally when importing resources that require additional setup
++};
++
++// An enumeration for different resource types
++enum FfxApiResourceType
++{
++    FFX_API_RESOURCE_TYPE_BUFFER,                       ///< The resource is a buffer.
++    FFX_API_RESOURCE_TYPE_TEXTURE1D,                    ///< The resource is a 1-dimensional texture.
++    FFX_API_RESOURCE_TYPE_TEXTURE2D,                    ///< The resource is a 2-dimensional texture.
++    FFX_API_RESOURCE_TYPE_TEXTURE_CUBE,                 ///< The resource is a cube map.
++    FFX_API_RESOURCE_TYPE_TEXTURE3D,                    ///< The resource is a 3-dimensional texture.
++};
++
++enum FfxApiBackbufferTransferFunction
++{
++    FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB,
++    FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ,
++    FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB
++};
++
++/// A structure encapsulating a 2-dimensional point, using 32bit unsigned integers.
++struct FfxApiDimensions2D
++{
++    uint32_t width;  ///< The width of a 2-dimensional range.
++    uint32_t height; ///< The height of a 2-dimensional range.
++};
++
++/// A structure encapsulating a 2-dimensional set of floating point coordinates.
++struct FfxApiFloatCoords2D
++{
++    float x; ///< The x coordinate of a 2-dimensional point.
++    float y; ///< The y coordinate of a 2-dimensional point.
++};
++
++/// A structure encapsulating a 3-dimensional set of floating point coordinates.
++struct FfxApiFloatCoords3D
++{
++    float x;  ///< The x coordinate of a 3-dimensional point.
++    float y;  ///< The y coordinate of a 3-dimensional point.
++    float z;  ///< The z coordinate of a 3-dimensional point.
++};
++
++/// A structure encapsulating a 2-dimensional rect.
++struct FfxApiRect2D
++{
++    int32_t left;
++    int32_t top;
++    int32_t width;
++    int32_t height;
++};
++
++/// A structure describing a resource.
++///
++/// @ingroup SDKTypes
++struct FfxApiResourceDescription
++{
++    uint32_t     type;      ///< The type of the resource.
++    uint32_t     format;    ///< The surface format.
++    union {
++        uint32_t width;     ///< The width of the texture resource.
++        uint32_t size;      ///< The size of the buffer resource.
++    };
++
++    union {
++        uint32_t height;    ///< The height of the texture resource.
++        uint32_t stride;    ///< The stride of the buffer resource.
++    };
++
++    union {
++        uint32_t depth;     ///< The depth of the texture resource.
++        uint32_t alignment; ///< The alignment of the buffer resource.
++    };
++
++    uint32_t     mipCount;  ///< Number of mips (or 0 for full mipchain).
++    uint32_t     flags;     ///< A set of resource flags.
++    uint32_t     usage;     ///< Resource usage flags.
++};
++
++#define FFX_RESOURCE_NAME_SIZE 64
++
++struct FfxApiResource
++{
++    void* resource;
++    struct FfxApiResourceDescription description;
++    uint32_t state;
++};
++
++//struct definition matches FfxApiEffectMemoryUsage
++typedef struct FfxApiEffectMemoryUsage
++{
++    uint64_t totalUsageInBytes;
++    uint64_t aliasableUsageInBytes;
++} FfxApiEffectMemoryUsage;
++
++/// A structure describing a constant buffer allocation.
++///
++/// @ingroup SDKTypes
++typedef struct FfxApiConstantBufferAllocation
++{
++    struct FfxApiResource resource;  ///< The resource representing the constant buffer resource.
++    uint64_t       handle;    ///< The binding handle for the constant buffer
++
++} FfxApiConstantBufferAllocation;
++
++/// A function definition for a constant buffer allocation callback
++/// Used to provide a constant buffer allocator to the calling backend
++///
++/// @param [in] data                       The constant buffer data.
++/// @param [in] dataSize                   The size of the constant buffer data.
++///
++/// @ingroup SDKTypes
++typedef FfxApiConstantBufferAllocation(*FfxApiConstantBufferAllocator)(void* data, const uint64_t dataSize);
++
++/// A 4-component floating point vector
++typedef struct FfxApiFloat4
++{
++    float x;
++    float y;
++    float z;
++    float w;
++} FfxApiFloat4;
++
++/// A 4x4 matrix in row-major layout with row-vector convention.
++/// This is the canonical format expected by FFX APIs.
++/// 
++/// Memory layout: rows[row_index][column_index]
++/// Mathematical convention: v * M (row vector multiplied by matrix)
++typedef struct FfxApiMatrix4x4
++{
++    FfxApiFloat4 rows[4];  ///< Four rows of the matrix. Access as rows[row].x, rows[row].y etc.
++} FfxApiMatrix4x4;
++
++/// An inclusive floating-point interval [min, max].
++/// Valid instances must satisfy min <= max.
++typedef struct FfxApiFloatBounds
++{
++    float min; ///< Lower bound of the interval.
++    float max; ///< Upper bound of the interval.
++} FfxApiFloatBounds;
+diff --git a/src/fsr4/include/ffx_upscale.h b/src/fsr4/include/ffx_upscale.h
+new file mode 100644
+index 00000000..c671a5a4
+--- /dev/null
++++ b/src/fsr4/include/ffx_upscale.h
+@@ -0,0 +1,230 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2026 Advanced Micro Devices, Inc.
++//
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++#include "ffx_api.h"
++#include "ffx_api_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define FFX_UPSCALER_VERSION_MAJOR 4
++#define FFX_UPSCALER_VERSION_MINOR 1
++#define FFX_UPSCALER_VERSION_PATCH 2
++
++#define FFX_UPSCALER_MAKE_VERSION(major, minor, patch) (((major) << 22) | ((minor) << 12) | (patch))
++#define FFX_UPSCALER_VERSION                           FFX_UPSCALER_MAKE_VERSION(FFX_UPSCALER_VERSION_MAJOR, FFX_UPSCALER_VERSION_MINOR, FFX_UPSCALER_VERSION_PATCH)
++
++enum FfxApiUpscaleQualityMode
++{
++    FFX_UPSCALE_QUALITY_MODE_NATIVEAA          = 0,  ///< Perform upscaling with a per-dimension upscaling ratio of 1.0x.
++    FFX_UPSCALE_QUALITY_MODE_QUALITY           = 1,  ///< Perform upscaling with a per-dimension upscaling ratio of 1.5x.
++    FFX_UPSCALE_QUALITY_MODE_BALANCED          = 2,  ///< Perform upscaling with a per-dimension upscaling ratio of 1.7x.
++    FFX_UPSCALE_QUALITY_MODE_PERFORMANCE       = 3,  ///< Perform upscaling with a per-dimension upscaling ratio of 2.0x.
++    FFX_UPSCALE_QUALITY_MODE_ULTRA_PERFORMANCE = 4   ///< Perform upscaling with a per-dimension upscaling ratio of 3.0x.
++};
++
++enum FfxApiCreateContextUpscaleFlags
++{
++    FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE                 = (1 << 0),  ///< A bit indicating if the input color data provided is using a high-dynamic range.
++    FFX_UPSCALE_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS  = (1 << 1),  ///< A bit indicating if the motion vectors are rendered at display resolution.
++    FFX_UPSCALE_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION = (1 << 2),  ///< A bit indicating that the motion vectors have the jittering pattern applied to them.
++    FFX_UPSCALE_ENABLE_DEPTH_INVERTED                     = (1 << 3),  ///< A bit indicating that the input depth buffer data provided is inverted [1..0].
++    FFX_UPSCALE_ENABLE_DEPTH_INFINITE                     = (1 << 4),  ///< A bit indicating that the input depth buffer data provided is using an infinite far plane.
++    FFX_UPSCALE_ENABLE_AUTO_EXPOSURE                      = (1 << 5),  ///< A bit indicating if automatic exposure should be applied to input color data.
++    FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION                 = (1 << 6),  ///< A bit indicating that the application uses dynamic resolution scaling.
++    FFX_UPSCALE_ENABLE_DEBUG_CHECKING                     = (1 << 7),  ///< A bit indicating that the runtime should check some API values and report issues.
++    FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE              = (1 << 8),  ///< A bit indicating that the color resource contains perceptual (gamma corrected) colors
++    FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION                = (1 << 9),  ///< A bit indicating if debug visualization is allowed. (memory consumption could increase)
++};
++
++enum FfxApiDispatchFsrUpscaleFlags
++{
++    FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW       = (1 << 0),  ///< A bit indicating that the output resource will contain debug views with relevant information.
++    FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB = (1 << 1),  ///< A bit indicating that the input color resource contains perceptual sRGB colors
++    FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_PQ   = (1 << 2),  ///< A bit indicating that the input color resource contains perceptual PQ colors
++};
++
++enum FfxApiDispatchUpscaleAutoreactiveFlags
++{
++    FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_TONEMAP        = (1 << 0),  ///< Apply tonemapping function prior to calculating reactivity.
++    FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_INVERSETONEMAP = (1 << 1),  ///< Apply inverse tonemapping function prior to calculating reactivity.
++    FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_THRESHOLD      = (1 << 2),  ///< Compare to a threshold value and only record reactivity above the threshold.
++    FFX_UPSCALE_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX   = (1 << 3),  ///< When enabled use the max. component value, otherwise use the length to calculate reactivity.
++};
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x00)
++struct ffxCreateContextDescUpscale
++{
++    ffxCreateContextDescHeader header;          ///< Header descriptor, use type FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE.
++    uint32_t                   flags;           ///< Zero or a combination of values from FfxApiCreateContextUpscaleFlags.
++    struct FfxApiDimensions2D  maxRenderSize;   ///< The maximum size that rendering will be performed at.
++    struct FfxApiDimensions2D  maxUpscaleSize;  ///< The size of the presentation resolution targeted by the upscaling process.
++    ffxApiMessage              fpMessage;       ///< A pointer to a function that can receive messages from the runtime. May be null.
++};
++
++#define FFX_API_DISPATCH_DESC_TYPE_UPSCALE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x01)
++struct ffxDispatchDescUpscale
++{
++    ffxDispatchDescHeader      header;                      ///< Header descriptor, use type FFX_API_DISPATCH_DESC_TYPE_UPSCALE.
++    void*                      commandList;                 ///< Command list to record upscaling rendering commands into.
++    struct FfxApiResource      color;                       ///< Color buffer for the current frame (at render resolution).
++    struct FfxApiResource      depth;                       ///< 32bit depth values for the current frame (at render resolution).
++    struct FfxApiResource      motionVectors;               ///< 2-dimensional motion vectors (at render resolution if <c><i>FFX_FSR_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS</i></c> is not set).
++    struct FfxApiResource      exposure;                    ///< Optional resource containing a 1x1 exposure value.
++    struct FfxApiResource      reactive;                    ///< Optional resource containing alpha value of reactive objects in the scene.
++    struct FfxApiResource      transparencyAndComposition;  ///< Optional resource containing alpha value of special objects in the scene.
++    struct FfxApiResource      output;                      ///< Output color buffer for the current frame (at presentation resolution).
++    struct FfxApiFloatCoords2D jitterOffset;                ///< The subpixel jitter offset applied to the camera.
++    struct FfxApiFloatCoords2D motionVectorScale;           ///< The scale factor to convert motion vectors to pixel space. Internally: pixelSpaceMV = motionVector * motionVectorScale. Set to renderSize if motion vectors are in UV space [0,1], or to (1.0, 1.0) if motion vectors are already in pixel space. When using display-resolution motion vectors, set to displaySize.
++    struct FfxApiDimensions2D  renderSize;                  ///< The resolution that was used for rendering the input resources.
++    struct FfxApiDimensions2D  upscaleSize;                 ///< The resolution that the upscaler will upscale to (optional, assumed maxUpscaleSize otherwise).
++    bool                       enableSharpening;            ///< Enable an additional sharpening pass.
++    float                      sharpness;                   ///< The sharpness value between 0 and 1, where 0 is no additional sharpness and 1 is maximum additional sharpness.
++    float                      frameTimeDelta;              ///< The time elapsed since the last frame (expressed in milliseconds).
++    float                      preExposure;                 ///< The pre exposure value (must be > 0.0f)
++    bool                       reset;                       ///< A boolean value which when set to true, indicates the camera has moved discontinuously.
++    float                      cameraNear;                  ///< The distance to the near plane of the camera.
++    float                      cameraFar;                   ///< The distance to the far plane of the camera.
++    float                      cameraFovAngleVertical;      ///< The camera angle field of view in the vertical direction (expressed in radians).
++    float                      viewSpaceToMetersFactor;     ///< The scale factor to convert view space units to meters
++    uint32_t                   flags;                       ///< Zero or a combination of values from FfxApiDispatchFsrUpscaleFlags.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GETUPSCALERATIOFROMQUALITYMODE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x02)
++struct ffxQueryDescUpscaleGetUpscaleRatioFromQualityMode
++{
++    ffxQueryDescHeader header;            ///< Header descriptor, use type FFX_API_QUERY_DESC_TYPE_UPSCALE_GETUPSCALERATIOFROMQUALITYMODE.
++    uint32_t           qualityMode;       ///< The desired quality mode for FSR upscaling.
++    float*             pOutUpscaleRatio;  ///< A pointer to a <c>float</c> which will hold the upscaling the per-dimension upscaling ratio.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GETRENDERRESOLUTIONFROMQUALITYMODE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x03)
++struct ffxQueryDescUpscaleGetRenderResolutionFromQualityMode
++{
++    ffxQueryDescHeader header;            ///< Header descriptor, use type FFX_API_QUERY_DESC_TYPE_UPSCALE_GETRENDERRESOLUTIONFROMQUALITYMODE.
++    uint32_t           displayWidth;      ///< The target display resolution width.
++    uint32_t           displayHeight;     ///< The target display resolution height.
++    uint32_t           qualityMode;       ///< The desired quality mode for FSR upscaling.
++    uint32_t*          pOutRenderWidth;   ///< A pointer to a <c>uint32_t</c> which will hold the calculated render resolution width.
++    uint32_t*          pOutRenderHeight;  ///< A pointer to a <c>uint32_t</c> which will hold the calculated render resolution height.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTERPHASECOUNT FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x04)
++struct ffxQueryDescUpscaleGetJitterPhaseCount
++{
++    ffxQueryDescHeader header;          ///< Header descriptor, use type FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTERPHASECOUNT.
++    uint32_t           renderWidth;     ///< The render resolution width.
++    uint32_t           displayWidth;    ///< The output resolution width.
++    int32_t*           pOutPhaseCount;  ///< A pointer to a <c>int32_t</c> which will hold the jitter phase count for the scaling factor between <c><i>renderWidth</i></c> and <c><i>displayWidth</i></c>.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTEROFFSET FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x05)
++struct ffxQueryDescUpscaleGetJitterOffset
++{
++    ffxQueryDescHeader header;      ///< Header descriptor, use type FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTEROFFSET.
++    int32_t            index;       ///< The index within the jitter sequence.
++    int32_t            phaseCount;  ///< The length of jitter phase. See <c><i>ffxQueryDescFsrGetJitterPhaseCount</i></c>.
++    float*             pOutX;       ///< A pointer to a <c>float</c> which will contain the subpixel jitter offset for the x dimension.
++    float*             pOutY;       ///< A pointer to a <c>float</c> which will contain the subpixel jitter offset for the y dimension.
++};
++
++#define FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x06)
++struct ffxDispatchDescUpscaleGenerateReactiveMask
++{
++    ffxDispatchDescHeader     header;           ///< Header descriptor, use type FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK.
++    void*                     commandList;      ///< The <c><i>FfxCommandList</i></c> to record FSRUPSCALE rendering commands into.
++    struct FfxApiResource     colorOpaqueOnly;  ///< A <c><i>FfxApiResource</i></c> containing the opaque only color buffer for the current frame (at render resolution).
++    struct FfxApiResource     colorPreUpscale;  ///< A <c><i>FfxApiResource</i></c> containing the opaque+translucent color buffer for the current frame (at render resolution).
++    struct FfxApiResource     outReactive;      ///< A <c><i>FfxApiResource</i></c> containing the surface to generate the reactive mask into.
++    struct FfxApiDimensions2D renderSize;       ///< The resolution that was used for rendering the input resources.
++    float                     scale;            ///< A value to scale the output
++    float                     cutoffThreshold;  ///< A threshold value to generate a binary reactive mask
++    float                     binaryValue;      ///< A value to set for the binary reactive mask
++    uint32_t                  flags;            ///< Flags to determine how to generate the reactive mask
++};
++
++#define FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x07)
++struct ffxConfigureDescUpscaleKeyValue
++{
++    ffxConfigureDescHeader header;  ///< Header descriptor, use type FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE.
++    uint64_t               key;     ///< Configuration key, member of the FfxApiConfigureUpscaleKey enumeration.
++    uint64_t               u64;     ///< Integer value or enum value to set.
++    void*                  ptr;     ///< Pointer to set or pointer to value to set.
++};
++
++enum FfxApiConfigureUpscaleKey
++{
++    FFX_API_CONFIGURE_UPSCALE_KEY_FVELOCITYFACTOR              = 0,  ///< Override constant buffer fVelocityFactor. The float value is casted from void * ptr. Value of 0.0f can improve temporal stability of bright pixels. Default value is 1.0f. Value is clamped to [0.0f, 1.0f].
++    FFX_API_CONFIGURE_UPSCALE_KEY_FREACTIVENESSSCALE           = 1,  ///< Override constant buffer fReactivenessScale. The float value is casted from void * ptr. Meant for development purpose to test if writing a larger value to reactive mask, reduces ghosting. Default value is 1.0f. Value is clamped to [0.0f, +infinity].
++    FFX_API_CONFIGURE_UPSCALE_KEY_FSHADINGCHANGESCALE          = 2,  ///< Override fShadingChangeScale. Increasing this scales fsr3.1 computed shading change value at read to have higher reactiveness. Default value is 1.0f. Value is clamped to [0.0f, +infinity].
++    FFX_API_CONFIGURE_UPSCALE_KEY_FACCUMULATIONADDEDPERFRAME   = 3,  ///< Override constant buffer fAccumulationAddedPerFrame. Corresponds to amount of accumulation added per frame at pixel coordinate where disocclusion occured or when reactive mask value is > 0.0f. Decreasing this and drawing the ghosting object (IE no mv) to reactive mask with value close to 1.0f can decrease temporal ghosting. Decreasing this value could result in more thin feature pixels flickering. Default value is 0.333. Value is clamped to [0.0f, 1.0f].
++    FFX_API_CONFIGURE_UPSCALE_KEY_FMINDISOCCLUSIONACCUMULATION = 4,  ///< Override constant buffer fMinDisocclusionAccumulation. Increasing this value may reduce white pixel temporal flickering around swaying thin objects that are disoccluding one another often. Too high value may increase ghosting. A sufficiently negative value means for pixel coordinate at frame N that is disoccluded, add fAccumulationAddedPerFrame starting at frame N+2. Default value is -0.333. Value is clamped to [-1.0f, 1.0f].
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x08)
++struct ffxQueryDescUpscaleGetGPUMemoryUsage
++{
++    ffxQueryDescHeader              header;                 ///< Header descriptor, use type FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE.
++    struct FfxApiEffectMemoryUsage* gpuMemoryUsageUpscaler; ///< Output values by Query() call.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE_V2 FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x09)
++struct ffxQueryDescUpscaleGetGPUMemoryUsageV2
++{
++    ffxQueryDescHeader              header;                  ///< Header descriptor, use type FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE_V2.
++    void*                           device;                  ///< For DX12: pointer to ID3D12Device. For VK, pointer to VkDeviceContext. App needs to fill out before Query() call.
++    struct FfxApiDimensions2D       maxRenderSize;           ///< App needs to fill out before Query() call.
++    struct FfxApiDimensions2D       maxUpscaleSize;          ///< App needs to fill out before Query() call.
++    uint32_t                        flags;                   ///< Zero or a combination of values from FfxApiCreateContextUpscaleFlags. App needs to fill out before Query() call.
++    struct FfxApiEffectMemoryUsage* gpuMemoryUsageUpscaler;  ///< Output values by Query() call.
++};
++
++enum FfxApiQueryResourceIdentifiers
++{
++    FFX_API_QUERY_RESOURCE_INPUT_COLOR                   = (1 << 0),  ///< Color buffer for the current frame (at render resolution).
++    FFX_API_QUERY_RESOURCE_INPUT_DEPTH                   = (1 << 1),  ///< 32bit depth values for the current frame (at render resolution).
++    FFX_API_QUERY_RESOURCE_INPUT_MV                      = (1 << 2),  ///< 2-dimensional motion vectors (at render resolution if FFX_FSR_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS is not set).
++    FFX_API_QUERY_RESOURCE_INPUT_EXPOSURE                = (1 << 3),  ///< A 1x1 texture containing exposure value or the FFX_UPSCALE_ENABLE_AUTO_EXPOSURE set at context creation.
++    FFX_API_QUERY_RESOURCE_INPUT_REACTIVEMASK            = (1 << 4),  ///< An R8 UNORM texture at render resolution that controls the influence of pixel history on upscaling result.
++    FFX_API_QUERY_RESOURCE_INPUT_TRANSPARENCYCOMPOSITION = (1 << 5),  ///< An R8 UNORM texture at render resolution that controls the blending of color in the upscaling result.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GET_RESOURCE_REQUIREMENTS FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x0a)
++struct ffxQueryDescUpscaleGetResourceRequirements
++{
++    ffxQueryDescHeader header;              ///< Header descriptor, use type FFX_API_QUERY_DESC_TYPE_UPSCALE_GET_RESOURCE_REQUIREMENTS.
++    uint64_t           required_resources;  ///< resources 64b bitfield, that given current context state, are required for effect correctness.
++    uint64_t           optional_resources;  ///< resources 64b bitfield, that given current context state, will be consumed if provided, but are optional.
++};
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_UPSCALE, 0x0b)
++struct ffxCreateContextDescUpscaleVersion
++{
++    ffxCreateContextDescHeader header;   ///< Header descriptor, use type FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION.
++    uint32_t                   version;  ///< The version of the API the application was built against. This must be set to FFX_UPSCALER_VERSION.
++};
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/fsr4/include/vk/ffx_api_vk.h b/src/fsr4/include/vk/ffx_api_vk.h
+new file mode 100644
+index 00000000..1bbe1d9e
+--- /dev/null
++++ b/src/fsr4/include/vk/ffx_api_vk.h
+@@ -0,0 +1,308 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2026 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++#include "../ffx_api.h"
++#include "../ffx_api_types.h"
++#include <vulkan/vulkan.h>
++
++/// FFX specific callback type when submitting a command buffer to a queue.
++typedef VkResult(*PFN_vkQueueSubmitFFXAPI)(uint32_t submitCount, const VkSubmitInfo* pSubmits, VkFence fence);
++
++/// Helper stucture
++struct VkQueueInfoFFXAPI
++{
++    VkQueue                 queue;        ///< the vulkan queue
++    uint32_t                familyIndex;  ///< the queue family index, that will be used to perform queue family ownership transfer
++    PFN_vkQueueSubmitFFXAPI submitFunc;   ///< an optional submit function in case there might be some concurrent submissions
++};
++
++// We need to keep this one alive because of VK verison of FSR3.1.4
++// Deprecated version of the VK backend create context descriptor, please use the non-deprecated version below.
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_DEPRECATED 0x0000003u
++struct ffxCreateBackendVKDesc_DEPRECATED
++{
++    ffxCreateContextDescHeader header;
++    VkDevice                   vkDevice;          ///< the logical device used by the program.
++    VkPhysicalDevice           vkPhysicalDevice;  ///< the physical device used by the program.
++    PFN_vkGetDeviceProcAddr    vkDeviceProcAddr;  ///< function pointer to get device procedure addresses
++};
++
++/// Convenience structure to hold all VK-related device information.
++typedef struct VkDeviceContext {
++    VkDevice                vkDevice;           ///< The Vulkan device
++    VkPhysicalDevice        vkPhysicalDevice;   ///< The Vulkan physical device
++    PFN_vkGetDeviceProcAddr vkDeviceProcAddr;   ///< The device's function address table
++} VkDeviceContext;
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK FFX_API_MAKE_BACKEND_SUB_ID(FFX_API_BACKEND_ID_VK, 0x03)
++struct ffxCreateBackendVKDesc
++{
++    ffxCreateContextDescHeader header;
++    VkDeviceContext            deviceContext;     ///< the VK device information used by the program.
++};
++
++/// Resource allocation callback function. (TODO)
++typedef ffxReturnCode_t(*PfnFfxResourceAllocatorFunc)(uint32_t effectId/*,
++    D3D12_RESOURCE_STATES            initialState,
++    const D3D12_HEAP_PROPERTIES* pHeapProps,
++    const D3D12_RESOURCE_DESC* pD3DDesc,
++    const FfxApiResourceDescription* pFfxDesc,
++    const D3D12_CLEAR_VALUE* pOptimizedClear,
++    ID3D12Resource** ppD3DResource*/);
++
++/// Resource destruction callback function. (TODO)
++typedef ffxReturnCode_t(*PfnFfxResourceDeallocatorFunc)(uint32_t effectId/*, ID3D12Resource* pResource*/);
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_ALLOCATION_CALLBACKS FFX_API_MAKE_BACKEND_SUB_ID(FFX_API_BACKEND_ID_VK, 0x04)
++struct ffxCreateBackendVKAllocationCallbacksDesc
++{
++	ffxCreateContextDescHeader    header;
++    PfnFfxResourceAllocatorFunc   pfnFfxResourceAllocator;        ///< Resource allocation function (can be null)      <------- NOT IMPL YET, SEE DX12/XBOX IMPL
++    PfnFfxResourceDeallocatorFunc pfnFfxResourceDeallocator;      ///< Resource deallocation function (can be null)     <------- NOT IMPL YET, SEE DX12/XBOX IMPL
++    FfxApiConstantBufferAllocator pfnFfxConstantBufferAllocator;  ///< Constant buffer allocation function (can be null)
++};
++
++#if defined(__cplusplus)
++
++static inline uint32_t ffxApiGetSurfaceFormatVK(VkFormat fmt)
++{
++    switch (fmt)
++    {
++    case VK_FORMAT_R32G32B32A32_SFLOAT:
++        return FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT;
++    case VK_FORMAT_R32G32B32_SFLOAT:
++        return FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT;
++    case VK_FORMAT_R32G32B32A32_UINT:
++        return FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT;
++    case VK_FORMAT_R16G16B16A16_SFLOAT:
++        return FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
++    case VK_FORMAT_R32G32_SFLOAT:
++        return FFX_API_SURFACE_FORMAT_R32G32_FLOAT;
++    case VK_FORMAT_R32_UINT:
++    case VK_FORMAT_D24_UNORM_S8_UINT:
++    case VK_FORMAT_X8_D24_UNORM_PACK32:
++        return FFX_API_SURFACE_FORMAT_R32_UINT;
++    case VK_FORMAT_R8G8B8A8_UNORM:
++        return FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
++    case VK_FORMAT_R8G8B8A8_SNORM:
++        return FFX_API_SURFACE_FORMAT_R8G8B8A8_SNORM;
++    case VK_FORMAT_R8G8B8A8_SRGB:
++        return FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB;
++    case VK_FORMAT_B8G8R8A8_UNORM:
++        return FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM;
++    case VK_FORMAT_B8G8R8A8_SRGB:
++        return FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB;
++    case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
++        return FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT;
++    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
++        return FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM;
++    case VK_FORMAT_R16G16_SFLOAT:
++        return FFX_API_SURFACE_FORMAT_R16G16_FLOAT;
++    case VK_FORMAT_R16G16_UINT:
++        return FFX_API_SURFACE_FORMAT_R16G16_UINT;
++    case VK_FORMAT_R16G16_SINT:
++        return FFX_API_SURFACE_FORMAT_R16G16_SINT;
++    case VK_FORMAT_R16_SFLOAT:
++        return FFX_API_SURFACE_FORMAT_R16_FLOAT;
++    case VK_FORMAT_R16_UINT:
++        return FFX_API_SURFACE_FORMAT_R16_UINT;
++    case VK_FORMAT_R16_UNORM:
++    case VK_FORMAT_D16_UNORM:
++    case VK_FORMAT_D16_UNORM_S8_UINT:
++        return FFX_API_SURFACE_FORMAT_R16_UNORM;
++    case VK_FORMAT_R16_SNORM:
++        return FFX_API_SURFACE_FORMAT_R16_SNORM;
++    case VK_FORMAT_R8_UNORM:
++        return FFX_API_SURFACE_FORMAT_R8_UNORM;
++    case VK_FORMAT_R8_SNORM:
++        return FFX_API_SURFACE_FORMAT_R8_SNORM;
++    case VK_FORMAT_R8_UINT:
++    case VK_FORMAT_S8_UINT:
++        return FFX_API_SURFACE_FORMAT_R8_UINT;
++    case VK_FORMAT_R8G8_UNORM:
++        return FFX_API_SURFACE_FORMAT_R8G8_UNORM;
++    case VK_FORMAT_R8G8_UINT:
++        return FFX_API_SURFACE_FORMAT_R8G8_UINT;
++    case VK_FORMAT_R32_SFLOAT:
++    case VK_FORMAT_D32_SFLOAT:
++    case VK_FORMAT_D32_SFLOAT_S8_UINT:
++        return FFX_API_SURFACE_FORMAT_R32_FLOAT;
++    case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
++        return FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP;
++    case VK_FORMAT_UNDEFINED:
++        return FFX_API_SURFACE_FORMAT_UNKNOWN;
++
++    default:
++        // NOTE: we do not support typeless formats here
++        //FFX_ASSERT_MESSAGE(false, "Format not yet supported");
++        return FFX_API_SURFACE_FORMAT_UNKNOWN;
++    }
++}
++
++static inline uint32_t ffxApiGetSurfaceFormatToGamma(uint32_t fmt)
++{
++    switch (fmt)
++    {
++    case (FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM):
++        return FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB;
++    case (FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM):
++        return FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB;
++    default:
++        return fmt;
++    }
++}
++
++static inline bool ffxApiIsDepthFormat(VkFormat fmt)
++{
++    switch (fmt)
++    {
++    case VK_FORMAT_D16_UNORM:
++    case VK_FORMAT_X8_D24_UNORM_PACK32:
++    case VK_FORMAT_D32_SFLOAT:
++    case VK_FORMAT_D16_UNORM_S8_UINT:
++    case VK_FORMAT_D24_UNORM_S8_UINT:
++    case VK_FORMAT_D32_SFLOAT_S8_UINT:
++        return true;
++
++    default:
++        return false;
++    }
++}
++
++static inline bool ffxApiIsStencilFormat(VkFormat fmt)
++{
++    switch (fmt)
++    {
++    case VK_FORMAT_S8_UINT:
++    case VK_FORMAT_D16_UNORM_S8_UINT:
++    case VK_FORMAT_D24_UNORM_S8_UINT:
++    case VK_FORMAT_D32_SFLOAT_S8_UINT:
++        return true;
++
++    default:
++        return false;
++    }
++}
++
++static inline FfxApiResourceDescription ffxApiGetBufferResourceDescriptionVK(const VkBuffer           buffer,
++    const VkBufferCreateInfo createInfo,
++    uint32_t                 additionalUsages)
++{
++    FfxApiResourceDescription resourceDescription = {};
++
++    // This is valid
++    if (buffer == VK_NULL_HANDLE)
++        return resourceDescription;
++
++    resourceDescription.flags = FFX_API_RESOURCE_FLAGS_NONE;
++    resourceDescription.usage = additionalUsages;
++    resourceDescription.size = (uint32_t)createInfo.size;
++    resourceDescription.stride = 0;
++    resourceDescription.format = FFX_API_SURFACE_FORMAT_UNKNOWN;
++
++    if ((createInfo.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0)
++        resourceDescription.usage |= FFX_API_RESOURCE_USAGE_UAV;
++    if ((createInfo.usage & VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT) != 0)
++        resourceDescription.usage |= FFX_API_RESOURCE_USAGE_INDIRECT;
++
++    // What should we initialize this to?? No case for this yet
++    resourceDescription.depth = 0;
++    resourceDescription.mipCount = 0;
++
++    // Set the type
++    resourceDescription.type = FFX_API_RESOURCE_TYPE_BUFFER;
++
++    return resourceDescription;
++}
++
++static inline FfxApiResourceDescription ffxApiGetImageResourceDescriptionVK(const VkImage image, const VkImageCreateInfo createInfo, uint32_t additionalUsages)
++{
++    FfxApiResourceDescription resourceDescription = {};
++
++    // This is valid
++    if (image == VK_NULL_HANDLE)
++        return resourceDescription;
++
++    // Set flags properly for resource registration
++    resourceDescription.flags = FFX_API_RESOURCE_FLAGS_NONE;
++    resourceDescription.usage = FFX_API_RESOURCE_USAGE_READ_ONLY;
++
++    // Check for depth stencil use
++    if (ffxApiIsDepthFormat(createInfo.format))
++        resourceDescription.usage |= FFX_API_RESOURCE_USAGE_DEPTHTARGET;
++    if (ffxApiIsStencilFormat(createInfo.format))
++        resourceDescription.usage |= FFX_API_RESOURCE_USAGE_STENCILTARGET;
++
++    // Unordered access use
++    if ((createInfo.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0)
++        resourceDescription.usage |= FFX_API_RESOURCE_USAGE_UAV;
++
++    // Resource-specific supplemental use flags
++    resourceDescription.usage |= additionalUsages;
++
++    resourceDescription.width = createInfo.extent.width;
++    resourceDescription.height = createInfo.extent.height;
++    resourceDescription.mipCount = createInfo.mipLevels;
++    resourceDescription.format = ffxApiGetSurfaceFormatVK(createInfo.format);
++
++    // if the mutable flag is present, assume that the real format is sRGB
++    if ((createInfo.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) != 0)
++        resourceDescription.format = ffxApiGetSurfaceFormatToGamma(resourceDescription.format);
++
++    switch (createInfo.imageType)
++    {
++    case VK_IMAGE_TYPE_1D:
++        resourceDescription.type = FFX_API_RESOURCE_TYPE_TEXTURE1D;
++        break;
++    case VK_IMAGE_TYPE_2D:
++        resourceDescription.depth = createInfo.arrayLayers;
++        if ((additionalUsages & FFX_API_RESOURCE_USAGE_ARRAYVIEW) != 0)
++            resourceDescription.type = FFX_API_RESOURCE_TYPE_TEXTURE2D;
++        else if ((createInfo.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0)
++            resourceDescription.type = FFX_API_RESOURCE_TYPE_TEXTURE_CUBE;
++        else
++            resourceDescription.type = FFX_API_RESOURCE_TYPE_TEXTURE2D;
++        break;
++    case VK_IMAGE_TYPE_3D:
++        resourceDescription.depth = createInfo.extent.depth;
++        resourceDescription.type = FFX_API_RESOURCE_TYPE_TEXTURE3D;
++        break;
++    default:
++        //FFX_ASSERT_MESSAGE(false, "FFXInterface: VK: Unsupported texture dimension requested. Please implement.");
++        break;
++    }
++
++    return resourceDescription;
++}
++
++static inline FfxApiResource ffxApiGetResourceVK(void* vkResource, FfxApiResourceDescription ffxResDescription, uint32_t state)
++{
++    FfxApiResource resource = {};
++    resource.resource = vkResource;
++    resource.state = state;
++    resource.description = ffxResDescription;
++
++    return resource;
++}
++
++#endif
+diff --git a/src/graphics/host_gpu/renderer/cache/textureCache.cpp b/src/graphics/host_gpu/renderer/cache/textureCache.cpp
+index aa95affc..6652efc9 100644
+--- a/src/graphics/host_gpu/renderer/cache/textureCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/textureCache.cpp
+@@ -48,6 +48,9 @@
+ #include <memory>
+ #include <mutex>
+ #include <span>
++#if !defined(_WIN32)
++#include <execinfo.h>
++#endif
+ #include <string>
+ #include <tuple>
+ #include <unordered_map>
+@@ -740,6 +743,32 @@ bool TextureCache::SafeToSyncIntoBuffer(const Image& image) {
+ 
+ ImageId TextureCache::InsertImage(const ImageInfo& info, uint32_t resident_first,
+                                   uint64_t resident_prefix) {
++#if !defined(_WIN32)
++	// ASTROHYBRID_TARGET_LOG=1: list newly created large images with their guest backing and
++	// host/guest call chain. Used to find the scene render target's creation path.
++	static const bool target_log = [] {
++		const char* value = std::getenv("ASTROHYBRID_TARGET_LOG");
++		return value != nullptr && value[0] != '\0';
++	}();
++	if (target_log && info.extent.width >= 1280 && info.extent.height >= 720) {
++		static uint32_t logged = 0;
++		if (logged < 2000) {
++			++logged;
++			void*     frames[12];
++			const int count = backtrace(frames, 12);
++			std::printf("TARGET: %ux%u fmt=%s depth=%d type=%d samples=%u addr=0x%llx size=0x%llx\n",
++			            info.extent.width, info.extent.height,
++			            vk::to_string(info.pixel_format).c_str(), info.IsDepth() ? 1 : 0,
++			            static_cast<int>(info.type), info.samples,
++			            static_cast<unsigned long long>(info.data.address),
++			            static_cast<unsigned long long>(info.data.size));
++			for (int i = 0; i < count; ++i) {
++				std::printf("  #%d %p\n", i, frames[i]);
++			}
++			std::fflush(stdout);
++		}
++	}
++#endif
+ 	if (resident_first != 0 && resident_prefix == 0) {
+ 		resident_prefix = ResidentPrefixSize(info, resident_first);
+ 	}
+@@ -4124,6 +4153,19 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format, RepeatLookup
+ 	if (command.IsInvalid()) {
+ 		EXIT("TextureCache: image lookup requires a valid command buffer\n");
+ 	}
++	// A4b: ASTROHYBRID_FSR4_TARGET=1 forces the game's dynamic scene sizes to 1920x1080,
++	// so the final upscale pass and FSR4 work from a 2x input. Off by default; the normal
++	// port keeps the game's own dynamic sizes.
++	static const bool target_clamp = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_TARGET");
++		return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
++	}();
++	if (target_clamp &&
++	    ((desc.info.extent.width == 2432 && desc.info.extent.height == 1368) ||
++	     (desc.info.extent.width == 3328 && desc.info.extent.height == 1872))) {
++		desc.info.extent.width  = 1920;
++		desc.info.extent.height = 1080;
++	}
+ 	ValidateImageDesc(desc);
+ 	if (desc.info.data.Empty()) {
+ 		std::scoped_lock lock {m_lock};
+diff --git a/src/graphics/host_gpu/renderer/dlss.cpp b/src/graphics/host_gpu/renderer/dlss.cpp
+index 8e956181..b8e5d951 100644
+--- a/src/graphics/host_gpu/renderer/dlss.cpp
++++ b/src/graphics/host_gpu/renderer/dlss.cpp
+@@ -1,4 +1,5 @@
+ #include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/fsr4.h"
+ #include "graphics/host_gpu/renderer/frameGen.h"
+ 
+ #include "graphics/host_gpu/renderer/cache/textureCache.h"
+@@ -385,7 +386,7 @@ void RenderExecutor::TagFrameGen(CommandBuffer& buffer, PreparedBindings& pixel)
+ }
+ 
+ void RenderExecutor::NoteDlssTargets(std::span<const RenderColorInfo> colors, ImageId depth) {
+-	if ((!Dlss::Requested() && !FrameGen::Requested()) || !depth) {
++	if ((!Dlss::Requested() && !FrameGen::Requested() && !Fsr4::Requested()) || !depth) {
+ 		return;
+ 	}
+ 	auto& s = Get();
+@@ -408,6 +409,15 @@ void RenderExecutor::NoteDlssTargets(std::span<const RenderColorInfo> colors, Im
+ 	}
+ }
+ 
++ImageId RenderExecutor::DepthForColor(ImageId color) {
++	for (const auto& pair: Get().depth_pairs) {
++		if (pair.color == color) {
++			return pair.depth;
++		}
++	}
++	return {};
++}
++
+ bool RenderExecutor::TryDlssUpscale(CommandBuffer& buffer, PreparedBindings& pixel, ImageId output) {
+ 	if (!Dlss::Requested() || pixel.runtime == nullptr || !*pixel.runtime) {
+ 		return false;
+diff --git a/src/graphics/host_gpu/renderer/eopTimestamps.cpp b/src/graphics/host_gpu/renderer/eopTimestamps.cpp
+index 3b140f69..fd151eff 100644
+--- a/src/graphics/host_gpu/renderer/eopTimestamps.cpp
++++ b/src/graphics/host_gpu/renderer/eopTimestamps.cpp
+@@ -54,6 +54,35 @@ struct FlipCounters {
+ };
+ FlipCounters g_flip;
+ 
++// KYTY_EOP_SCALE=<percent> (live, 25-1000, default 100): stretch the published GPU time away
++// from its record-time value. The dynamic-resolution controller compares ring deltas with its
++// 16.67 ms budget, so above 100 it measures more GPU time and lowers the internal resolution.
++uint64_t ScalePublished(uint64_t published, uint64_t record_value) {
++	static const int64_t percent = [] {
++		const char* value = std::getenv("KYTY_EOP_SCALE");
++		if (value == nullptr || value[0] == '\0') {
++			return 100ll;
++		}
++		char*      end    = nullptr;
++		const auto parsed = std::strtoll(value, &end, 0);
++		return parsed >= 25 && parsed <= 1000 ? parsed : 100ll;
++	}();
++	static const bool reported = [] {
++		if (percent != 100) {
++			std::printf("Kyty EOP timestamps: published GPU time scaled to %lld%% (KYTY_EOP_SCALE)\n",
++			            static_cast<long long>(percent));
++		}
++		return true;
++	}();
++	(void)reported;
++	if (percent == 100) {
++		return published;
++	}
++	const auto diff = static_cast<int64_t>(published) - static_cast<int64_t>(record_value);
++	const auto scaled = std::max<int64_t>(0, diff) * percent / 100;
++	return static_cast<uint64_t>(static_cast<int64_t>(record_value) + scaled);
++}
++
+ void CountShift(uint64_t published, uint64_t record_value) {
+ 	const auto shift = static_cast<int64_t>(published - record_value);
+ 	g_flip.shift_sum.fetch_add(shift, std::memory_order_relaxed);
+@@ -265,6 +294,7 @@ void EopTimestampRing::PublishEntry(const Entry& entry, bool available, uint64_t
+ 		}
+ 		m_last_published = std::max(m_last_published, published);
+ 	}
++	published = ScalePublished(published, entry.record_value);
+ 	std::memcpy(slot, &published, sizeof(published));
+ 	// Emulator write outside the draw-prep log's fence positions (like deferred labels).
+ 	Coherence::NoteContentWrite(entry.address, sizeof(published), Coherence::Source::CpWrite);
+@@ -351,6 +381,7 @@ uint64_t EopTimestampRing::TakeDeferred(uint32_t slot, uint64_t record_value) {
+ 	}
+ 	Profiler::CountFrameEvent(Profiler::FrameEvent::EopTimestampsDeferred);
+ 	g_flip.deferred.fetch_add(1, std::memory_order_relaxed);
++	published = ScalePublished(published, record_value);
+ 	CountShift(published, record_value);
+ 	return published;
+ }
+diff --git a/src/graphics/host_gpu/renderer/fsr4.cpp b/src/graphics/host_gpu/renderer/fsr4.cpp
+new file mode 100644
+index 00000000..9c1f6aea
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/fsr4.cpp
+@@ -0,0 +1,507 @@
++// Native FSR 4.1.2 through the FidelityFX SDK Vulkan provider.
++//
++// The provider is an optional, externally built GPL-3.0 library (the local
++// FidelityFX SDK port).  Kyty only calls its FFX API; no provider source or
++// extracted assets are part of this tree.
++//
++// SPDX-License-Identifier: GPL-2.0
++
++#include "graphics/host_gpu/renderer/fsr4.h"
++
++#include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/image/image.h"
++#include "graphics/host_gpu/renderer/render.h"
++#include "graphics/host_gpu/renderer/renderContext.h"
++#include "graphics/host_gpu/vulkanCommon.h"
++
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
++
++#if !defined(_WIN32)
++#define __declspec(x)
++#include "ffx_api.h"
++#include "ffx_upscale.h"
++#include "vk/ffx_api_vk.h"
++
++#include <dlfcn.h>
++#endif
++
++namespace Libs::Graphics {
++
++namespace Fsr4 {
++
++bool Requested() {
++	static const bool requested = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	return requested;
++}
++
++void RequiredExtensions(std::vector<const char*>& instance, std::vector<const char*>& device) {
++	(void)instance;
++#if !defined(_WIN32)
++	if (!Requested()) {
++		return;
++	}
++	device.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
++	device.push_back(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
++#else
++	(void)device;
++#endif
++}
++
++} // namespace Fsr4
++
++#if !defined(_WIN32)
++
++namespace {
++
++struct State {
++	bool                 init_tried = false;
++	bool                 ready      = false;
++	void*                loader     = nullptr;
++	PfnFfxCreateContext  create     = nullptr;
++	PfnFfxDestroyContext destroy    = nullptr;
++	PfnFfxDispatch       dispatch   = nullptr;
++	ffxContext           context    = nullptr;
++	uint32_t             in_w       = 0;
++	uint32_t             in_h       = 0;
++	uint32_t             out_w      = 0;
++	uint32_t             out_h      = 0;
++	uint64_t             last_frame = 0;
++	uint64_t             last_dispatch_frame = 0;
++	uint32_t             last_in_w   = 0;
++	uint32_t             last_in_h   = 0;
++};
++
++State& Get() {
++	static State state;
++	return state;
++}
++
++std::string ProviderDirectory() {
++	const char* value = std::getenv("ASTROHYBRID_FSR4_PATH");
++	return value != nullptr && value[0] != '\0' ? std::string(value) : std::string("fsr4");
++}
++
++bool LoadProvider(State& s) {
++	if (s.init_tried) {
++		return s.ready;
++	}
++	s.init_tried = true;
++
++	const auto  directory = ProviderDirectory();
++	const auto  loader_path = directory + "/libamd_fidelityfx_loader_vk.so";
++	const auto  asset_dir = directory + "/assets";
++	if (std::getenv("FSR4_ASSET_DIR") == nullptr) {
++		setenv("FSR4_ASSET_DIR", asset_dir.c_str(), 1);
++	}
++	s.loader = dlopen(loader_path.c_str(), RTLD_NOW | RTLD_LOCAL);
++	if (s.loader == nullptr) {
++		std::printf("FSR4: cannot load %s: %s\n", loader_path.c_str(), dlerror());
++		std::fflush(stdout);
++		return false;
++	}
++	s.create = reinterpret_cast<PfnFfxCreateContext>(dlsym(s.loader, "ffxCreateContext"));
++	s.destroy = reinterpret_cast<PfnFfxDestroyContext>(dlsym(s.loader, "ffxDestroyContext"));
++	s.dispatch = reinterpret_cast<PfnFfxDispatch>(dlsym(s.loader, "ffxDispatch"));
++	if (s.create == nullptr || s.destroy == nullptr || s.dispatch == nullptr) {
++		std::printf("FSR4: %s is missing the FFX entry points\n", loader_path.c_str());
++		std::fflush(stdout);
++		return false;
++	}
++	return true;
++}
++
++bool CreateContext(State& s, const GraphicContext& graphics, uint32_t in_w, uint32_t in_h,
++                   uint32_t out_w, uint32_t out_h) {
++	if (s.create == nullptr) {
++		return false;
++	}
++	if (s.context != nullptr) {
++		return true;
++	}
++
++	VkDeviceContext device_context {};
++	device_context.vkDevice         = static_cast<VkDevice>(graphics.device);
++	device_context.vkPhysicalDevice = static_cast<VkPhysicalDevice>(graphics.physical_device);
++	device_context.vkDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
++
++	ffxCreateBackendVKDesc backend {};
++	backend.header.type          = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
++	backend.deviceContext        = device_context;
++
++	ffxCreateContextDescUpscaleVersion version {};
++	version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
++	version.version     = FFX_UPSCALER_VERSION;
++
++	ffxCreateContextDescUpscale upscale {};
++	upscale.header.type   = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
++	upscale.maxRenderSize = {in_w, in_h};
++	upscale.maxUpscaleSize = {out_w, out_h};
++	upscale.flags          = 0;
++	upscale.fpMessage      = nullptr;
++	upscale.header.pNext   = &version.header;
++	version.header.pNext   = &backend.header;
++
++	const auto result = s.create(&s.context, &upscale.header, nullptr);
++	if (result != FFX_API_RETURN_OK || s.context == nullptr) {
++		std::printf("FSR4: ffxCreateContext failed (0x%x) for %ux%u -> %ux%u\n",
++		            static_cast<unsigned>(result), in_w, in_h, out_w, out_h);
++		std::fflush(stdout);
++		s.context = nullptr;
++		s.ready   = false;
++		return false;
++	}
++	s.in_w   = in_w;
++	s.in_h   = in_h;
++	s.out_w  = out_w;
++	s.out_h  = out_h;
++	s.ready  = true;
++	std::printf("FSR4: context created, %ux%u -> %ux%u\n", in_w, in_h, out_w, out_h);
++	std::fflush(stdout);
++	return true;
++}
++
++FfxApiResourceDescription DescribeImage(const Image& image, uint32_t additional_usages) {
++	VkImageCreateInfo create {};
++	create.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++	create.imageType     = VK_IMAGE_TYPE_2D;
++	create.format        = static_cast<VkFormat>(image.backing.format);
++	create.extent        = {image.info.extent.width, image.info.extent.height, 1};
++	create.mipLevels     = 1;
++	create.arrayLayers   = 1;
++	create.samples       = VK_SAMPLE_COUNT_1_BIT;
++	create.tiling        = VK_IMAGE_TILING_OPTIMAL;
++	create.usage         = static_cast<VkImageUsageFlags>(image.backing.usage) | additional_usages;
++	create.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
++	create.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++	return ffxApiGetImageResourceDescriptionVK(static_cast<VkImage>(image.backing.image),
++	                                           create, additional_usages);
++}
++
++} // namespace
++
++bool RenderExecutor::TryFsr4Upscale(CommandBuffer& buffer, PreparedBindings& pixel, ImageId output) {
++	if (!Fsr4::Requested() || pixel.runtime == nullptr || !*pixel.runtime) {
++		return false;
++	}
++	// ASTROHYBRID_FSR4_PASSLOG=1: once a second, list every pixel program that writes a
++	// 3840x2160 target with the input size from its constants. This shows whether the
++	// matched pass covers every frame or shares the upscale with other variants.
++	static const bool pass_log = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_PASSLOG");
++		return value != nullptr && value[0] != '\0';
++	}();
++	static const bool pass_log_verbose = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_PASSLOG");
++		return value != nullptr && std::strcmp(value, "2") == 0;
++	}();
++	if (pass_log) {
++		struct Candidate {
++			uint64_t hash;
++			uint32_t in_w;
++			uint32_t in_h;
++			uint32_t count;
++		};
++		static Candidate candidates[8] {};
++		static uint32_t  candidate_count = 0;
++		static auto      window_start    = std::chrono::steady_clock::now();
++		if (!pixel.buffer_sources.empty() && pixel.buffer_sources[0].address != 0 &&
++		    pixel.buffer_sources[0].size >= 32) {
++			const auto*    cb0 = reinterpret_cast<const uint32_t*>(pixel.buffer_sources[0].address);
++			const uint32_t ow = cb0[4], oh = cb0[5], in_w = cb0[6], in_h = cb0[7];
++			if (ow == 3840 && oh == 2160 && in_w != 0 && in_h != 0) {
++				const uint64_t hash = pixel.runtime->program->shader_hash;
++				if (pass_log_verbose) {
++					static uint32_t lines = 0;
++					if (lines < 400) {
++						++lines;
++						std::printf("FSR4: pass hash=0x%016llx %ux%u -> %ux%u frame=%u mv=%u out=%u/%u\n",
++						            static_cast<unsigned long long>(hash), in_w, in_h, ow, oh, cb0[11],
++						            cb0[13], output.index, output.generation);
++						std::fflush(stdout);
++					}
++				}
++				uint32_t slot = candidate_count;
++				for (uint32_t i = 0; i < candidate_count; ++i) {
++					if (candidates[i].hash == hash && candidates[i].in_w == in_w &&
++					    candidates[i].in_h == in_h) {
++						slot = i;
++						break;
++					}
++				}
++				if (slot == candidate_count && candidate_count < 8) {
++					candidates[candidate_count++] = Candidate {hash, in_w, in_h, 0};
++				}
++				if (slot < candidate_count) {
++					++candidates[slot].count;
++				}
++			}
++		}
++		const auto now = std::chrono::steady_clock::now();
++		if (now - window_start >= std::chrono::seconds(1)) {
++			const auto elapsed =
++			    std::chrono::duration_cast<std::chrono::milliseconds>(now - window_start).count();
++			std::printf("FSR4: 4K passes in %lld ms:", static_cast<long long>(elapsed));
++			for (uint32_t i = 0; i < candidate_count; ++i) {
++				std::printf(" 0x%016llx %ux%u x%u",
++				            static_cast<unsigned long long>(candidates[i].hash),
++				            candidates[i].in_w, candidates[i].in_h, candidates[i].count);
++				candidates[i].count = 0;
++			}
++			std::printf("\n");
++			std::fflush(stdout);
++			window_start = now;
++		}
++	}
++	static const uint64_t pass_hash = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_PASS");
++		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0x2936e5eca99d75e7ull;
++	}();
++	if (pixel.runtime->program->shader_hash != pass_hash) {
++		return false;
++	}
++	if (pixel.images.size() < 2 || !output || pixel.buffer_sources.empty() ||
++	    pixel.buffer_sources[0].address == 0 || pixel.buffer_sources[0].size < 56) {
++		return false;
++	}
++
++	auto& s = Get();
++	const auto* cb = reinterpret_cast<const uint32_t*>(pixel.buffer_sources[0].address);
++	float       jitter_uv[2];
++	std::memcpy(jitter_uv, cb, sizeof(jitter_uv));
++	uint32_t out_w = cb[4], out_h = cb[5], in_w = cb[6], in_h = cb[7];
++	const uint32_t frame = cb[11];
++	if (cb[13] == 0 || in_w == 0 || in_h == 0 || out_w == 0 || out_h == 0) {
++		return false;
++	}
++	// ASTROHYBRID_FSR4_PASSLOG=3: print every pass of one frame (the staged upscale chain)
++	// when that frame's 4K output pass arrives. Bounded to 40 chains.
++	static const bool chain_log = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_PASSLOG");
++		return value != nullptr && std::strcmp(value, "3") == 0;
++	}();
++	static const uint64_t chain_start = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_CHAIN_AT");
++		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
++	}();
++	if (chain_log) {
++		struct ChainRecord {
++			uint32_t in_w;
++			uint32_t in_h;
++			uint32_t out_w;
++			uint32_t out_h;
++			ImageId  output;
++			ImageId  mv;
++			ImageId  color;
++			ImageId  depth;
++		};
++		static std::vector<ChainRecord> records;
++		static uint64_t                 current_frame = 0;
++		static bool                     have_frame    = false;
++		static uint32_t                 printed       = 0;
++		if (!have_frame || frame != current_frame) {
++			records.clear();
++			current_frame = frame;
++			have_frame    = true;
++		}
++		ChainRecord record {in_w, in_h, out_w, out_h, output, {}, {}, {}};
++		if (pixel.images.size() >= 2) {
++			record.mv    = pixel.images[0].image_id;
++			record.color = pixel.images[1].image_id;
++			record.depth = DepthForColor(record.mv);
++		}
++		records.push_back(record);
++		if (out_w == 3840 && out_h == 2160 && (in_w < out_w || in_h < out_h) &&
++		    printed < 40 && frame >= chain_start) {
++			++printed;
++			std::printf("FSR4: chain frame=%u\n", frame);
++			for (const auto& r: records) {
++				std::printf("  %ux%u -> %ux%u out=%u/%u mv=%u/%u color=%u/%u depth=%u/%u\n",
++				            r.in_w, r.in_h, r.out_w, r.out_h, r.output.index, r.output.generation,
++				            r.mv.index, r.mv.generation, r.color.index, r.color.generation,
++				            r.depth.index, r.depth.generation);
++			}
++			std::fflush(stdout);
++		}
++	}
++	// The game uses the same upscale shader for intermediate and 1:1 passes. FSR4 is only
++	// meaningful for the final 4K scene upscale. ASTROHYBRID_FSR4_ALLOW_1TO1=1 also replaces
++	// the 1:1 4K pass (diagnostic: makes every frame go through FSR4 so a mixed
++	// FSR4/game-upscaler image can be ruled out).
++	static const bool allow_1to1 = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_ALLOW_1TO1");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	constexpr uint32_t kTargetWidth = 3840;
++	constexpr uint32_t kTargetHeight = 2160;
++	if (out_w != kTargetWidth || out_h != kTargetHeight || in_w > out_w || in_h > out_h ||
++	    (!allow_1to1 && (in_w >= out_w || in_h >= out_h))) {
++		return false;
++	}
++	if (s.last_dispatch_frame == frame) {
++		return false;
++	}
++
++	auto&      cache      = m_context.GetTextureCache();
++	const auto mv_id      = pixel.images[0].image_id;
++	const auto color_id   = pixel.images[1].image_id;
++	const auto depth_id   = DepthForColor(mv_id);
++	if (!depth_id || cache.m_slot_images.try_get(depth_id) == nullptr) {
++		return false;
++	}
++	auto& mv    = cache.GetImage(mv_id);
++	auto& color = cache.GetImage(color_id);
++	auto& depth = cache.GetImage(depth_id);
++	auto& out   = cache.GetImage(output);
++	// A4b: the scene target may have been clamped to 1920x1080 while the game's constants
++	// still name 2432/3328. Use the actual color image extent for the FSR4 dispatch.
++	if (color.info.extent.width != in_w || color.info.extent.height != in_h) {
++		in_w = color.info.extent.width;
++		in_h = color.info.extent.height;
++	}
++	const auto same = [](const Image& image, uint32_t w, uint32_t h) {
++		return image.info.extent.width == w && image.info.extent.height == h &&
++		       image.backing.image != nullptr && image.info.samples == 1;
++	};
++	if (!same(mv, in_w, in_h) || !same(color, in_w, in_h) || !same(depth, in_w, in_h) ||
++	    !same(out, out_w, out_h) || !depth.info.IsDepth() ||
++	    !(out.backing.usage & vk::ImageUsageFlagBits::eStorage)) {
++		return false;
++	}
++
++	if (!LoadProvider(s)) {
++		return false;
++	}
++	auto& graphics = m_context.GetGraphics();
++	if (!CreateContext(s, graphics, 3840, 2160, 3840, 2160)) {
++		return false;
++	}
++
++	// Diagnostics: the provider only maps a few formats (an unmapped one falls back to RGBA8),
++	// so print what the four resources really are before the first dispatch.
++	static bool formats_logged = false;
++	if (!formats_logged) {
++		formats_logged = true;
++		std::printf("FSR4: formats mv=%s(%u layer(s)) color=%s(%u) depth=%s(%u) out=%s(%u)\n",
++		            vk::to_string(mv.backing.format).c_str(), mv.backing.layers,
++		            vk::to_string(color.backing.format).c_str(), color.backing.layers,
++		            vk::to_string(depth.backing.format).c_str(), depth.backing.layers,
++		            vk::to_string(out.backing.format).c_str(), out.backing.layers);
++		std::fflush(stdout);
++	}
++
++	buffer.EndRendering();
++	const auto cmd = buffer.Handle();
++
++	mv.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {}, cmd);
++	color.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {}, cmd);
++	depth.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {}, cmd);
++	out.Transit(vk::ImageLayout::eGeneral,
++	            vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite, {},
++	            cmd);
++
++	const auto resource = [](const Image& image, uint32_t extra, VkImageLayout layout) {
++		return ffxApiGetResourceVK(static_cast<VkImage>(image.backing.image),
++		                           DescribeImage(image, extra), static_cast<uint32_t>(layout));
++	};
++
++	ffxDispatchDescUpscale desc {};
++	desc.header.type       = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
++	desc.commandList       = cmd;
++	desc.color             = resource(color, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++	desc.depth             = resource(depth, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++	desc.motionVectors     = resource(mv, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++	desc.output            = resource(out, VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_LAYOUT_GENERAL);
++	desc.renderSize        = {in_w, in_h};
++	desc.upscaleSize       = {out_w, out_h};
++
++	static const float mv_sign = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_MV_SIGN");
++		return value != nullptr ? std::strtof(value, nullptr) : -1.0f;
++	}();
++	static const float pre_exposure = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_PRE_EXPOSURE");
++		return value != nullptr ? std::strtof(value, nullptr) : 1.0f;
++	}();
++	static const float camera_near = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_NEAR");
++		return value != nullptr ? std::strtof(value, nullptr) : 0.1f;
++	}();
++	static const float camera_far = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_FAR");
++		return value != nullptr ? std::strtof(value, nullptr) : 1000.0f;
++	}();
++	static const bool sharpening = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR4_SHARPEN");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++
++	desc.motionVectorScale    = {mv_sign * static_cast<float>(in_w),
++	                             mv_sign * static_cast<float>(in_h)};
++	desc.jitterOffset         = {jitter_uv[0] * static_cast<float>(in_w),
++	                             jitter_uv[1] * static_cast<float>(in_h)};
++	desc.enableSharpening     = sharpening;
++	desc.sharpness            = sharpening ? 0.2f : 0.0f;
++	desc.frameTimeDelta       = 16.7f;
++	desc.preExposure          = pre_exposure;
++	// A frame discontinuity is a reset, and so is a render-size change: the game's dynamic
++	// resolution switches often and the provider's history is not meant to cross scales.
++	desc.reset                = (s.last_frame != 0 && frame != s.last_frame + 1) ||
++	                            (s.last_in_w != 0 && (in_w != s.last_in_w || in_h != s.last_in_h));
++	desc.cameraNear           = camera_near;
++	desc.cameraFar            = camera_far;
++	desc.cameraFovAngleVertical = 1.0472f;
++	desc.viewSpaceToMetersFactor = 1.0f;
++	desc.flags                = 0;
++
++	static uint32_t dispatched  = 0;
++	static auto     rate_start  = std::chrono::steady_clock::now();
++	if (desc.reset) {
++		std::printf("FSR4: history reset for frame=%u\n", frame);
++		std::fflush(stdout);
++	}
++	++dispatched;
++	if (const auto now = std::chrono::steady_clock::now();
++	    now - rate_start >= std::chrono::seconds(1)) {
++		const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - rate_start).count();
++		std::printf("FSR4: dispatched %u time(s) in %lld ms (frame=%u %ux%u -> %ux%u color=0x%llx/0x%llx)\n",
++		            dispatched, static_cast<long long>(elapsed), frame, in_w, in_h, out_w, out_h,
++		            static_cast<unsigned long long>(color.info.data.address),
++		            static_cast<unsigned long long>(color.info.data.size));
++		std::fflush(stdout);
++		dispatched = 0;
++		rate_start = now;
++	}
++	s.last_frame = frame;
++	const auto result = s.dispatch(&s.context, &desc.header);
++	buffer.ForgetBoundState();
++	if (result != FFX_API_RETURN_OK) {
++		static uint32_t logged = 0;
++		if (logged++ < 8) {
++			std::printf("FSR4: ffxDispatch failed (0x%x)\n", static_cast<unsigned>(result));
++			std::fflush(stdout);
++		}
++		return false;
++	}
++	// The output now holds FSR4's image: a GPU write of the target, as the replaced draw's
++	// would be. Without this the texture cache can treat the target as unwritten and let
++	// stale or aliased bytes reappear over part of FSR4's output.
++	out.NoteContentWrite();
++	cache.CommitGpuWrite(out);
++	s.last_dispatch_frame = frame;
++	s.last_in_w           = in_w;
++	s.last_in_h           = in_h;
++	return true;
++}
++
++#endif // !defined(_WIN32)
++
++} // namespace Libs::Graphics
+diff --git a/src/graphics/host_gpu/renderer/fsr4.h b/src/graphics/host_gpu/renderer/fsr4.h
+new file mode 100644
+index 00000000..ddf0ae4f
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/fsr4.h
+@@ -0,0 +1,17 @@
++#ifndef KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
++#define KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
++
++#include <vector>
++
++// ASTROHYBRID_FSR4=1 (default 0): AMD FidelityFX Super Resolution 4.1.2 through the
++// libamd_fidelityfx_loader_vk.so provider built from the FidelityFX SDK.  The
++// provider is loaded at runtime from ASTROHYBRID_FSR4_PATH (default "fsr4") and
++// replaces the game's temporal upscale pass, like the DLSS path.
++namespace Libs::Graphics::Fsr4 {
++
++[[nodiscard]] bool Requested();
++void RequiredExtensions(std::vector<const char*>& instance, std::vector<const char*>& device);
++
++} // namespace Libs::Graphics::Fsr4
++
++#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
+diff --git a/src/graphics/host_gpu/renderer/render.h b/src/graphics/host_gpu/renderer/render.h
+index ded9d461..8288605d 100644
+--- a/src/graphics/host_gpu/renderer/render.h
++++ b/src/graphics/host_gpu/renderer/render.h
+@@ -1187,6 +1187,11 @@ private:
+ 	void NoteDlssTargets(std::span<const RenderColorInfo> colors, ImageId depth);
+ 	[[nodiscard]] bool TryDlssUpscale(CommandBuffer& buffer, PreparedBindings& pixel,
+ 	                                  ImageId output);
++	// ASTROHYBRID_FSR4 (fsr4.h): the depth attached to a colour target, recorded by
++	// NoteDlssTargets for the temporal upscale pass.
++	[[nodiscard]] ImageId DepthForColor(ImageId color);
++	[[nodiscard]] bool TryFsr4Upscale(CommandBuffer& buffer, PreparedBindings& pixel,
++	                                  ImageId output);
+ 	// ASTROHYBRID_DLSSG (frameGen.h): the camera from a draw's bound constants, and the frame's
+ 	// depth, motion vectors and constants at the temporal upscale pass.
+ 	void NoteFrameGenCamera(const PreparedBindings& stage);
+diff --git a/src/graphics/host_gpu/renderer/renderDraw.cpp b/src/graphics/host_gpu/renderer/renderDraw.cpp
+index 25b4d339..74b407b9 100644
+--- a/src/graphics/host_gpu/renderer/renderDraw.cpp
++++ b/src/graphics/host_gpu/renderer/renderDraw.cpp
+@@ -25,6 +25,7 @@
+ #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+ #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
+ #include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/fsr4.h"
+ #include "graphics/host_gpu/renderer/frameGen.h"
+ #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
+ #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
+@@ -4166,15 +4167,23 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 	// ASTROHYBRID_DLSS (dlss.h): depth attachments by colour target, and the game's temporal
+ 	// upscale replaced by DLSS Super Resolution. A replaced draw records nothing else; like a
+ 	// skipped one (KYTY_PIPELINE_SKIP below) no run record may be continued across it.
+-	if (Dlss::Requested() || FrameGen::Requested()) [[unlikely]] {
++	if (Dlss::Requested() || FrameGen::Requested() || Fsr4::Requested()) [[unlikely]] {
+ 		NoteDlssTargets(std::span<const RenderColorInfo> {state.color_info, state.color_count},
+ 		                state.depth_info.image_id);
+ 		if (FrameGen::Active() && state.ps_active && bindings.pixel.has_value()) {
+ 			NoteFrameGenCamera(*bindings.pixel);
+ 			TagFrameGen(buffer, *bindings.pixel);
+ 		}
+-		if (Dlss::Requested() && state.ps_active && bindings.pixel.has_value() && state.color_count != 0 &&
+-		    TryDlssUpscale(buffer, *bindings.pixel, state.color_info[0].image_id)) {
++		bool replaced = false;
++		if (Fsr4::Requested() && state.ps_active && bindings.pixel.has_value() &&
++		    state.color_count != 0) {
++			replaced = TryFsr4Upscale(buffer, *bindings.pixel, state.color_info[0].image_id);
++		}
++		if (!replaced && Dlss::Requested() && state.ps_active && bindings.pixel.has_value() &&
++		    state.color_count != 0) {
++			replaced = TryDlssUpscale(buffer, *bindings.pixel, state.color_info[0].image_id);
++		}
++		if (replaced) {
+ 			m_run.valid        = false;
+ 			m_run_active       = false;
+ 			m_run_targets_kept = false;
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index 21165e69..d0508a20 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -33,6 +33,7 @@
+ #include "graphics/presentation/window.h"
+ #include "graphics/presentation/window/lowLatency.h"
+ #include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/fsr4.h"
+ #include "graphics/host_gpu/renderer/frameGen.h"
+ #include "graphics/presentation/window/windowInternal.h"
+ #include "graphics/shader/recompiler/CodegenOptions.h"
+@@ -1350,6 +1351,23 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 	     features13.robustImageAccess == VK_TRUE ? "true" : "false",
+ 	     robustness2_ext_enabled && robustness2.robustImageAccess2 == VK_TRUE ? "true" : "false");
+ 
++	vk::PhysicalDeviceCooperativeMatrixFeaturesKHR fsr4_cooperative {};
++	vk::PhysicalDeviceShaderFloat8FeaturesEXT      fsr4_float8 {};
++	bool                                           fsr4_features = false;
++	if (Fsr4::Requested() &&
++	    HasExtension(device_extensions, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) &&
++	    HasExtension(device_extensions, VK_EXT_SHADER_FLOAT8_EXTENSION_NAME)) {
++		vk::PhysicalDeviceFeatures2 query {};
++		query.pNext        = &fsr4_float8;
++		fsr4_float8.pNext  = &fsr4_cooperative;
++		physical_device.getFeatures2(&query);
++		fsr4_features = fsr4_cooperative.cooperativeMatrix == VK_TRUE &&
++		                fsr4_float8.shaderFloat8 == VK_TRUE;
++		if (!fsr4_features) {
++			std::printf("FSR4: cooperative matrix or float8 is unavailable; FSR4 stays off\n");
++		}
++	}
++
+ 	vk::DeviceCreateInfo create_info {};
+ 	vk::PhysicalDeviceMeshShaderFeaturesEXT mesh_features {};
+ 	mesh_features.pNext                 = &features13;
+@@ -1456,6 +1474,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 		present_id.pNext     = const_cast<void*>(create_info.pNext);
+ 		create_info.pNext    = &present_id;
+ 	}
++	if (fsr4_features) {
++		fsr4_float8.shaderFloat8 = VK_TRUE;
++		fsr4_float8.pNext        = const_cast<void*>(create_info.pNext);
++		fsr4_cooperative.cooperativeMatrix = VK_TRUE;
++		fsr4_cooperative.pNext             = &fsr4_float8;
++		create_info.pNext                  = &fsr4_cooperative;
++	}
+ 	create_info.pQueueCreateInfos       = queue_create_infos.data();
+ 	create_info.queueCreateInfoCount    = queue_create_count;
+ 	create_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
+@@ -2200,6 +2225,20 @@ void WindowContext::CreateVulkan() {
+ 				}
+ 			}
+ 		}
++		// ASTROHYBRID_FSR4 (fsr4.h): the FidelityFX provider's Vulkan requirements.
++		{
++			std::vector<const char*> fsr4_instance;
++			std::vector<const char*> fsr4_device;
++			Fsr4::RequiredExtensions(fsr4_instance, fsr4_device);
++			for (const auto* name: fsr4_device) {
++				if (HasExtension(available_extensions, name) && !HasExtension(device_extensions, name)) {
++					std::printf("FSR4: device extension %s enabled\n", name);
++					device_extensions.push_back(name);
++				} else if (!HasExtension(available_extensions, name)) {
++					std::printf("FSR4: device extension %s unavailable\n", name);
++				}
++			}
++		}
+ 		// ASTROHYBRID_LOW_LATENCY (lowLatency.h): VK_NV_low_latency2 with present IDs.
+ 		if (LowLatency::WantExtensions(
+ 		        HasExtension(available_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME),
+-- 
+2.56.1
+

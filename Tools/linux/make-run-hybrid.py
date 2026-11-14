@@ -19,6 +19,7 @@ RUN = ROOT / "Build" / "Run"
 HYBRID = ROOT / "Build" / "RunHybrid"
 PATCHED_LIBS = ROOT / "Build" / "anyps5-hybrid" / "core" / "libs" / "libs"
 KYTY_GPU = ROOT / "Build" / "kyty-gpu" / "kyty_gpu.so"
+FSR4 = ROOT / "Build" / "fsr4"
 
 FRESH = ("libc.prx", "libkernel.prx", "libScePad.prx")
 SHIMS = ("libSceAgc.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx")
@@ -88,6 +89,12 @@ def main() -> int:
     shutil.copy2(kyty_gpu, libs / "kyty_gpu.so")
     for name in SHIMS:
         (libs / name).symlink_to("kyty_gpu.so")
+
+    fsr4 = hybrid / "fsr4"
+    if FSR4.is_dir():
+        if fsr4.is_symlink() or fsr4.exists():
+            fsr4.unlink()
+        fsr4.symlink_to(FSR4, target_is_directory=True)
 
     app0 = hybrid / "app0"
     if not app0.exists() and not app0.is_symlink():

@@ -115,11 +115,35 @@ pw-link -l | grep -A2 AstroBot
 `ASTROHYBRID_FPS_LOG=1` prints the window's per-second `frame=… fps=…` line to stderr, which is useful
 for finding frame-rate drops in a long run.
 
+## FSR 4 (optional, off by default)
+
+The Linux port can replace the game's final temporal upscale with FSR 4.1.2 on
+RADV. It is opt-in and off by default.
+
+- Build the GPL-3.0-only provider from the custom FidelityFX SDK:
+  `FSR4_SDK_DIR=/path/to/FidelityFX-SDK-2.4.0-custom Tools/fsr4/build.sh`.
+  Outputs `Build/fsr4` (provider `.so`s plus assets extracted from the user's
+  signed AMD DLL; nothing under `Build/` is committed).
+- The Kyty hook is
+  `Source/kyty-hybrid-linux/0004-feat-linux-opt-in-FSR-4-1-2-upscale.patch`,
+  applied by `Tools/linux/prepare-kyty.sh patched`; it is inert unless enabled.
+- Enable it in the launcher (**Graphics → FSR 4 (experimental)**) or with
+  `ASTROHYBRID_FSR4=1 ASTROHYBRID_FSR4_TARGET=1 Tools/linux/run.sh run --hybrid`.
+- `_TARGET=1` clamps the game's dynamic 2432/3328 scene targets to 1920x1080, so
+  FSR 4 does a 2x upscale to 4K. Without `_TARGET`, FSR 4 runs at the game's
+  1.15–1.58x sizes.
+- Other switches: `ASTROHYBRID_FSR4_MV_SIGN`, `_PRE_EXPOSURE`, `_NEAR`/`_FAR`,
+  `_SHARPEN`, `_PASSLOG`, `_ALLOW_1TO1` (see `Source/fsr4/README.md`).
+- Tested on the RX 9070 XT: stable images; Crash Site 60 s samples around
+  53 FPS mean (56 median) with the 1920 target, roughly neutral against the
+  game's own upscale because the scene is partly CPU-bound. The launcher option
+  stays off by default.
+
 ## What is not in the Linux build
 
 - NVIDIA DLSS Super Resolution, DLSS Frame Generation and Reflex. Those are
   Windows/NVIDIA runtime features; the Linux build uses the game's own temporal
-  upscale.
+  upscale by default, with the optional FSR 4.1.2 mode above.
 - The WPF launcher. `AstroHybrid.App` stays the Windows app; the Linux launcher
   is `AstroHybrid.App.Avalonia`.
 - The Windows-only game byte patches (fixed 1080p etc.) can be applied later
