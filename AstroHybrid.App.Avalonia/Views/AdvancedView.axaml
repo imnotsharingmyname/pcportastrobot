@@ -1,0 +1,43 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.AdvancedView">
+  <ScrollViewer>
+    <StackPanel Margin="28,24" Spacing="18">
+      <StackPanel Spacing="4">
+        <TextBlock Text="Advanced" Classes="h1" />
+        <TextBlock Classes="muted"
+                   Text="Environment overrides for diagnostics and experiments. The launcher's normal settings already cover the common cases." />
+      </StackPanel>
+
+      <Border Classes="card">
+        <StackPanel Spacing="10">
+          <TextBlock Text="Extra environment variables" Classes="label" />
+          <TextBox x:Name="EnvBox" Height="140" AcceptsReturn="True" TextWrapping="NoWrap"
+                   FontFamily="JetBrains Mono, monospace" FontSize="12"
+                   Watermark="APS5_TRACE_SUMMARY_EVERY=10&#10;KYTY_GPU_VBLANK_HZ=60" />
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <Button Classes="primary" Content="Save" Click="Save" />
+            <Button Content="Reset settings" Click="Reset" />
+            <TextBlock x:Name="Status" Classes="muted" VerticalAlignment="Center" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <Border Classes="card">
+        <StackPanel Spacing="6">
+          <TextBlock Text="Runtime information" Classes="label" />
+          <TextBlock x:Name="InfoText" Classes="muted" FontFamily="JetBrains Mono, monospace" FontSize="11" />
+        </StackPanel>
+      </Border>
+
+      <Border Classes="card">
+        <StackPanel Spacing="10">
+          <TextBlock Text="Logs" Classes="label" />
+          <TextBlock Classes="muted" FontSize="12"
+                     Text="Run output is shown on the Home page. The Windows port's Logs/ directory is also used by this build for extracted build logs." />
+          <Button Content="Open Logs folder" Click="OpenLogs" HorizontalAlignment="Left" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
