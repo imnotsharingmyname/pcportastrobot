@@ -2,53 +2,113 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="AstroHybrid.App.Avalonia.MainWindow"
         Title="AstroHybrid"
-        Width="1120" Height="740"
-        MinWidth="920" MinHeight="600"
+        Width="1100" Height="720"
+        MinWidth="900" MinHeight="600"
         WindowStartupLocation="CenterScreen"
-        Icon="/Assets/astrohybrid.png">
-  <Grid ColumnDefinitions="250,*">
-    <Border Grid.Column="0" Background="{StaticResource Surface}"
-            BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+        Icon="/Assets/astrohybrid.png"
+        Background="{DynamicResource BackgroundBrush}"
+        FontFamily="{DynamicResource AppFont}"
+        FontSize="14">
+  <Grid ColumnDefinitions="240,*">
+
+    <!-- Sidebar -->
+    <Border Grid.Column="0" Background="{DynamicResource SurfaceBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
       <Grid RowDefinitions="Auto,*,Auto">
-        <Border Grid.Row="0" Padding="20,22,20,18"
-                BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+
+        <!-- Logo -->
+        <Border Grid.Row="0" Padding="20,20,20,10"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
           <StackPanel Orientation="Horizontal" Spacing="12">
-            <Border Width="42" Height="42" CornerRadius="9" Background="{StaticResource Accent}">
-              <TextBlock Text="A" FontSize="24" FontWeight="Bold"
-                         HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White" />
+            <Border Width="40" Height="40" CornerRadius="8"
+                    Background="{DynamicResource PrimaryBrush}">
+              <TextBlock Text="★" FontSize="24" Foreground="White"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
-            <StackPanel VerticalAlignment="Center">
-              <TextBlock Text="AstroHybrid" FontSize="16" FontWeight="SemiBold" />
-              <TextBlock Text="Linux launcher" Classes="muted" FontSize="12" />
+            <StackPanel VerticalAlignment="Center" Spacing="1">
+              <TextBlock Text="AstroHybrid" FontSize="18" FontWeight="Bold" />
+              <TextBlock Text="Astro Bot PC Port" FontSize="11"
+                         Foreground="{DynamicResource TextMutedBrush}" />
             </StackPanel>
           </StackPanel>
         </Border>
 
-        <StackPanel Grid.Row="1" Margin="12,16" Spacing="4">
-          <Button x:Name="NavHome" Classes="nav active" Click="ShowHome">
-            <TextBlock Text="Home" />
+        <!-- Navigation -->
+        <StackPanel Grid.Row="1" Margin="10,20,10,0" Spacing="4">
+          <Button x:Name="NavHome" Theme="{StaticResource NavButton}" Classes="active" Click="ShowHome">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="🏠" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <TextBlock Text="Home" VerticalAlignment="Center" />
+            </StackPanel>
           </Button>
-          <Button x:Name="NavSetup" Classes="nav" Click="ShowSetup">
-            <TextBlock Text="Setup" />
+
+          <Button x:Name="NavGraphics" Theme="{StaticResource NavButton}" Click="ShowGraphics">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="🎮" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <TextBlock Text="Graphics" VerticalAlignment="Center" />
+            </StackPanel>
           </Button>
-          <Button x:Name="NavGraphics" Classes="nav" Click="ShowGraphics">
-            <TextBlock Text="Graphics" />
+
+          <Button x:Name="NavController" Theme="{StaticResource NavButton}" Click="ShowController">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="🎯" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <TextBlock Text="Controller" VerticalAlignment="Center" />
+            </StackPanel>
           </Button>
-          <Button x:Name="NavController" Classes="nav" Click="ShowController">
-            <TextBlock Text="Controller" />
+
+          <Button x:Name="NavAdvanced" Theme="{StaticResource NavButton}" Click="ShowAdvanced">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="⚙️" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <TextBlock Text="Advanced" VerticalAlignment="Center" />
+            </StackPanel>
           </Button>
-          <Button x:Name="NavAdvanced" Classes="nav" Click="ShowAdvanced">
-            <TextBlock Text="Advanced" />
+
+          <Button x:Name="NavInstallation" Theme="{StaticResource NavButton}" Click="ShowInstallation">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="📦" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <TextBlock Text="Installation" VerticalAlignment="Center" />
+            </StackPanel>
           </Button>
         </StackPanel>
 
-        <StackPanel Grid.Row="2" Margin="20,0,20,18" Spacing="4">
-          <TextBlock x:Name="BuildLabel" Classes="muted" FontSize="11" Text="Linux native port" />
-          <TextBlock Text="No game files included" Classes="muted" FontSize="11" />
-        </StackPanel>
+        <!-- Status footer -->
+        <Border Grid.Row="2" Padding="20"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
+          <StackPanel Spacing="4">
+            <TextBlock Text="STATUS" FontSize="12"
+                       Foreground="{DynamicResource TextMutedBrush}" />
+            <TextBlock x:Name="StatusText" Classes="body" Text="Loading…" />
+            <ProgressBar x:Name="StatusProgress" Height="4" IsIndeterminate="True"
+                         IsVisible="False" Margin="0,8,0,0" />
+          </StackPanel>
+        </Border>
       </Grid>
     </Border>
 
-    <ContentControl Grid.Column="1" Name="PageHost" />
+    <!-- Content + bottom action bar -->
+    <Grid Grid.Column="1" RowDefinitions="*,Auto">
+      <ContentControl x:Name="PageHost" Grid.Row="0" Margin="30,30,30,0" />
+
+      <Border Grid.Row="1" Padding="30,20"
+              BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
+        <Grid ColumnDefinitions="*,Auto">
+          <StackPanel Grid.Column="0" Orientation="Horizontal">
+            <Button x:Name="BestSettingsButton" Theme="{StaticResource SecondaryButton}"
+                    Content="Best Settings for This PC" IsVisible="False"
+                    Click="ApplyBestSettings" />
+          </StackPanel>
+
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10"
+                      HorizontalAlignment="Right">
+            <Button x:Name="StopButton" Theme="{StaticResource SecondaryButton}"
+                    Content="Stop" MinWidth="100" MinHeight="48"
+                    IsVisible="False" Click="StopGame" />
+            <Button x:Name="PlayButton" Theme="{StaticResource PrimaryButton}"
+                    Content="Play" MinWidth="140" MinHeight="48"
+                    FontSize="16" FontWeight="SemiBold" Click="PlayGame" />
+          </StackPanel>
+        </Grid>
+      </Border>
+    </Grid>
   </Grid>
 </Window>

@@ -1,13 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using AstroHybrid.App.Avalonia.Services;
 
 namespace AstroHybrid.App.Avalonia.Views;
 
-public partial class GraphicsView : UserControl
+public partial class GraphicsView : UserControl, IPageRefresh
 {
     private sealed record ResolutionOption(int Width, int Height)
     {
@@ -42,39 +43,81 @@ public partial class GraphicsView : UserControl
 
     private readonly Backend _backend;
     private readonly AppSettings _settings;
+    private bool _loading = true;
 
     public GraphicsView(Backend backend, AppSettings settings)
     {
         InitializeComponent();
         _backend = backend;
         _settings = settings;
+
         ResolutionBox.ItemsSource = Resolutions;
         FpsBox.ItemsSource = FpsLimits;
-        ResolutionBox.SelectedItem = Resolutions.FirstOrDefault(option =>
-            option.Width == settings.Width && option.Height == settings.Height) ?? Resolutions[2];
-        FpsBox.SelectedItem = FpsLimits.FirstOrDefault(option => option.Value == settings.FpsLimit) ?? FpsLimits[6];
-        FullscreenBox.IsChecked = settings.Fullscreen;
-        GameSpeedBox.IsChecked = settings.GameSpeed;
-        DirectAudioBox.IsChecked = settings.DirectAudio;
-        AudioSinkBox.Text = settings.AudioSink;
+        LoadFromSettings();
+        _loading = false;
     }
 
-    private void Save(object? sender, RoutedEventArgs e)
+    public void RefreshPage()
     {
+        _loading = true;
+        LoadFromSettings();
+        _loading = false;
+    }
+
+    private void LoadFromSettings()
+    {
+        ResolutionBox.SelectedItem = Resolutions.FirstOrDefault(option =>
+            option.Width == _settings.Width && option.Height == _settings.Height) ?? Resolutions[2];
+        FpsBox.SelectedItem = FpsLimits.FirstOrDefault(option => option.Value == _settings.FpsLimit) ?? FpsLimits[6];
+        FullscreenBox.IsChecked = _settings.Fullscreen;
+        GameSpeedBox.IsChecked = _settings.GameSpeed;
+        DirectAudioBox.IsChecked = _settings.DirectAudio;
+        AudioSinkBox.Text = _settings.AudioSink;
+
+    }
+
+    public static (int Width, int Height) PickResolution(Size dip)
+    {
+        var best = Resolutions
+            .Where(option => option.Width <= dip.Width && option.Height <= dip.Height)
+            .OrderByDescending(option => option.Width)
+            .FirstOrDefault();
+
+        return best is null
+            ? (Resolutions[0].Width, Resolutions[0].Height)
+            : (best.Width, best.Height);
+    }
+
+    private void OnSelectionChanged(object? sender, SelectionChangedEventArgs e) => Save();
+
+    private void OnCheckChanged(object? sender, RoutedEventArgs e) => Save();
+
+    private void OnAudioSinkLostFocus(object? sender, RoutedEventArgs e) => Save();
+
+    private void Save()
+    {
+        if (_loading)
+        {
+            return;
+        }
+
         if (ResolutionBox.SelectedItem is ResolutionOption resolution)
         {
             _settings.Width = resolution.Width;
             _settings.Height = resolution.Height;
         }
+
         if (FpsBox.SelectedItem is FpsOption fps)
         {
             _settings.FpsLimit = fps.Value;
         }
+
         _settings.Fullscreen = FullscreenBox.IsChecked == true;
         _settings.GameSpeed = GameSpeedBox.IsChecked == true;
         _settings.DirectAudio = DirectAudioBox.IsChecked == true;
         _settings.AudioSink = AudioSinkBox.Text?.Trim() ?? "";
+
         _backend.SaveSettings(_settings);
-        SaveStatus.Text = $"Saved to {Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)}/.config/astrohybrid/settings.json";
+        _backend.SetStatus("Settings saved");
     }
 }

@@ -25,3 +25,9 @@
 /.arena/
 /AstroBot Launcher.exe
 /work/
+
+# Local agent handoff / instructions (not part of the port)
+.ai/
+AGENTS.md
+CLAUDE.md
+codex.md

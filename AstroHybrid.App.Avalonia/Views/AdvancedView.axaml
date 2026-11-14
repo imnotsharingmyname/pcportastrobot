@@ -2,40 +2,36 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="AstroHybrid.App.Avalonia.Views.AdvancedView">
   <ScrollViewer>
-    <StackPanel Margin="28,24" Spacing="18">
-      <StackPanel Spacing="4">
-        <TextBlock Text="Advanced" Classes="h1" />
-        <TextBlock Classes="muted"
-                   Text="Environment overrides for diagnostics and experiments. The launcher's normal settings already cover the common cases." />
-      </StackPanel>
+    <StackPanel Margin="0,0,0,20" Spacing="20">
 
       <Border Classes="card">
         <StackPanel Spacing="10">
-          <TextBlock Text="Extra environment variables" Classes="label" />
+          <TextBlock Text="Environment Variables" Classes="section" />
+          <TextBlock Classes="muted"
+                     Text="Extra variables are passed to the runtime for diagnostics and experiments. The normal settings already cover the common cases. One KEY=VALUE per line." />
           <TextBox x:Name="EnvBox" Height="140" AcceptsReturn="True" TextWrapping="NoWrap"
-                   FontFamily="JetBrains Mono, monospace" FontSize="12"
-                   Watermark="APS5_TRACE_SUMMARY_EVERY=10&#10;KYTY_GPU_VBLANK_HZ=60" />
+                   FontFamily="{DynamicResource MonoFont}" FontSize="12"
+                   Watermark="APS5_TRACE_SUMMARY_EVERY=10&#10;KYTY_GPU_VBLANK_HZ=60"
+                   LostFocus="OnEnvLostFocus" />
           <StackPanel Orientation="Horizontal" Spacing="10">
-            <Button Classes="primary" Content="Save" Click="Save" />
-            <Button Content="Reset settings" Click="Reset" />
-            <TextBlock x:Name="Status" Classes="muted" VerticalAlignment="Center" />
+            <Button Content="Reset advanced settings" Click="Reset" />
+            <Button Content="Open logs" Click="OpenLogs" />
           </StackPanel>
         </StackPanel>
       </Border>
 
       <Border Classes="card">
-        <StackPanel Spacing="6">
-          <TextBlock Text="Runtime information" Classes="label" />
-          <TextBlock x:Name="InfoText" Classes="muted" FontFamily="JetBrains Mono, monospace" FontSize="11" />
+        <StackPanel>
+          <TextBlock Text="Runtime" Classes="section" />
+          <TextBlock x:Name="InfoText" Classes="mono" TextWrapping="Wrap" />
         </StackPanel>
       </Border>
 
       <Border Classes="card">
-        <StackPanel Spacing="10">
-          <TextBlock Text="Logs" Classes="label" />
-          <TextBlock Classes="muted" FontSize="12"
-                     Text="Run output is shown on the Home page. The Windows port's Logs/ directory is also used by this build for extracted build logs." />
-          <Button Content="Open Logs folder" Click="OpenLogs" HorizontalAlignment="Left" />
+        <StackPanel>
+          <TextBlock Text="Logs" Classes="section" />
+          <TextBlock Classes="body"
+                     Text="The runtime writes its stdout/stderr and the launch wrappers into the project's Logs folder. Open it here when a launch or install fails." />
         </StackPanel>
       </Border>
     </StackPanel>

@@ -1,99 +1,84 @@
 using System;
 using System.IO;
-using System.Threading.Tasks;
+using System.Linq;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Media;
 using Avalonia.Threading;
 using AstroHybrid.App.Avalonia.Services;
 
 namespace AstroHybrid.App.Avalonia.Views;
 
-public partial class HomeView : UserControl
+public partial class HomeView : UserControl, IPageRefresh
 {
+    private static readonly IBrush Success = Brush.Parse("#00D4AA");
+    private static readonly IBrush Warning = Brush.Parse("#FFAA00");
+    private static readonly IBrush Error = Brush.Parse("#FF4444");
+
     private readonly Backend _backend;
     private readonly AppSettings _settings;
+    private readonly Action<string> _navigate;
 
-    public HomeView(Backend backend, AppSettings settings)
+    public HomeView(Backend backend, AppSettings settings, Action<string> navigate)
     {
         InitializeComponent();
         _backend = backend;
         _settings = settings;
-        _backend.GameOutput += line => Dispatcher.UIThread.Post(() => AppendLog(line));
-        _backend.GameRunningChanged += running => Dispatcher.UIThread.Post(() => UpdateRunning(running));
-        Loaded += (_, _) => Refresh();
+        _navigate = navigate;
+
+        _backend.GameOutput += OnGameOutput;
+        _backend.GameRunningChanged += OnGameRunningChanged;
+        Loaded += (_, _) => RefreshPage();
     }
 
-    private void Refresh()
+    public void RefreshPage()
     {
         var exists = Directory.Exists(_settings.GamePath);
-        var ready = _backend.HybridReady;
-        StatusText.Text = ready ? "Ready to play" : exists ? "Runtime not built" : "Game dump not found";
-        GamePathText.Text = string.IsNullOrWhiteSpace(_settings.GamePath)
-            ? "Choose the extracted PPSA21567-app folder on the Setup page."
-            : _settings.GamePath;
-        HardwareText.Text = _backend.HardwareSummary();
-        RuntimeText.Text =
-            $"Hybrid runtime: {(ready ? "installed" : "missing")}\n" +
-            $"GPU stack: {(_backend.HybridReady ? "Kyty (Vulkan)" : "not installed")}\n" +
-            $"Run directory: {_backend.HybridDirectory}";
+        var runtime = _backend.HybridReady;
+        var ready = runtime && exists;
 
-        if (!ready)
-        {
-            NoticeCard.IsVisible = true;
-            NoticeText.Text = exists
-                ? "Open Setup and press Install to build the Linux runtime from your own dump."
-                : "No game dump is configured. Extract your own PPSA21567 dump and select the PPSA21567-app folder in Setup.";
-        }
-        else
-        {
-            NoticeCard.IsVisible = false;
-        }
+        HeroStatus.Text = ready
+            ? "Ready to play"
+            : exists
+                ? "Runtime not built — open Installation"
+                : "Game dump not found — open Installation";
+        HeroStatus.Foreground = ready ? Success : exists ? Warning : Error;
 
-        PlayButton.IsEnabled = ready && !_backend.GameRunning;
-        StopButton.IsEnabled = _backend.GameRunning;
+        InstallValue.Text = ready ? "Ready" : exists ? "Setup required" : "Not found";
+        RuntimeValue.Text = runtime ? "Hybrid runtime installed" : "Hybrid runtime missing";
+
+        var hardware = _backend.HardwareSummary();
+        var lines = hardware.Split('\n');
+        var cpuLine = lines.Length > 0 ? lines[0] : "Unknown CPU";
+        var cpuParts = cpuLine.Split('·');
+        CpuValue.Text = cpuParts[0].Trim();
+        GpuValue.Text = lines.FirstOrDefault(line => line.StartsWith("GPU:", StringComparison.Ordinal))
+            ?.Substring(4).Trim() ?? "—";
+        RamValue.Text = cpuParts.Length > 1 ? cpuParts[1].Trim() : "—";
+        DisplayValue.Text = lines.FirstOrDefault(line => line.StartsWith("Display:", StringComparison.Ordinal))
+            ?.Substring(8).Trim()
+            ?? Environment.GetEnvironmentVariable("XDG_SESSION_TYPE")
+            ?? "—";
+
+        var fps = _settings.FpsLimit > 0 ? $"{_settings.FpsLimit} FPS" : "Unlimited";
+        ConfigText.Text =
+            $"{_settings.Width} × {_settings.Height}   ·   {fps}   ·   " +
+            $"{(_settings.Fullscreen ? "Fullscreen" : "Windowed")}   ·   " +
+            $"Audio {(_settings.DirectAudio ? "direct" : "default")}";
     }
 
-    private void Play(object? sender, RoutedEventArgs e)
-    {
-        if (!Directory.Exists(_settings.GamePath))
-        {
-            AppendLog("Set the extracted PPSA21567-app folder on the Setup page first.");
-            return;
-        }
-        if (!_backend.HybridReady)
-        {
-            AppendLog("The hybrid runtime is not installed. Use the Setup page first.");
-            return;
-        }
+    private void OpenGraphics(object? sender, RoutedEventArgs e) => _navigate("Graphics");
+    private void OpenInstallation(object? sender, RoutedEventArgs e) => _navigate("Installation");
 
-        try
-        {
-            _backend.StartGame(_settings);
-            AppendLog("Launching AstroBot...");
-            PlayButton.IsEnabled = false;
-            StopButton.IsEnabled = true;
-        }
-        catch (Exception exception)
-        {
-            AppendLog($"Launch failed: {exception.Message}");
-        }
-    }
+    private void OnGameOutput(string line) =>
+        Dispatcher.UIThread.Post(() => AppendLog(line));
 
-    private void Stop(object? sender, RoutedEventArgs e)
-    {
-        _backend.StopGame();
-        AppendLog("Stop requested.");
-    }
-
-    private void UpdateRunning(bool running)
-    {
-        PlayButton.IsEnabled = !running && _backend.HybridReady;
-        StopButton.IsEnabled = running;
-        if (!running)
+    private void OnGameRunningChanged(bool running) =>
+        Dispatcher.UIThread.Post(() =>
         {
-            AppendLog("Game process exited.");
-        }
-    }
+            AppendLog(running ? "Game process started." : "Game process exited.");
+            RefreshPage();
+        });
 
     private void AppendLog(string line)
     {

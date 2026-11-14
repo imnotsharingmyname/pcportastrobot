@@ -1,14 +1,14 @@
-using System.Collections.Generic;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using AstroHybrid.App.Avalonia.Services;
 
 namespace AstroHybrid.App.Avalonia.Views;
 
-public partial class ControllerView : UserControl
+public partial class ControllerView : UserControl, IPageRefresh
 {
     private readonly Backend _backend;
     private readonly AppSettings _settings;
+    private bool _loading = true;
 
     public ControllerView(Backend backend, AppSettings settings)
     {
@@ -16,8 +16,11 @@ public partial class ControllerView : UserControl
         _backend = backend;
         _settings = settings;
         MotionBox.IsChecked = settings.PadMotion;
+        _loading = false;
         RefreshPads();
     }
+
+    public void RefreshPage() => RefreshPads();
 
     private void RefreshPads()
     {
@@ -28,10 +31,15 @@ public partial class ControllerView : UserControl
 
     private void Refresh(object? sender, RoutedEventArgs e) => RefreshPads();
 
-    private void Save(object? sender, RoutedEventArgs e)
+    private void OnCheckChanged(object? sender, RoutedEventArgs e)
     {
+        if (_loading)
+        {
+            return;
+        }
+
         _settings.PadMotion = MotionBox.IsChecked == true;
         _backend.SaveSettings(_settings);
-        Status.Text = $"Saved. Motion relay {( _settings.PadMotion ? "on" : "off") }.";
+        _backend.SetStatus($"Settings saved — motion relay {(_settings.PadMotion ? "on" : "off")}");
     }
 }

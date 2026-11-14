@@ -2,58 +2,101 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="AstroHybrid.App.Avalonia.Views.HomeView">
   <ScrollViewer>
-    <StackPanel Margin="28,24" Spacing="18">
-      <StackPanel Spacing="4">
-        <TextBlock Text="ASTRO BOT" Classes="h1" />
-        <TextBlock x:Name="Subtitle" Classes="muted"
-                   Text="Native Linux port · Kyty GPU stack · no game files included" />
-      </StackPanel>
+    <StackPanel Margin="0,0,0,20" Spacing="20">
 
+      <!-- Hero -->
       <Border Classes="card">
-        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" RowSpacing="12">
-          <StackPanel Grid.Row="0" Grid.Column="0" Spacing="5">
-            <TextBlock Text="Installation" Classes="label" />
-            <TextBlock x:Name="StatusText" Text="Checking the runtime..." Classes="h2" />
-            <TextBlock x:Name="GamePathText" Classes="muted" />
-          </StackPanel>
-          <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="8"
-                      VerticalAlignment="Center">
-            <Button x:Name="PlayButton" Classes="primary" Content="Play" Click="Play" />
-            <Button x:Name="StopButton" Classes="danger" Content="Stop" Click="Stop" IsEnabled="False" />
-          </StackPanel>
-          <Border Grid.Row="1" Grid.ColumnSpan="2" Background="{StaticResource SurfaceRaised}"
-                  CornerRadius="8" Padding="12" IsVisible="False" x:Name="NoticeCard">
-            <TextBlock x:Name="NoticeText" Classes="muted" TextWrapping="Wrap" />
+        <Grid ColumnDefinitions="Auto,*">
+          <Border Grid.Column="0" Width="80" Height="80" CornerRadius="12"
+                  Background="{DynamicResource PrimaryBrush}"
+                  HorizontalAlignment="Left" VerticalAlignment="Top"
+                  Margin="0,0,20,0">
+            <TextBlock Text="★" FontSize="40" Foreground="White"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" />
           </Border>
+
+          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+            <TextBlock Text="Astro Bot" Classes="h1" />
+            <TextBlock Text="PC Native Port (AstroHybrid)" FontSize="20" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextSecondaryBrush}" />
+            <TextBlock x:Name="HeroStatus" Text="Checking the runtime…"
+                       Classes="body" Margin="0,10,0,0" />
+          </StackPanel>
         </Grid>
       </Border>
 
-      <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
+      <!-- Quick stats -->
+      <Grid ColumnSpacing="10">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
         <Border Grid.Column="0" Classes="card">
-          <StackPanel Spacing="6">
-            <TextBlock Text="This PC" Classes="label" />
-            <TextBlock x:Name="HardwareText" Classes="muted" />
+          <StackPanel Spacing="4">
+            <TextBlock Text="Installation" Classes="muted" />
+            <TextBlock x:Name="InstallValue" Text="Checking…" Classes="value" TextWrapping="Wrap" />
+            <TextBlock x:Name="RuntimeValue" Text="Checking…" Classes="muted" />
           </StackPanel>
         </Border>
+
         <Border Grid.Column="1" Classes="card">
-          <StackPanel Spacing="6">
-            <TextBlock Text="Runtime" Classes="label" />
-            <TextBlock x:Name="RuntimeText" Classes="muted" />
+          <StackPanel Spacing="4">
+            <TextBlock Text="CPU" Classes="muted" />
+            <TextBlock x:Name="CpuValue" Text="Unknown CPU" Classes="value" TextWrapping="Wrap" />
+          </StackPanel>
+        </Border>
+
+        <Border Grid.Column="2" Classes="card">
+          <StackPanel Spacing="4">
+            <TextBlock Text="GPU" Classes="muted" />
+            <TextBlock x:Name="GpuValue" Text="—" Classes="value" TextWrapping="Wrap" />
+          </StackPanel>
+        </Border>
+
+        <Border Grid.Column="3" Classes="card">
+          <StackPanel Spacing="4">
+            <TextBlock Text="RAM / Display" Classes="muted" />
+            <TextBlock x:Name="RamValue" Text="—" Classes="value" FontSize="16" />
+            <TextBlock x:Name="DisplayValue" Text="—" Classes="muted" />
           </StackPanel>
         </Border>
       </Grid>
 
+      <!-- Current graphics config -->
       <Border Classes="card">
-        <Grid RowDefinitions="Auto,*" RowSpacing="8">
+        <StackPanel>
+          <TextBlock Text="Current Graphics Configuration" Classes="section" />
+          <TextBlock x:Name="ConfigText" Classes="mono" Text="—" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <!-- Quick actions -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Quick Actions" Classes="section" />
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <Button Content="Graphics Settings" Click="OpenGraphics" />
+            <Button Content="Installation" Click="OpenInstallation" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- Live output -->
+      <Border Classes="card">
+        <StackPanel Spacing="6">
           <Grid ColumnDefinitions="*,Auto">
-            <TextBlock Grid.Column="0" Text="Log" Classes="label" VerticalAlignment="Center" />
-            <Button Grid.Column="1" Content="Clear" Click="ClearLog" Padding="10,5" />
+            <TextBlock Grid.Column="0" Text="Game Output" Classes="section" />
+            <Button Grid.Column="1" Content="Clear" Theme="{StaticResource TextButton}"
+                    Click="ClearLog" VerticalAlignment="Center" />
           </Grid>
-          <TextBox Grid.Row="1" x:Name="LogBox" Height="190" IsReadOnly="True"
+          <TextBox x:Name="LogBox" Height="190" IsReadOnly="True"
                    AcceptsReturn="True" TextWrapping="NoWrap"
-                   FontFamily="JetBrains Mono, monospace" FontSize="11"
-                   Background="#090E1B" />
-        </Grid>
+                   FontFamily="{DynamicResource MonoFont}" FontSize="11"
+                   Background="{DynamicResource BackgroundBrush}" />
+        </StackPanel>
       </Border>
     </StackPanel>
   </ScrollViewer>

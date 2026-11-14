@@ -2,31 +2,30 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="AstroHybrid.App.Avalonia.Views.ControllerView">
   <ScrollViewer>
-    <StackPanel Margin="28,24" Spacing="18">
-      <StackPanel Spacing="4">
-        <TextBlock Text="Controller" Classes="h1" />
-        <TextBlock Classes="muted"
-                   Text="Kyty owns the physical controller; the relay publishes its state to the game's pad library. The pad you press becomes player 1." />
-      </StackPanel>
+    <StackPanel Margin="0,0,0,20" Spacing="20">
 
       <Border Classes="card">
         <StackPanel Spacing="10">
           <Grid ColumnDefinitions="*,Auto">
-            <TextBlock Grid.Column="0" Text="Detected pads" Classes="label" VerticalAlignment="Center" />
-            <Button Grid.Column="1" Content="Refresh" Click="Refresh" Padding="10,5" />
+            <TextBlock Grid.Column="0" Text="Controller Selection" Classes="section" />
+            <Button Grid.Column="1" Content="Refresh" Click="Refresh"
+                    VerticalAlignment="Center" />
           </Grid>
-          <ListBox x:Name="PadList" MinHeight="80" Background="{StaticResource SurfaceRaised}" />
-          <TextBlock x:Name="EmptyText" Classes="muted" Text="No gamepad with a joystick device was found." IsVisible="False" />
+          <ListBox x:Name="PadList" MinHeight="100" MaxHeight="180" />
+          <TextBlock x:Name="EmptyText" Classes="muted"
+                     Text="No gamepad with a joystick device was found." IsVisible="False" />
+          <TextBlock Classes="muted"
+                     Text="Kyty owns the physical controller; the relay publishes its state to the game's pad library. The pad you press becomes player 1." />
         </StackPanel>
       </Border>
 
       <Border Classes="card">
         <StackPanel Spacing="8">
-          <CheckBox x:Name="MotionBox" Content="Relay pad motion sensors (experimental)" />
-          <TextBlock Classes="muted" FontSize="12"
-                     Text="Passes accelerometer and gyroscope data to the game's pad library (ASTROHYBRID_PAD_MOTION=1). Leave it off if the game reads a resting controller as tilted." />
-          <Button Content="Save" Click="Save" HorizontalAlignment="Left" />
-          <TextBlock x:Name="Status" Classes="muted" />
+          <TextBlock Text="Motion" Classes="section" />
+          <CheckBox x:Name="MotionBox" Content="Enable the pad motion relay"
+                    Checked="OnCheckChanged" Unchecked="OnCheckChanged" />
+          <TextBlock Classes="muted"
+                     Text="Publishes gyro and accelerometer samples from the detected pad to the game. Leave it off unless the title or a mod expects motion input." />
         </StackPanel>
       </Border>
     </StackPanel>

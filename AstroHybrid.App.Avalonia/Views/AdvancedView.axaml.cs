@@ -7,10 +7,11 @@ using AstroHybrid.App.Avalonia.Services;
 
 namespace AstroHybrid.App.Avalonia.Views;
 
-public partial class AdvancedView : UserControl
+public partial class AdvancedView : UserControl, IPageRefresh
 {
     private readonly Backend _backend;
     private readonly AppSettings _settings;
+    private bool _loading = true;
 
     public AdvancedView(Backend backend, AppSettings settings)
     {
@@ -18,6 +19,12 @@ public partial class AdvancedView : UserControl
         _backend = backend;
         _settings = settings;
         EnvBox.Text = settings.ExtraEnv;
+        _loading = false;
+        RefreshPage();
+    }
+
+    public void RefreshPage()
+    {
         InfoText.Text =
             $"project:  {_backend.Root}\n" +
             $"python:   {_backend.Python}\n" +
@@ -26,11 +33,16 @@ public partial class AdvancedView : UserControl
             $"settings: {Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "astrohybrid", "settings.json")}";
     }
 
-    private void Save(object? sender, RoutedEventArgs e)
+    private void OnEnvLostFocus(object? sender, RoutedEventArgs e)
     {
+        if (_loading)
+        {
+            return;
+        }
+
         _settings.ExtraEnv = EnvBox.Text ?? "";
         _backend.SaveSettings(_settings);
-        Status.Text = "Saved.";
+        _backend.SetStatus("Settings saved");
     }
 
     private void Reset(object? sender, RoutedEventArgs e)
@@ -40,8 +52,10 @@ public partial class AdvancedView : UserControl
             GamePath = Directory.Exists(_backend.DefaultGamePath) ? _backend.DefaultGamePath : _settings.GamePath,
         };
         _backend.SaveSettings(defaults);
+        _settings.ExtraEnv = defaults.ExtraEnv;
         EnvBox.Text = defaults.ExtraEnv;
-        Status.Text = "Settings reset to defaults.";
+        RefreshPage();
+        _backend.SetStatus("Advanced settings reset to defaults");
     }
 
     private void OpenLogs(object? sender, RoutedEventArgs e)
@@ -57,7 +71,7 @@ public partial class AdvancedView : UserControl
         }
         catch (Exception exception)
         {
-            Status.Text = $"Could not open the folder: {exception.Message}";
+            _backend.SetStatus($"Could not open the folder: {exception.Message}");
         }
     }
 }

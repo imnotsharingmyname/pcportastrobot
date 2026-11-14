@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -75,10 +76,25 @@ public sealed class Backend
     public string LogDirectory => Path.Combine(Root, "Logs");
 
     private Process? _game;
+    private bool _stopping;
+    private string _statusMessage = "Loading…";
+    private bool _isBusy;
     private readonly AppSettingsStore _store = new();
 
     public event Action<bool>? GameRunningChanged;
     public event Action<string>? GameOutput;
+    public event Action? StatusChanged;
+
+    public string StatusMessage => _statusMessage;
+    public bool IsBusy => _isBusy;
+
+    public void SetStatus(string message, bool busy = false)
+    {
+        _statusMessage = message;
+        _isBusy = busy;
+        StatusChanged?.Invoke();
+    }
+
 
     public Backend()
     {
@@ -122,6 +138,18 @@ public sealed class Backend
     {
         if (GameRunning)
         {
+            return;
+        }
+
+        if (!Directory.Exists(settings.GamePath))
+        {
+            SetStatus("Game dump not found");
+            return;
+        }
+
+        if (!HybridReady)
+        {
+            SetStatus("Setup required");
             return;
         }
 
@@ -194,18 +222,44 @@ public sealed class Backend
         process.ErrorDataReceived += (_, e) => Emit(e.Data);
         process.Exited += (_, _) =>
         {
-            GameRunningChanged?.Invoke(false);
-            process.Dispose();
+            var code = 0;
+            try
+            {
+                code = process.ExitCode;
+            }
+            catch
+            {
+                // The process may already be disposed.
+            }
+
+            var stopped = _stopping;
+            _stopping = false;
             if (ReferenceEquals(_game, process))
             {
                 _game = null;
             }
+
+            process.Dispose();
+            GameRunningChanged?.Invoke(false);
+            SetStatus(stopped ? "Game stopped" : code == 0 ? "Game exited" : $"Game exited (code {code})");
         };
-        _game = process;
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        GameRunningChanged?.Invoke(true);
+
+        try
+        {
+            _game = process;
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            SetStatus("Running");
+            GameRunningChanged?.Invoke(true);
+        }
+        catch (Exception exception)
+        {
+            _game = null;
+            process.Dispose();
+            SetStatus($"Launch failed: {exception.Message}");
+            GameRunningChanged?.Invoke(false);
+        }
     }
 
     public void StopGame()
@@ -215,6 +269,9 @@ public sealed class Backend
         {
             return;
         }
+
+        _stopping = true;
+        SetStatus("Stopping…");
 
         try
         {
@@ -307,10 +364,19 @@ public sealed class Backend
             {
                 var output = lspci.StandardOutput.ReadToEnd();
                 lspci.WaitForExit(1000);
-                gpu = output.Split('\n')
+                var gpuLine = output.Split('\n')
                     .FirstOrDefault(line => line.Contains("VGA", StringComparison.Ordinal) ||
-                                            line.Contains("3D controller", StringComparison.Ordinal))
-                    ?.Split(':').Last().Trim() ?? "";
+                                            line.Contains("3D controller", StringComparison.Ordinal));
+                if (gpuLine is not null)
+                {
+                    var classEnd = gpuLine.IndexOf("]: ", StringComparison.Ordinal);
+                    var rest = classEnd >= 0 ? gpuLine[(classEnd + 3)..] : gpuLine;
+                    rest = Regex.Replace(rest, @"\s*\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\].*$", "");
+                    var brackets = Regex.Matches(rest, @"\[([^\]]+)\]");
+                    gpu = brackets.Count > 0
+                        ? brackets[brackets.Count - 1].Groups[1].Value.Trim()
+                        : rest.Trim();
+                }
             }
         }
         catch
