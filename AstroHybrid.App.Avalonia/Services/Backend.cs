@@ -24,6 +24,7 @@ public sealed class AppSettings
     public bool GameSpeed { get; set; } = true;
     public int GameSpeedPercent { get; set; } = 100;
     public bool PadMotion { get; set; }
+    public bool Fsr4 { get; set; }
     public bool DirectAudio { get; set; } = true;
     public string AudioSink { get; set; } = "";
     public string ExtraEnv { get; set; } = "";
@@ -153,6 +154,9 @@ public sealed class Backend
         File.Exists(Path.Combine(HybridDirectory, "libs", "kyty_gpu.so")) &&
         File.Exists(Path.Combine(HybridDirectory, "libs", "libAstroHybridHost.prx"));
 
+    /// <summary>True when Tools/fsr4/build.sh staged the FidelityFX provider.</summary>
+    public bool Fsr4ProviderReady => Directory.Exists(Path.Combine(HybridDirectory, "fsr4"));
+
     public bool GameRunning => _game is { HasExited: false };
 
     public async Task<ProcessResult> CheckAsync(string gamePath, Action<string>? onLine = null,
@@ -245,6 +249,12 @@ public sealed class Backend
                 arguments.Add("ASTROHYBRID_GAME_SPEED_PERCENT");
                 arguments.Add(settings.GameSpeedPercent.ToString());
             }
+        }
+        if (settings.Fsr4 && Fsr4ProviderReady)
+        {
+            arguments.Add("--env");
+            arguments.Add("ASTROHYBRID_FSR4");
+            arguments.Add("1");
         }
         if (settings.PadMotion)
         {

@@ -127,17 +127,19 @@ RADV. It is opt-in and off by default.
 - The Kyty hook is
   `Source/kyty-hybrid-linux/0004-feat-linux-opt-in-FSR-4-1-2-upscale.patch`,
   applied by `Tools/linux/prepare-kyty.sh patched`; it is inert unless enabled.
-- Enable it in the launcher (**Graphics → FSR 4 (experimental)**) or with
-  `ASTROHYBRID_FSR4=1 ASTROHYBRID_FSR4_TARGET=1 Tools/linux/run.sh run --hybrid`.
-- `_TARGET=1` clamps the game's dynamic 2432/3328 scene targets to 1920x1080, so
-  FSR 4 does a 2x upscale to 4K. Without `_TARGET`, FSR 4 runs at the game's
-  1.15–1.58x sizes.
+- Enable it in the launcher (**Graphics → Upscaling → FSR 4.1.2 - FidelityFX
+  (experimental)**) or with `ASTROHYBRID_FSR4=1 Tools/linux/run.sh run --hybrid`.
+  The row stays disabled until `Build/RunHybrid/fsr4` exists.
+- `ASTROHYBRID_FSR4_TARGET=1` asks the hook to clamp the game's dynamic scene
+  targets to 1920x1080. Measured on 2026-11-14: the title and menus clamp, but
+  gameplay floors at 2432, so FSR 4 runs at the game's own 1.15–1.58x sizes. The
+  launcher does not set it; forcing 1080 needs a deeper pass on the resolution
+  controller (see `Source/fsr4/README.md`).
 - Other switches: `ASTROHYBRID_FSR4_MV_SIGN`, `_PRE_EXPOSURE`, `_NEAR`/`_FAR`,
   `_SHARPEN`, `_PASSLOG`, `_ALLOW_1TO1` (see `Source/fsr4/README.md`).
 - Tested on the RX 9070 XT: stable images; Crash Site 60 s samples around
-  53 FPS mean (56 median) with the 1920 target, roughly neutral against the
-  game's own upscale because the scene is partly CPU-bound. The launcher option
-  stays off by default.
+  53 FPS mean (56 median), roughly neutral against the game's own upscale because
+  the scene is partly CPU-bound. The launcher option stays off by default.
 
 ## What is not in the Linux build
 

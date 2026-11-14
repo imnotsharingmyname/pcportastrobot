@@ -73,9 +73,10 @@
             <TextBlock Grid.Row="2" Grid.Column="0" Text="Upscaling" Classes="body"
                        VerticalAlignment="Center" />
             <ComboBox Grid.Row="2" Grid.Column="1" x:Name="UpscaleBox" Width="400"
-                      HorizontalAlignment="Left" IsEnabled="False" />
-            <TextBlock Grid.Row="3" Grid.Column="1" Classes="muted"
-                       Text="DLSS upscaling is a Windows feature and is not available here; the game's own temporal upscale runs through Vulkan." />
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="UpscaleNote" Classes="muted"
+                       TextWrapping="Wrap"
+                       Text="The game's own temporal upscale runs through Vulkan." />
 
             <TextBlock Grid.Row="4" Grid.Column="0" Text="Frame Generation" Classes="body"
                        VerticalAlignment="Center" />

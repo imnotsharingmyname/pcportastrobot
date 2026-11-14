@@ -69,7 +69,7 @@ public partial class GraphicsView : UserControl, IPageRefresh
             "OFF - Faster lighting (Non-RT, recommended)", "ON - Ray Tracing (Original lighting)",
         };
         RayTracingBox.SelectedIndex = 0;
-        UpscaleBox.ItemsSource = new[] { "Game's own (default)", "NVIDIA DLSS - sharper image" };
+        UpscaleBox.ItemsSource = new[] { "Game's own (default)" };
         UpscaleBox.SelectedIndex = 0;
         FrameGenBox.ItemsSource = new[] { "Off (default)", "Auto - reach target (recommended)", "Fixed 2x", "Fixed 3x", "Fixed 4x" };
         FrameGenBox.SelectedIndex = 0;
@@ -108,6 +108,18 @@ public partial class GraphicsView : UserControl, IPageRefresh
         UltrawideNote.Text = ultrawideAvailable
             ? "Renders at the 21:9 aspect; 16:9 users keep the original framing."
             : "The 21:9 patch is not in this runtime; re-run setup to build it.";
+
+        // Upscaling: the Windows row is DLSS, which needs the NVIDIA NGX runtime. On
+        // Linux the same slot carries FSR 4.1.2 when the provider has been staged.
+        var fsr4Ready = _backend.Fsr4ProviderReady;
+        UpscaleBox.ItemsSource = fsr4Ready
+            ? new[] { "Game's own temporal upscale (default)", "FSR 4.1.2 - FidelityFX (experimental)" }
+            : new[] { "Game's own temporal upscale (default)" };
+        UpscaleBox.SelectedIndex = _settings.Fsr4 && fsr4Ready ? 1 : 0;
+        UpscaleBox.IsEnabled = fsr4Ready;
+        UpscaleNote.Text = fsr4Ready
+            ? "FSR 4.1.2 replaces the game's final upscale with the FidelityFX provider. The game's dynamic resolution still picks the input size, so the gain depends on the scene."
+            : "DLSS needs the NVIDIA NGX runtime, which is Windows-only. Run Tools/fsr4/build.sh to stage the FSR 4.1.2 provider and enable an upscaler here.";
 
         // Ray Tracing is the lighting build: 0 is the patched Non-RT executable,
         // 1 is the base executable with Kyty's software ray tracing.
@@ -230,6 +242,7 @@ public partial class GraphicsView : UserControl, IPageRefresh
         _settings.VSync = VsyncBox.IsChecked == true;
         _settings.LowLatency = LowLatencyBox.IsChecked == true && LowLatencyBox.IsEnabled;
         _settings.Lighting = RayTracingBox.SelectedIndex == 1 ? 1 : 0;
+        _settings.Fsr4 = UpscaleBox.IsEnabled && UpscaleBox.SelectedIndex == 1;
         _settings.OverlayMode = OverlayBox.SelectedIndex >= 0 ? OverlayValues[OverlayBox.SelectedIndex] : "";
 
         RayTracingNote.Text = _settings.Lighting == 1
