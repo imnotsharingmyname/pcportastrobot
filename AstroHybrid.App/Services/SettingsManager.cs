@@ -32,6 +32,8 @@ namespace AstroHybrid.App.Services
                 {
                     var json = File.ReadAllText(_settingsPath);
                     _cachedSettings = JsonSerializer.Deserialize<AppSettings>(json, _jsonOptions) ?? new AppSettings();
+                    // Older files only have the preset index ("rumble"); make the percent explicit.
+                    _cachedSettings.NormalizeRumble();
                     return _cachedSettings;
                 }
                 catch

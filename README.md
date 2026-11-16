@@ -27,7 +27,7 @@ locations); everything else works the same way. Only 01.019.000 has been tested.
 Requirements: Windows 10/11 x64, a Vulkan GPU; DLSS needs an RTX card, frame generation an RTX 40 or 50.
 Controllers: DualSense, DualShock 4, Xbox, Switch Pro and compatible pads, generic pads (the one you press plays).
 Command line: `AstroHybrid.exe --setup "<dump folder>"` runs the setup without a window; `--remove-game` removes
-what setup built. The classic one-window launcher (`AstroBot Launcher.exe`) is included too.
+what setup built.
 
 ## Linux (experimental)
 
@@ -102,7 +102,7 @@ Caveat: numbers move with background load. With a browser playing audio the same
   2x / 3x / 4x), with an **adaptive mode** that picks the multiplier in game every half second to stay at or
   above a target on screen (`ASTROHYBRID_DLSSG_TARGET`). The game itself is never capped below 30 FPS.
 - **NVIDIA Reflex** for Vulkan through `VK_NV_low_latency2` (`ASTROHYBRID_LOW_LATENCY=1`).
-- **Faster CPU path** for buffer bindings (`ASTROHYBRID_COMMIT_EPOCH_FASTPATH=1`), now always on.
+- **Cloth and bubble stability** (`KYTY_BUFFER_RANGE_FIXES=1`, `ASTROHYBRID_COMMIT_EPOCH_FASTPATH=0`, plus 60 Hz cloth physics step cap during real-time speed below 60 FPS; issues #30, #35).
 - **Performance overlay** shows frames on screen and the game's own rate with Frame Generation.
 - **Controllers**: DualSense (rumble, light bar, adaptive triggers, motion), Xbox, Switch Pro and compatible
   pads, generic pads. The pad you press becomes player 1 (before, a second pad got no input), vibration
@@ -116,6 +116,18 @@ Caveat: numbers move with background load. With a browser playing audio the same
   - real-time game speed and the faster CPU path are always on (their checkboxes are gone).
 
 All new behaviour is behind environment switches that are off by default; the launcher turns them on.
+
+### Two graphics cards (laptops)
+
+A laptop with Intel or AMD integrated graphics plus an NVIDIA card (Optimus / hybrid) used to show only the
+integrated chip, so the RTX section stayed off. Both launchers now list every adapter, not only the one that
+drives the screen:
+
+- **Graphics page → Display → Graphics card**: "Automatic - best graphics card" (default) or a named card.
+  DLSS, Frame Generation and Reflex follow the card you pick; picking a non-RTX chip turns them off.
+- The renderer itself already prefers a discrete card, so Automatic is right for almost everyone. Pick the
+  integrated chip only to compare performance.
+- "Best settings for this PC" in the classic launcher now reads the discrete card on these laptops too.
 
 ## Requirements for the NVIDIA features
 

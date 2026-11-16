@@ -280,78 +280,12 @@ namespace AstroHybrid.App.Services
             return true;
         }
 
-        private async Task GenerateInstallationManifestAsync(string gameDumpPath)
+        private Task GenerateInstallationManifestAsync(string gameDumpPath)
         {
-            var manifest = new InstallationManifest
-            {
-                InstalledAt = DateTime.Now,
-                GameVersion = "01.019.000",
-                GameTitleId = "PPSA21567",
-                AnyPs5Version = GetAnyPs5Version(),
-                KytyVersion = GetKytyVersion(),
-                InstallationPath = Path.Combine(_rootDirectory, "Build", "RunHybrid"),
-                GameDumpPath = gameDumpPath,
-                Files = GetInstalledFiles()
-            };
-
-            var settingsManager = new SettingsManager(_rootDirectory);
-            var settings = settingsManager.Load();
-            settings.InstallationManifest = manifest;
-            settingsManager.Save(settings);
-        }
-
-        private string GetAnyPs5Version()
-        {
-            try
-            {
-                var gitDir = Path.Combine(_rootDirectory, "Tools", "AnyPS5");
-                if (Directory.Exists(gitDir))
-                {
-                    var psi = new ProcessStartInfo("git", "rev-parse --short HEAD")
-                    {
-                        WorkingDirectory = gitDir,
-                        RedirectStandardOutput = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-                    using var proc = Process.Start(psi);
-                    if (proc != null)
-                    {
-                        var output = proc.StandardOutput.ReadToEnd();
-                        WaitForExitAsync(proc).Wait();
-                        return output.Trim();
-                    }
-                }
-            }
-            catch { }
-            return "unknown";
-        }
-
-        private string GetKytyVersion()
-        {
-            try
-            {
-                var gitDir = @"E:\AstroHybrid-Work\source\kyty";
-                if (Directory.Exists(gitDir))
-                {
-                    var psi = new ProcessStartInfo("git", "rev-parse --short HEAD")
-                    {
-                        WorkingDirectory = gitDir,
-                        RedirectStandardOutput = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-                    using var proc = Process.Start(psi);
-                    if (proc != null)
-                    {
-                        var output = proc.StandardOutput.ReadToEnd();
-                        WaitForExitAsync(proc).Wait();
-                        return output.Trim();
-                    }
-                }
-            }
-            catch { }
-            return "unknown";
+            var manifest = InstallationManager.CreateManifest(_rootDirectory, gameDumpPath, "01.019.000", "PPSA21567");
+            manifest.Files = GetInstalledFiles();
+            InstallationManager.SaveManifest(_rootDirectory, manifest);
+            return Task.CompletedTask;
         }
 
         private string[] GetInstalledFiles()

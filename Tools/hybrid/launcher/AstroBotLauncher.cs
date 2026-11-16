@@ -2,6 +2,7 @@
 // (Run-AstroHybrid.bat, no console window). Settings are shared with launcher.ps1
 // (Build\astrohybrid-settings.json). Environment variables are set for this launch only.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -22,7 +23,7 @@ using System.Windows.Forms;
 static class AstroBotLauncher
 {
     static readonly string[] LightingLabels = { "Faster lighting (recommended)", "Original lighting (slower)" };
-    static readonly string[] LightingExes = { "AstroBot-NonRT.exe", "AstroBot.exe" };
+    static readonly string[] LightingExes = { "AstroBot-NonRT-SoftAssert.exe", "AstroBot.exe" };
     static readonly string[] FpsLabels = { "30 FPS - steady (recommended)", "35 FPS", "45 FPS", "50 FPS", "55 FPS", "60 FPS", "No limit" };
     static readonly string[] FpsValues = { "30", "35", "45", "50", "55", "60", "unlimited" };
     static readonly string[] SpeedLabels = { "100% - real time", "95%", "90%", "85%", "80%", "75% (recommended)" };
@@ -37,8 +38,10 @@ static class AstroBotLauncher
     static readonly int[] TargetValues = { 0, 50, 60, 90, 120, 144, 165 };
     static readonly string[] PadLabels = { "Auto - the controller you press (recommended)", "PlayStation (DualSense, DualShock 4)", "Xbox", "Switch Pro (and compatible pads)", "Other / generic" };
     static readonly string[] PadValues = { "auto", "ps", "xbox", "switch", "generic" };
-    static readonly string[] RumbleLabels = { "Off", "Light (40%)", "Medium (70%, recommended)", "Full (100%)", "Strong (150%)" };
-    static readonly string[] RumbleValues = { "0", "40", "70", "100", "150" };
+    static readonly string[] RumbleLabels = { "Off", "Almost off (5%)", "Minimal (10%)", "Very light (20%)", "Light (40%)", "Medium (70%, recommended)", "Full (100%)", "Strong (150%)", "Custom..." };
+    // Percent behind every label; -1 is "Custom", which uses the number box below the list (issue #36).
+    static readonly int[] RumblePresets = { 0, 5, 10, 20, 40, 70, 100, 150, -1 };
+    static readonly int[] LegacyRumblePercents = { 0, 40, 70, 100, 150 };
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct DisplayDevice
@@ -90,19 +93,29 @@ static class AstroBotLauncher
     static PcInfo DetectPc()
     {
         var pc = new PcInfo();
+        string primary = "";
         try
         {
             for (int i = 0; ; i++)
             {
                 var dd = new DisplayDevice { cb = Marshal.SizeOf(typeof(DisplayDevice)) };
                 if (!EnumDisplayDevices(null, i, ref dd, 0)) break;
-                if (i == 0 || (dd.StateFlags & 4) != 0) pc.Gpu = dd.DeviceString.Trim();
-                if ((dd.StateFlags & 4) != 0) break;
+                var name = dd.DeviceString == null ? "" : dd.DeviceString.Trim();
+                if (name.Length == 0) continue;
+                if ((dd.StateFlags & 4) != 0) { primary = name; break; } // primary device
+                if ((dd.StateFlags & 1) != 0 && primary.Length == 0) primary = name; // attached
             }
-            var m = Regex.Match(pc.Gpu, @"RTX\s*(\d{1,2})\d{2}", RegexOptions.IgnoreCase);
-            if (m.Success) pc.RtxSeries = int.Parse(m.Groups[1].Value);
         }
         catch { }
+
+        // Every adapter, not only the one that drives the desktop (issue #24): on a laptop the
+        // desktop adapter is usually the integrated GPU, and the discrete card is never attached to
+        // it, so EnumDisplayDevices alone reports "Intel UHD Graphics" on an RTX 4050 laptop.
+        string gpu = PickGpu(DisplayAdapterNames(), primary);
+        pc.Gpu = gpu.Length > 0 ? gpu : "unknown graphics card";
+
+        var m = Regex.Match(pc.Gpu, @"RTX\s*(\d{1,2})\d{2}", RegexOptions.IgnoreCase);
+        if (m.Success) pc.RtxSeries = int.Parse(m.Groups[1].Value);
         try
         {
             var dm = new DevMode { dmSize = (short)Marshal.SizeOf(typeof(DevMode)) };
@@ -127,6 +140,60 @@ static class AstroBotLauncher
         }
         catch { }
         return pc;
+    }
+
+    // Display adapters Windows has a driver for, from the display class registry key (no WMI and no
+    // extra assembly references, so the release script keeps compiling this file with csc alone).
+    static List<string> DisplayAdapterNames()
+    {
+        var names = new List<string>();
+        try
+        {
+            using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"))
+            {
+                if (key != null)
+                {
+                    foreach (var sub in key.GetSubKeyNames())
+                    {
+                        if (!Regex.IsMatch(sub, "^[0-9]{4}$")) continue;
+                        using (var adapter = key.OpenSubKey(sub))
+                        {
+                            string desc = "";
+                            if (adapter != null)
+                            {
+                                var value = adapter.GetValue("DriverDesc") as string;
+                                if (value != null) desc = value.Trim();
+                            }
+                            if (desc.Length == 0) continue;
+                            var lower = desc.ToLowerInvariant();
+                            if (lower.Contains("basic display") || lower.Contains("basic render") ||
+                                lower.Contains("parsec") || lower.Contains("virtual") ||
+                                lower.Contains("remote") || lower.Contains("indirect")) continue;
+                            if (!names.Contains(desc)) names.Add(desc);
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+        return names;
+    }
+
+    // The card the settings are described for: the same preference as the renderer (an NVIDIA RTX
+    // card, then another discrete card), else the adapter that drives the desktop.
+    static string PickGpu(List<string> names, string primary)
+    {
+        foreach (var name in names)
+            if (Regex.IsMatch(name, @"\b(RTX|GTX)\s*\d", RegexOptions.IgnoreCase)) return name;
+        foreach (var name in names)
+            if (name.IndexOf("NVIDIA", StringComparison.OrdinalIgnoreCase) >= 0) return name;
+        foreach (var name in names)
+            if (Regex.IsMatch(name, @"Radeon\s+RX", RegexOptions.IgnoreCase) ||
+                Regex.IsMatch(name, @"Intel\S*\s+Arc\b", RegexOptions.IgnoreCase)) return name;
+        foreach (var name in names)
+            if (name.IndexOf("Intel", StringComparison.OrdinalIgnoreCase) < 0) return name;
+        return names.Count > 0 ? names[0] : primary;
     }
 
     // The best settings for a PC, from what was measured on the development PC (Ryzen 5 5500,
@@ -195,6 +262,26 @@ static class AstroBotLauncher
         return m.Success && int.TryParse(m.Groups[1].Value, out v) && v >= 0 && v < count ? v : fallback;
     }
 
+    static int ReadIntRange(string json, string key, int fallback, int min, int max)
+    {
+        var m = Regex.Match(json, "\"" + key + "\"\\s*:\\s*(\\d+)");
+        int v;
+        return m.Success && int.TryParse(m.Groups[1].Value, out v) && v >= min && v <= max ? v : fallback;
+    }
+
+    // The "rumble" index an older launcher understands: the closest old preset, never Off for a strength above 0.
+    static int LegacyRumbleIndex(int percent)
+    {
+        percent = Math.Max(0, Math.Min(percent, 200));
+        int best = 0;
+        for (int i = 1; i < LegacyRumblePercents.Length; i++)
+        {
+            if (Math.Abs(LegacyRumblePercents[i] - percent) < Math.Abs(LegacyRumblePercents[best] - percent)) best = i;
+        }
+        if (percent > 0 && LegacyRumblePercents[best] == 0) best = 1;
+        return best;
+    }
+
     static bool ReadBool(string json, string key, bool fallback)
     {
         var m = Regex.Match(json, "\"" + key + "\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
@@ -258,6 +345,9 @@ static class AstroBotLauncher
         var fullscreen = new CheckBox { Text = "Start in fullscreen", AutoSize = true, Checked = ReadBool(json, "fullscreen", true), Location = new Point(150, y) };
         form.Controls.Add(fullscreen);
         y += 34;
+        var ultrawide = new CheckBox { Text = "Ultrawide 21:9 rendering", AutoSize = true, Checked = ReadBool(json, "ultrawide", false), Location = new Point(150, y) };
+        form.Controls.Add(ultrawide);
+        y += 34;
         form.Controls.Add(new Label { Text = "NVIDIA RTX", Font = new Font("Segoe UI", 9f, FontStyle.Bold), AutoSize = true, Location = new Point(18, y) });
         y += 24;
         var upscale = AddRow(form, "Upscaling", UpscaleLabels, ReadInt(json, "upscale", 0, UpscaleLabels.Length), ref y);
@@ -296,19 +386,49 @@ static class AstroBotLauncher
         form.Controls.Add(new Label { Text = "Controls", Font = new Font("Segoe UI", 9f, FontStyle.Bold), AutoSize = true, Location = new Point(18, y) });
         y += 24;
         var pad = AddRow(form, "Controller", PadLabels, ReadInt(json, "pad", 0, PadLabels.Length), ref y);
-        var rumble = AddRow(form, "Vibration", RumbleLabels, ReadInt(json, "rumble", 2, RumbleLabels.Length), ref y);
-        var switchBoost = new CheckBox { Text = "Stronger vibration on Switch-style pads (third-party ones)", AutoSize = true, Checked = ReadBool(json, "switchboost", true), Location = new Point(150, y - 6) };
+        // Strength in percent (#36): "rumblepct" when the file has it, else the old preset index in "rumble".
+        int rumblePercent = ReadIntRange(json, "rumblepct", -1, 0, 200);
+        if (rumblePercent < 0)
+        {
+            int legacy = ReadInt(json, "rumble", 2, LegacyRumblePercents.Length);
+            rumblePercent = LegacyRumblePercents[Math.Max(0, Math.Min(legacy, LegacyRumblePercents.Length - 1))];
+        }
+        int rumblePreset = Array.IndexOf(RumblePresets, rumblePercent);
+        bool customRumble = rumblePreset < 0;
+        if (customRumble) rumblePreset = RumblePresets.Length - 1;
+        var rumble = AddRow(form, "Vibration", RumbleLabels, rumblePreset, ref y);
+        var rumbleCustom = new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = 200,
+            Value = rumblePercent,
+            Width = 70,
+            Location = new Point(150, y),
+            Enabled = customRumble,
+            AccessibleName = "Custom vibration strength in percent",
+        };
+        form.Controls.Add(rumbleCustom);
+        form.Controls.Add(new Label { Text = "Custom strength (%) - pick Custom above to use it", AutoSize = true, Location = new Point(228, y + 4) });
+        Func<int> chosenRumble = () => RumblePresets[rumble.SelectedIndex] >= 0 ? RumblePresets[rumble.SelectedIndex] : (int)rumbleCustom.Value;
+        rumble.SelectedIndexChanged += (s, e) =>
+        {
+            rumbleCustom.Enabled = RumblePresets[rumble.SelectedIndex] < 0;
+            if (!rumbleCustom.Enabled) rumbleCustom.Value = chosenRumble();
+        };
+        y += 30;
+        var switchBoost = new CheckBox { Text = "Stronger vibration on Switch-style pads (third-party ones)", AutoSize = true, Checked = ReadBool(json, "switchboost", true), Location = new Point(150, y) };
         form.Controls.Add(switchBoost);
         y += 22;
         form.Controls.Add(new Label
         {
             Location = new Point(18, y),
-            Size = new Size(424, 46),
+            Size = new Size(424, 60),
             ForeColor = SystemColors.GrayText,
-            Text = "Vibration sets Xbox, Switch and other pads; a DualSense keeps its own haptics. " +
+            Text = "Vibration sets Xbox, Switch and other pads; a DualSense keeps its own haptics. Pick Custom to type any strength from 0 to 200%. " +
+                   "The Switch boost follows the strength (100% or more is what it used to be). " +
                    "Pads without motion sensors (Xbox): press View / Back to tilt with the right stick, again to stop.",
         });
-        y += 50;
+        y += 64;
         var bestButton = new Button { Text = "Best settings for this PC", AutoSize = true, Location = new Point(18, y) };
         form.Controls.Add(bestButton);
         var bestNote = new Label { Location = new Point(18, y + 32), Size = new Size(424, 48), ForeColor = SystemColors.GrayText };
@@ -348,11 +468,12 @@ static class AstroBotLauncher
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
                 File.WriteAllText(settingsPath, string.Format(
-                    "{{\r\n    \"lighting\":  {0},\r\n    \"fps\":  {1},\r\n    \"size\":  {2},\r\n    \"fullscreen\":  {3},\r\n    \"realspeed\":  {4},\r\n    \"speed\":  {5},\r\n    \"overlay\":  {6},\r\n    \"upscale\":  {7},\r\n    \"fgmode\":  {8},\r\n    \"lowlatency\":  {9},\r\n    \"fgtarget\":  {10},\r\n    \"pad\":  {11},\r\n    \"rumble\":  {12},\r\n    \"switchboost\":  {13},\r\n    \"fpsv\":  2\r\n}}",
+                    "{{\r\n    \"lighting\":  {0},\r\n    \"fps\":  {1},\r\n    \"size\":  {2},\r\n    \"fullscreen\":  {3},\r\n    \"ultrawide\":  {4},\r\n    \"realspeed\":  {5},\r\n    \"speed\":  {6},\r\n    \"overlay\":  {7},\r\n    \"upscale\":  {8},\r\n    \"fgmode\":  {9},\r\n    \"lowlatency\":  {10},\r\n    \"fgtarget\":  {11},\r\n    \"pad\":  {12},\r\n    \"rumble\":  {13},\r\n    \"rumblepct\":  {14},\r\n    \"switchboost\":  {15},\r\n    \"fpsv\":  2\r\n}}",
                     lighting.SelectedIndex, fps.SelectedIndex, size.SelectedIndex,
-                    fullscreen.Checked ? "true" : "false", "true", speed.SelectedIndex, overlay.SelectedIndex,
+                    fullscreen.Checked ? "true" : "false", ultrawide.Checked ? "true" : "false", "true", speed.SelectedIndex, overlay.SelectedIndex,
                     upscale.SelectedIndex, framegen.SelectedIndex, lowlat.Checked ? "true" : "false",
-                    target.SelectedIndex, pad.SelectedIndex, rumble.SelectedIndex, switchBoost.Checked ? "true" : "false"));
+                    target.SelectedIndex, pad.SelectedIndex, LegacyRumbleIndex(chosenRumble()), chosenRumble(),
+                    switchBoost.Checked ? "true" : "false"));
             }
             catch { }
             form.DialogResult = DialogResult.OK;
@@ -376,18 +497,27 @@ static class AstroBotLauncher
         string features = "";
         try { features = File.ReadAllText(Path.Combine(runHybrid, "astrohybrid-game.json")); } catch { }
         bool realTimeKnown = features.Length == 0 || Regex.IsMatch(features, "\"RealTimeSpeed\"\\s*:\\s*true");
-        string exeName = LightingExes[lighting.SelectedIndex];
+        bool useUltrawide = ultrawide.Checked;
+        string exeName = useUltrawide
+            ? (lighting.SelectedIndex == 0 ? "AstroBot-NonRT-Ultrawide-SoftAssert.exe" : "AstroBot-Ultrawide.exe")
+            : LightingExes[lighting.SelectedIndex];
+        if (lighting.SelectedIndex == 0 && !File.Exists(Path.Combine(runHybrid, exeName)))
+            exeName = useUltrawide ? "AstroBot-NonRT-Ultrawide.exe" : "AstroBot-NonRT.exe";
         psi.EnvironmentVariables["ASTROHYBRID_EXE"] = File.Exists(Path.Combine(runHybrid, exeName)) ? exeName : "AstroBot.exe";
         psi.EnvironmentVariables["ASTROHYBRID_FPS_LIMIT"] = FpsValues[fps.SelectedIndex];
         psi.EnvironmentVariables["KYTY_GPU_WIDTH"] = SizeValues[size.SelectedIndex, 0].ToString();
         psi.EnvironmentVariables["KYTY_GPU_HEIGHT"] = SizeValues[size.SelectedIndex, 1].ToString();
         psi.EnvironmentVariables["KYTY_GPU_FULLSCREEN"] = fullscreen.Checked ? "1" : "0";
-        // Real-time game speed and the commit fast path (OVERNIGHT.md 2026-11-11, 0 mismatches) are always on.
+        // Real-time game speed is on; keep commit-epoch fast path off and buffer-range fixes on for cloth/bubbles (#30, #35).
         psi.EnvironmentVariables["ASTROHYBRID_GAME_SPEED"] = realTimeKnown ? "1" : "0";
-        psi.EnvironmentVariables["ASTROHYBRID_COMMIT_EPOCH_FASTPATH"] = "1";
+        psi.EnvironmentVariables["ASTROHYBRID_COMMIT_EPOCH_FASTPATH"] = "0";
+        psi.EnvironmentVariables["KYTY_BUFFER_RANGE_FIXES"] = "1";
         psi.EnvironmentVariables["ASTROHYBRID_PAD_PREFER"] = PadValues[pad.SelectedIndex];
-        psi.EnvironmentVariables["ASTROHYBRID_RUMBLE_SCALE"] = RumbleValues[rumble.SelectedIndex];
-        psi.EnvironmentVariables["ASTROHYBRID_RUMBLE_SWITCH_FLOOR"] = switchBoost.Checked ? "96" : "0";
+        // Strength in percent (#36). The Switch boost follows it: 96 of 255 at 100% (the old flat value),
+        // less at lower strengths so a light setting stays light on Joy-Cons and Switch Pro pads.
+        int rumbleStrength = chosenRumble();
+        psi.EnvironmentVariables["ASTROHYBRID_RUMBLE_SCALE"] = rumbleStrength.ToString();
+        psi.EnvironmentVariables["ASTROHYBRID_RUMBLE_SWITCH_FLOOR"] = switchBoost.Checked ? (96 * rumbleStrength / 100).ToString() : "0";
         psi.EnvironmentVariables["ASTROHYBRID_GAME_SPEED_PERCENT"] = SpeedValues[speed.SelectedIndex];
         psi.EnvironmentVariables["ASTROHYBRID_OVERLAY"] = OverlayValues[overlay.SelectedIndex];
         psi.EnvironmentVariables["ASTROHYBRID_WINDOW_TITLE"] = "Astro Bot";

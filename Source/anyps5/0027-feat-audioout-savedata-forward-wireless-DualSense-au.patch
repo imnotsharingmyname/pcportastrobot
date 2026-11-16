@@ -1,0 +1,227 @@
+From 732cfb36a674c27c694cebdb534ab30c243d27a6 Mon Sep 17 00:00:00 2001
+From: faycal <faycalelhandi9@gmail.com>
+Date: Sat, 14 Nov 2026 21:32:18 +0000
+Subject: [PATCH] feat(audioout,savedata): forward wireless DualSense audio to
+ kyty_gpu and export sceSaveDataTransferringMount
+
+---
+ core/libs/prx/libSceAudioOut/src/AudioOut.cpp | 41 ++++++++++++++++++-
+ .../libSceAudioOut/src/AudioOut2Context.cpp   | 25 ++++++++++-
+ .../libSceAudioOut/src/AudioOut2PadMix.cpp    | 28 +++++++++++++
+ .../libSceAudioOut/src/AudioOut2PadMix.hpp    |  1 +
+ .../prx/libSceAudioOut/src/AudioOut2Port.cpp  |  4 +-
+ .../libs/prx/libSceSaveData.native/Export.cpp | 17 +++++++-
+ 6 files changed, 110 insertions(+), 6 deletions(-)
+
+diff --git a/core/libs/prx/libSceAudioOut/src/AudioOut.cpp b/core/libs/prx/libSceAudioOut/src/AudioOut.cpp
+index a7e5f42d7f..fe631f33d9 100644
+--- a/core/libs/prx/libSceAudioOut/src/AudioOut.cpp
++++ b/core/libs/prx/libSceAudioOut/src/AudioOut.cpp
+@@ -332,6 +332,39 @@ static void paceVirtualPort(Port& port, bool hasData, std::unique_lock<std::mute
+     port.virtualQueueEnd += (1000000ULL * port.samplesNum) / port.freq;
+ }
+ 
++static bool tryOutputHostPadPort(Port& port, const void* data, std::unique_lock<std::mutex>& lock) {
++    if ((port.type != PORT_TYPE_PADSPK && port.type != PORT_TYPE_VIBRATION) || port.channels <= 0 || port.channels > 2 || data == nullptr) {
++        return false;
++    }
++    const auto frames = port.samplesNum;
++    const auto ch = static_cast<std::uint32_t>(port.channels);
++    std::vector<float> scaled(static_cast<std::size_t>(frames) * ch);
++    if (formatIsFloat(port.format)) {
++        const auto* src = static_cast<const float*>(data);
++        for (std::uint32_t fr = 0; fr < frames; ++fr) {
++            for (std::uint32_t c = 0; c < ch; ++c) {
++                scaled[fr * ch + c] = src[fr * ch + c] *
++                    (static_cast<float>(port.volume[c]) / static_cast<float>(DEFAULT_VOLUME));
++            }
++        }
++    } else {
++        const auto* src = static_cast<const std::int16_t*>(data);
++        for (std::uint32_t fr = 0; fr < frames; ++fr) {
++            for (std::uint32_t c = 0; c < ch; ++c) {
++                scaled[fr * ch + c] = (static_cast<float>(src[fr * ch + c]) / 32768.0f) *
++                    (static_cast<float>(port.volume[c]) / static_cast<float>(DEFAULT_VOLUME));
++            }
++        }
++    }
++    const auto queuedUs = AudioOut2QueueHostPadAudio(
++        port.freq, port.type == PORT_TYPE_PADSPK, scaled.data(), frames, ch, true, 1.0f);
++    if (queuedUs == 0) {
++        return false;
++    }
++    paceVirtualPort(port, true, lock);
++    return true;
++}
++
+ static void outputVirtualPort(Port& port, const void* data, std::unique_lock<std::mutex>& lock) {
+     const auto pad = port.type == PORT_TYPE_VIBRATION && data != nullptr ? prepareVibration(port, data) : std::vector<float>{};
+     paceVirtualPort(port, data != nullptr, lock);
+@@ -485,7 +518,9 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) try {
+         return -2144993277;
+     }
+ 
+-    if (port->device == 0) {
++    if (tryOutputHostPadPort(*port, ptr, lock)) {
++        // Routed to DualSense Bluetooth/USB speaker or haptics via kyty_gpu.dll.
++    } else if (port->device == 0) {
+         outputVirtualPort(*port, ptr, lock);
+     } else {
+         queueAudio(*port, ptr, lock);
+@@ -522,7 +557,9 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num)
+     Port& first = *getPort(param[0].handle);
+     for (std::uint32_t i = 0; i < num; i++) {
+         Port& port = *getPort(param[i].handle);
+-        if (port.device == 0) {
++        if (tryOutputHostPadPort(port, param[i].ptr, lock)) {
++            // Routed to DualSense Bluetooth/USB speaker or haptics via kyty_gpu.dll.
++        } else if (port.device == 0) {
+             outputVirtualPort(port, param[i].ptr, lock);
+         } else {
+             queueAudio(port, param[i].ptr, lock);
+diff --git a/core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp b/core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp
+index 43ed70daf4..0a41c9e2ee 100644
+--- a/core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp
++++ b/core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp
+@@ -226,6 +226,29 @@ static void Render(AudioOut2Context& context, const AudioOut2Grain& grain) {
+     }
+     std::fill(context.mix.begin(), context.mix.end(), 0.0f);
+     AudioOut2MixPorts(context, grain, context.mix.data(), pad, context.grain);
++    std::uint64_t vibrationQueuedUs = 0;
++    if (pad != nullptr && context.padDevice == 0) {
++        std::vector<float> speakerStereo(static_cast<std::size_t>(context.grain) * 2);
++        std::vector<float> vibrationStereo(static_cast<std::size_t>(context.grain) * 2);
++        for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
++            const float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
++            speakerStereo[frame * 2 + 0] = std::clamp(src[AUDIO_OUT2_PAD_SPEAKER_LEFT], -1.0f, 1.0f);
++            speakerStereo[frame * 2 + 1] = std::clamp(src[AUDIO_OUT2_PAD_SPEAKER_RIGHT], -1.0f, 1.0f);
++            vibrationStereo[frame * 2 + 0] = std::clamp(src[AUDIO_OUT2_PAD_VIBRATION_LEFT], -1.0f, 1.0f);
++            vibrationStereo[frame * 2 + 1] = std::clamp(src[AUDIO_OUT2_PAD_VIBRATION_RIGHT], -1.0f, 1.0f);
++        }
++        const auto speakerQueuedUs = AudioOut2QueueHostPadAudio(
++            AUDIO_OUT2_SAMPLE_RATE, true, speakerStereo.data(), context.grain, 2, true, 1.0f);
++        vibrationQueuedUs = AudioOut2QueueHostPadAudio(
++            AUDIO_OUT2_SAMPLE_RATE, false, vibrationStereo.data(), context.grain, 2, true, 1.0f);
++        if (speakerQueuedUs == 0) {
++            for (std::uint32_t frame = 0; frame < context.grain; ++frame) {
++                const float* src = pad + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS;
++                context.mix[frame * 2 + 0] += src[AUDIO_OUT2_PAD_SPEAKER_LEFT];
++                context.mix[frame * 2 + 1] += src[AUDIO_OUT2_PAD_SPEAKER_RIGHT];
++            }
++        }
++    }
+     for (float& sample : context.mix) {
+         sample = std::clamp(sample * MASTER_GAIN, -1.0f, 1.0f);
+         if (AudioOut2TraceEnabled()) context.summaryPeak = std::max(context.summaryPeak, std::abs(sample));
+@@ -233,7 +256,7 @@ static void Render(AudioOut2Context& context, const AudioOut2Grain& grain) {
+     if (pad != nullptr) {
+         AudioOut2FinishPadMix(pad, context.grain);
+         if (context.padDevice != 0) QueuePadGrain(context);
+-        else {
++        else if (vibrationQueuedUs == 0) {
+             const auto rumble = AudioOut2RumbleFromPadFrames(pad, context.grain);
+             PadSubmitAudioHaptics_nid_postfix(rumble[0], rumble[1]);
+         }
+diff --git a/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.cpp b/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.cpp
+index 5d1a0f387d..c8886e7b39 100644
+--- a/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.cpp
++++ b/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.cpp
+@@ -5,6 +5,9 @@
+ #include <cstring>
+ #include <cmath>
+ #include <stdexcept>
++#ifdef _WIN32
++#include <windows.h>
++#endif
+ 
+ AudioOut2Route AudioOut2RouteForPort(std::uint16_t type, std::uint32_t channels) {
+     if (type == AUDIO_OUT2_PORT_TYPE_PAD_SPEAKER && (channels == 1 || channels == 2)) return AudioOut2Route::PadSpeaker;
+@@ -71,3 +74,28 @@ void AudioOut2WritePadFrames(const float* pad, const AudioOut2PadLayout& layout,
+         }
+     }
+ }
++
++std::uint64_t AudioOut2QueueHostPadAudio(std::uint32_t freq, bool speaker, const void* data, std::uint32_t frames, std::uint32_t channels, bool isFloat, float gain) {
++#ifdef _WIN32
++    using Fn = std::uint64_t (*)(std::uint32_t, int, const void*, std::uint32_t, std::uint32_t, int, float);
++    static Fn cached = nullptr;
++    Fn fn = cached;
++    if (fn == nullptr) {
++        HMODULE mod = GetModuleHandleA("kyty_gpu.dll");
++        if (mod == nullptr) return 0;
++        fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(mod, "KytyGpuQueuePadAudio")));
++        if (fn == nullptr) return 0;
++        cached = fn;
++    }
++    return fn(freq, speaker ? 1 : 0, data, frames, channels, isFloat ? 1 : 0, gain);
++#else
++    (void)freq;
++    (void)speaker;
++    (void)data;
++    (void)frames;
++    (void)channels;
++    (void)isFloat;
++    (void)gain;
++    return 0;
++#endif
++}
+diff --git a/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.hpp b/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.hpp
+index 1d4663c039..b5a362dd40 100644
+--- a/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.hpp
++++ b/core/libs/prx/libSceAudioOut/src/AudioOut2PadMix.hpp
+@@ -32,5 +32,6 @@ void AudioOut2FinishPadMix(float* out, std::uint32_t frames);
+ std::array<std::uint8_t, 2> AudioOut2RumbleFromPadFrames(const float* pad, std::uint32_t frames);
+ AudioOut2PadLayout AudioOut2PadLayoutForDriver(const char* driver);
+ void AudioOut2WritePadFrames(const float* pad, const AudioOut2PadLayout& layout, float* out, std::uint32_t frames);
++std::uint64_t AudioOut2QueueHostPadAudio(std::uint32_t freq, bool speaker, const void* data, std::uint32_t frames, std::uint32_t channels, bool isFloat, float gain = 1.0f);
+ 
+ #endif
+diff --git a/core/libs/prx/libSceAudioOut/src/AudioOut2Port.cpp b/core/libs/prx/libSceAudioOut/src/AudioOut2Port.cpp
+index bc2b4d7d32..1ad0c9fb01 100644
+--- a/core/libs/prx/libSceAudioOut/src/AudioOut2Port.cpp
++++ b/core/libs/prx/libSceAudioOut/src/AudioOut2Port.cpp
+@@ -146,8 +146,8 @@ std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, const AudioOut2
+         if (!port.used || port.generation != generation || port.context != &context || port.channels == 0) continue;
+         const auto route = AudioOut2RouteForPort(port.type, port.channels);
+         const float* volume = captured.pcm.empty() ? port.volume : captured.volume.data();
+-        if (route == AudioOut2Route::Main || (context.padDevice == 0 && route == AudioOut2Route::PadSpeaker)) AccumulatePort(port, data, out, frames, volume);
+-        else if (padOut != nullptr) AccumulatePadPort(port, data, route, padOut, frames, volume);
++        if (route == AudioOut2Route::Main || padOut == nullptr) AccumulatePort(port, data, out, frames, volume);
++        else AccumulatePadPort(port, data, route, padOut, frames, volume);
+         mixed++;
+     }
+     return mixed;
+diff --git a/core/libs/prx/libSceSaveData.native/Export.cpp b/core/libs/prx/libSceSaveData.native/Export.cpp
+index 2caada7a85..d1fceb0ebb 100644
+--- a/core/libs/prx/libSceSaveData.native/Export.cpp
++++ b/core/libs/prx/libSceSaveData.native/Export.cpp
+@@ -882,10 +882,25 @@ int APS5_VABI sceSaveDataTerminate(void) {
+ }
+ 
+ static int transferringMount(const SaveDataTransferringMount* mount, SaveDataMountResult* mount_result) {
+-    (void)mount;
+     if (mount_result != nullptr) {
+         std::memset(mount_result, 0, sizeof(*mount_result));
+     }
++    SAVEDATA_TRACE("transferringMount user=%d title=%s dir=%s", mount != nullptr ? mount->user_id : -1,
++                   mount != nullptr && mount->title_id != nullptr ? mount->title_id->data : "(null)",
++                   mount != nullptr && mount->dir_name != nullptr ? mount->dir_name->data : "(null)");
++    // Some older Astro Bot builds use the transfer entry point as their first
++    // normal-save mount. Keep the SDK's default (NOT_FOUND) semantics, but
++    // allow the hybrid runtime to opt into the compatible fallback.
++    const char* transfer_fallback = std::getenv("APS5_SAVEDATA_TRANSFER_FALLBACK");
++    if (transfer_fallback != nullptr && std::strcmp(transfer_fallback, "0") != 0 &&
++        mount != nullptr &&
++        mount->dir_name != nullptr && mount_result != nullptr) {
++        SaveDataMount3 regular{};
++        regular.user_id   = mount->user_id;
++        regular.dir_name  = mount->dir_name;
++        regular.mount_mode = SAVE_DATA_MOUNT_MODE_CREATE2 | SAVE_DATA_MOUNT_MODE_RDWR;
++        return mount3(&regular, mount_result);
++    }
+     // No PS4-to-PS5 transfer data exists on this console.
+     return SAVE_DATA_ERROR_NOT_FOUND;
+ }
+-- 
+2.55.0.windows.5
+

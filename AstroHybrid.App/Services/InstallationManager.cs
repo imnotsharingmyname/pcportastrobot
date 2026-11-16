@@ -2,6 +2,9 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Diagnostics;
+using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using AstroHybrid.App.Models;
 
@@ -32,14 +35,17 @@ namespace AstroHybrid.App.Services
         public async Task<InstallationState> GetInstallationStateAsync()
         {
             var settings = _settingsManager.Load();
+            var installPath = Path.Combine(_rootDirectory, "Build", "RunHybrid");
+            var param = ReadInstalledParam();
+            var manifest = settings.InstallationManifest;
             var state = new InstallationState
             {
-                InstallPath = Path.Combine(_rootDirectory, "Build", "RunHybrid"),
+                InstallPath = installPath,
                 GameDumpPath = settings.GameDumpPath,
-                GameVersion = settings.GameVersion ?? ReadInstalledParam().Version,
-                GameTitleId = settings.GameTitleId ?? ReadInstalledParam().TitleId,
-                InstalledAt = settings.InstallationManifest?.InstalledAt,
-                Manifest = settings.InstallationManifest
+                GameVersion = settings.GameVersion ?? param.Version,
+                GameTitleId = settings.GameTitleId ?? param.TitleId,
+                InstalledAt = manifest?.InstalledAt,
+                Manifest = manifest
             };
 
             // Check if installation exists and is valid
@@ -49,6 +55,13 @@ namespace AstroHybrid.App.Services
             if (state.IsInstalled)
             {
                 state.InstallSizeBytes = GetDirectorySize(state.InstallPath);
+                if (state.Manifest == null)
+                {
+                    var exePath = Path.Combine(installPath, "AstroBot.exe");
+                    var installedAt = File.Exists(exePath) ? File.GetLastWriteTime(exePath) : (DateTime?)null;
+                    state.Manifest = CreateManifest(_rootDirectory, state.GameDumpPath, state.GameVersion, state.GameTitleId, installedAt);
+                    state.InstalledAt = state.Manifest.InstalledAt;
+                }
             }
             else
             {
@@ -56,6 +69,110 @@ namespace AstroHybrid.App.Services
             }
 
             return state;
+        }
+
+        public static InstallationManifest CreateManifest(
+            string rootDirectory,
+            string? gameDumpPath,
+            string? gameVersion,
+            string? gameTitleId,
+            DateTime? installedAt = null)
+        {
+            var installPath = Path.Combine(rootDirectory, "Build", "RunHybrid");
+            return new InstallationManifest
+            {
+                InstalledAt = installedAt ?? DateTime.Now,
+                GameVersion = gameVersion ?? "",
+                GameTitleId = gameTitleId ?? "",
+                AnyPs5Version = ReadAnyPs5Version(rootDirectory),
+                KytyVersion = ReadKytyVersion(rootDirectory),
+                InstallationPath = installPath,
+                GameDumpPath = gameDumpPath ?? "",
+                Files = Array.Empty<string>()
+            };
+        }
+
+        public static void SaveManifest(string rootDirectory, InstallationManifest manifest)
+        {
+            var settingsManager = new SettingsManager(rootDirectory);
+            var settings = settingsManager.Load();
+            settings.InstallationManifest = manifest;
+            settingsManager.Save(settings);
+        }
+
+        public static string ReadAnyPs5Version(string rootDirectory)
+        {
+            var gitHash = TryReadGitShortHead(Path.Combine(rootDirectory, "Tools", "AnyPS5"));
+            if (!string.IsNullOrEmpty(gitHash))
+                return gitHash!;
+
+            var kernelPrx = Path.Combine(rootDirectory, "Build", "RunHybrid", "libs", "libkernel.prx");
+            if (File.Exists(kernelPrx))
+            {
+                var ver = Assembly.GetExecutingAssembly().GetName().Version;
+                var appVer = ver != null ? $"v{ver.Major}.{ver.Minor}.{ver.Build}" : "release";
+                return $"{appVer} ({File.GetLastWriteTime(kernelPrx):yyyy-MM-dd})";
+            }
+
+            return "unknown";
+        }
+
+        public static string ReadKytyVersion(string rootDirectory)
+        {
+            var dllPath = Path.Combine(rootDirectory, "Build", "RunHybrid", "kyty_gpu.dll");
+            if (File.Exists(dllPath))
+            {
+                try
+                {
+                    var bytes = File.ReadAllBytes(dllPath);
+                    var text = Encoding.ASCII.GetString(bytes);
+                    var match = Regex.Match(text, @"u59-[A-Za-z0-9._-]{8,80}");
+                    if (match.Success)
+                        return match.Value;
+
+                    var info = FileVersionInfo.GetVersionInfo(dllPath);
+                    if (!string.IsNullOrWhiteSpace(info.ProductVersion))
+                        return info.ProductVersion.Trim();
+                }
+                catch { }
+            }
+
+            foreach (var candidate in new[] { @"E:\AstroHybrid-Work\source\kyty", @"C:\kyty-src19" })
+            {
+                var gitHash = TryReadGitShortHead(candidate);
+                if (!string.IsNullOrEmpty(gitHash))
+                    return gitHash!;
+            }
+
+            return "unknown";
+        }
+
+        private static string? TryReadGitShortHead(string repoDir)
+        {
+            try
+            {
+                if (!Directory.Exists(Path.Combine(repoDir, ".git")))
+                    return null;
+
+                var psi = new ProcessStartInfo("git", "rev-parse --short HEAD")
+                {
+                    WorkingDirectory = repoDir,
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi);
+                if (proc == null)
+                    return null;
+
+                var output = proc.StandardOutput.ReadToEnd().Trim();
+                proc.WaitForExit(3000);
+                return proc.ExitCode == 0 && !string.IsNullOrEmpty(output) ? output : null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public async Task<bool> VerifyInstallationAsync(string installPath)

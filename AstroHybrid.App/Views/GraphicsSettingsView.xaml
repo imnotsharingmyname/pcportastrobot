@@ -28,6 +28,7 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource BodyTextStyle}" Text="Resolution" VerticalAlignment="Center" Width="150"/>
@@ -37,10 +38,33 @@
                                   Style="{StaticResource ModernComboBoxStyle}" Width="300"/>
 
                         <CheckBox Grid.Row="1" Grid.Column="1" Content="Start in fullscreen"
-                                  IsChecked="{Binding Fullscreen}"
-                                  Style="{StaticResource ModernCheckBoxStyle}"
-                                  VerticalAlignment="Center" Margin="0,10,0,0"/>
+                                   IsChecked="{Binding Fullscreen}"
+                                   Style="{StaticResource ModernCheckBoxStyle}"
+                                   VerticalAlignment="Center" Margin="0,10,0,0"/>
+
+                        <CheckBox Grid.Row="2" Grid.Column="1" Content="Ultrawide 21:9 rendering"
+                                   IsChecked="{Binding Ultrawide}"
+                                   Style="{StaticResource ModernCheckBoxStyle}"
+                                   VerticalAlignment="Center" Margin="0,10,0,0"/>
                     </Grid>
+                    <TextBlock Text="{Binding UltrawideNote}" Style="{StaticResource MutedTextStyle}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+
+                    <!-- Graphics card (issue #24): integrated and discrete adapters can be chosen. -->
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Style="{StaticResource BodyTextStyle}" Text="Graphics card" VerticalAlignment="Center" Width="150"/>
+                        <ComboBox Grid.Column="1"
+                                  ItemsSource="{Binding GpuLabels}"
+                                  SelectedIndex="{Binding GpuIndex}"
+                                  IsEnabled="{Binding HasGpuChoice}"
+                                  Style="{StaticResource ModernComboBoxStyle}" Width="400"/>
+                    </Grid>
+                    <TextBlock Text="{Binding GpuNote}" Style="{StaticResource MutedTextStyle}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+
                     <CheckBox Content="VSync (no tearing; may add a little input delay)"
                               IsChecked="{Binding VSync}"
                               IsEnabled="{Binding IsVSyncAvailable}"
@@ -78,6 +102,21 @@
                     <TextBlock Text="NVIDIA RTX Features" Style="{StaticResource SectionHeaderStyle}"/>
 
                     <TextBlock Text="{Binding HardwareNote}" Style="{StaticResource MutedTextStyle}" Margin="0,0,0,15" TextWrapping="Wrap"/>
+
+                    <!-- Ray Tracing (OFF / ON) -->
+                    <Grid Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Style="{StaticResource BodyTextStyle}" Text="Ray Tracing (RTX)" VerticalAlignment="Center" Width="150"/>
+                        <ComboBox Grid.Column="1"
+                                  ItemsSource="{Binding RayTracingLabels}"
+                                  SelectedIndex="{Binding RayTracingIndex}"
+                                  Style="{StaticResource ModernComboBoxStyle}" Width="400"/>
+                    </Grid>
+                    <TextBlock Text="{Binding RayTracingNote}" Style="{StaticResource MutedTextStyle}" Margin="0,0,0,12" TextWrapping="Wrap"/>
 
                     <!-- Upscaling -->
                     <Grid Margin="0,0,0,10">

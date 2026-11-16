@@ -4,7 +4,9 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:AstroHybrid.App.Views"
+        xmlns:app="clr-namespace:AstroHybrid.App"
         xmlns:vm="clr-namespace:AstroHybrid.App.ViewModels"
+        xmlns:models="clr-namespace:AstroHybrid.App.Models"
         mc:Ignorable="d"
         Title="AstroHybrid" Height="720" Width="1100"
         WindowStartupLocation="CenterScreen"
@@ -15,6 +17,8 @@
 
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+        <app:UpdateStateToVisibilityConverter x:Key="UpdateStateToVisibilityConverter"/>
+        <local:InverseBooleanToVisibilityConverter x:Key="InverseBooleanToVisibilityConverter"/>
     </Window.Resources>
 
     <Grid>
@@ -136,6 +140,42 @@
                 <ContentControl Grid.Row="0" Content="{Binding CurrentPage, Converter={StaticResource PageTemplateSelector}}"
                                 Margin="30,30,30,0"/>
 
+                <!-- Update Notification Banner -->
+                <Border Grid.Row="0" VerticalAlignment="Top" Margin="30,30,30,0"
+                        Visibility="{Binding ShowUpdateNotification, Converter={StaticResource BooleanToVisibilityConverter}}"
+                        Background="{StaticResource PrimaryBrush}" CornerRadius="8" Padding="20"
+                        BorderBrush="{StaticResource AccentBrush}" BorderThickness="1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="🔔" FontSize="24" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                            <TextBlock Text="NEW ASTROHYBRID UPDATE AVAILABLE" FontSize="14" FontWeight="Bold" Foreground="White"/>
+                            <TextBlock Text="{Binding UpdateState.LatestUpdate.Version, StringFormat='Version {0}'}" FontSize="13" Foreground="#CCFFFFFF" Margin="0,2,0,0"/>
+                            <TextBlock Text="{Binding UpdateState.LatestUpdate.ReleaseNotes}" FontSize="12" Foreground="#AAFFFFFF" TextWrapping="Wrap" MaxWidth="500" Margin="0,8,0,0"/>
+                        </StackPanel>
+                        <Button Grid.Column="2" Content="Update Now" Command="{Binding DownloadUpdateCommand}"
+                                Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" MinHeight="36"
+                                FontSize="13" FontWeight="SemiBold" Margin="16,0,8,0"
+                                Visibility="{Binding UpdateState.IsDownloading, Converter={StaticResource InverseBooleanToVisibilityConverter}}"/>
+                        <Button Grid.Column="2" Content="Downloading..." Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" MinHeight="36"
+                                FontSize="13" FontWeight="SemiBold" Margin="16,0,8,0" IsEnabled="False"
+                                Visibility="{Binding UpdateState.IsDownloading, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                        <Button Grid.Column="3" Content="Ignore for Now" Command="{Binding IgnoreUpdateCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" MinWidth="110" MinHeight="36"
+                                FontSize="13" Margin="8,0,0,0"
+                                Visibility="{Binding UpdateState.IsDownloading, Converter={StaticResource InverseBooleanToVisibilityConverter}}"/>
+                        <Button Grid.Column="3" Content="Cancel" Command="{Binding DismissUpdateNotificationCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" MinWidth="80" MinHeight="36"
+                                FontSize="13" Margin="8,0,0,0"
+                                Visibility="{Binding UpdateState.IsDownloading, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                    </Grid>
+                </Border>
+
                 <!-- Bottom Action Bar -->
                 <Border Grid.Row="1" Padding="30,20" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
                     <Grid>
@@ -151,6 +191,12 @@
                         </StackPanel>
 
                         <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                            <!-- Update button shown when update is available and not downloading/installing -->
+                            <Button Content="Update" Command="{Binding DownloadUpdateCommand}"
+                                    Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" MinHeight="48"
+                                    FontSize="16" FontWeight="SemiBold" Margin="0,0,10,0"
+                                    Visibility="{Binding UpdateState.UpdateAvailable, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                    IsEnabled="{Binding UpdateState.UpdateAvailable, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                             <Button Content="Play" Command="{Binding LaunchGameCommand}"
                                     Style="{StaticResource PrimaryButtonStyle}" MinWidth="140" MinHeight="48"
                                     FontSize="16" FontWeight="SemiBold"

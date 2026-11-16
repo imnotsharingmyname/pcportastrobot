@@ -52,10 +52,17 @@
                         </Grid.ColumnDefinitions>
 
                         <TextBlock Grid.Column="0" Style="{StaticResource BodyTextStyle}" Text="Strength" VerticalAlignment="Center" Width="150"/>
-                        <ComboBox Grid.Column="1"
-                                  ItemsSource="{Binding RumbleLabels}"
-                                  SelectedIndex="{Binding RumbleIndex}"
-                                  Style="{StaticResource ModernComboBoxStyle}" Width="400"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <ComboBox ItemsSource="{Binding RumbleLabels}"
+                                      SelectedIndex="{Binding RumbleIndex}"
+                                      Style="{StaticResource ModernComboBoxStyle}" Width="300"/>
+                            <TextBox Text="{Binding RumbleCustomPercent, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                     IsEnabled="{Binding IsCustomRumble}"
+                                     Style="{StaticResource ModernTextBoxStyle}"
+                                     Width="70" Margin="10,0,0,0"
+                                     ToolTip="0 to 200 percent; choose Custom in the list to change it"/>
+                            <TextBlock Text="%" VerticalAlignment="Center" Margin="6,0,0,0" Style="{StaticResource BodyTextStyle}"/>
+                        </StackPanel>
                     </Grid>
 
                     <CheckBox Content="Stronger vibration on Switch-style pads (third-party ones)"
@@ -80,12 +87,22 @@
                 </StackPanel>
             </Border>
 
-            <!-- Trigger Effects -->
+            <!-- Trigger Effects & Wireless DualSense -->
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
                 <StackPanel>
-                    <TextBlock Text="Adaptive Triggers (DualSense)" Style="{StaticResource SectionHeaderStyle}"/>
+                    <TextBlock Text="DualSense Features (Triggers, Speaker &amp; Haptics)" Style="{StaticResource SectionHeaderStyle}"/>
 
                     <TextBlock Text="{Binding TriggerNote}" Style="{StaticResource BodyTextStyle}" TextWrapping="Wrap" Margin="0,10,0,0"/>
+
+                    <CheckBox Content="DualSense Wireless Speaker over Bluetooth"
+                              IsChecked="{Binding DualSenseWirelessSpeaker}"
+                              Style="{StaticResource ModernCheckBoxStyle}" Margin="0,12,0,0"/>
+
+                    <CheckBox Content="DualSense Wireless HD Haptics over Bluetooth"
+                              IsChecked="{Binding DualSenseWirelessHaptics}"
+                              Style="{StaticResource ModernCheckBoxStyle}" Margin="0,8,0,0"/>
+
+                    <TextBlock Text="{Binding DualSenseWirelessNote}" Style="{StaticResource MutedTextStyle}" Margin="0,8,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
             </Border>
 

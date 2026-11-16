@@ -1,5 +1,6 @@
 using System;
 using System.Text.Json.Serialization;
+using AstroHybrid.App.Services;
 
 namespace AstroHybrid.App.Models
 {
@@ -19,6 +20,10 @@ namespace AstroHybrid.App.Models
 
         [JsonPropertyName("fullscreen")]
         public bool Fullscreen { get; set; } = true;
+
+        // Use the game's 21:9 render-space patch when the display is ultrawide.
+        [JsonPropertyName("ultrawide")]
+        public bool Ultrawide { get; set; } = false;
 
         [JsonPropertyName("realspeed")]
         public bool RealSpeed { get; set; } = true;
@@ -44,8 +49,13 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("pad")]
         public int Controller { get; set; } = 0;
 
+        // Preset index used by older builds: 0 = Off, 1 = 40, 2 = 70, 3 = 100, 4 = 150 (percent).
         [JsonPropertyName("rumble")]
         public int Rumble { get; set; } = 2;
+
+        // Vibration strength in percent (0-200); -1 when the file predates it and only "rumble" is known.
+        [JsonPropertyName("rumblepct")]
+        public int RumblePercent { get; set; } = -1;
 
         [JsonPropertyName("switchboost")]
         public bool SwitchBoost { get; set; } = true;
@@ -75,6 +85,11 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("vsync")]
         public bool VSync { get; set; } = false;
 
+        // Graphics card the launcher describes and hands to the game: index into the detected
+        // adapters, -1 = automatic (the best card, discrete over integrated) - issue #24.
+        [JsonPropertyName("gpu")]
+        public int Gpu { get; set; } = -1;
+
         // Runtime options (Advanced page), passed to Run-AstroHybrid.bat; defaults are the script's own.
         [JsonPropertyName("hangWatchdog")]
         public bool HangWatchdog { get; set; } = false;
@@ -97,6 +112,16 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("triggerState")]
         public bool TriggerState { get; set; } = true;
 
+        // Wireless DualSense features (Bluetooth HID audio/haptics) - issue #34
+        [JsonPropertyName("dsWirelessSpeaker")]
+        public bool DualSenseWirelessSpeaker { get; set; } = true;
+
+        [JsonPropertyName("dsWirelessHaptics")]
+        public bool DualSenseWirelessHaptics { get; set; } = true;
+
+        [JsonPropertyName("skipIntro")]
+        public bool SkipIntro { get; set; } = false;
+
         // Set by the setup wizard: the main window picks the best settings for this PC once.
         [JsonPropertyName("applyBestOnStart")]
         public bool ApplyBestOnStart { get; set; } = false;
@@ -106,6 +131,27 @@ namespace AstroHybrid.App.Models
 
         [JsonPropertyName("lastLaunched")]
         public DateTime? LastLaunched { get; set; }
+
+        // Update settings
+        [JsonPropertyName("lastUpdateCheck")]
+        public DateTime? LastUpdateCheck { get; set; }
+
+        [JsonPropertyName("ignoredUpdateVersion")]
+        public string? IgnoredUpdateVersion { get; set; }
+
+        [JsonPropertyName("autoCheckUpdates")]
+        public bool AutoCheckUpdates { get; set; } = true;
+
+        // Vibration strength the game gets: the stored percent, or the old preset index mapped to percent.
+        [JsonIgnore]
+        public int EffectiveRumblePercent => RumbleSetting.EffectivePercent(RumblePercent, Rumble);
+
+        // Writes both fields after loading, so an older launcher and this build read the same strength.
+        public void NormalizeRumble()
+        {
+            RumblePercent = EffectiveRumblePercent;
+            Rumble = RumbleSetting.ToLegacyIndex(RumblePercent);
+        }
     }
 
     public class InstallationManifest

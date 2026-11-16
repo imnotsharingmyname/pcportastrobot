@@ -24,13 +24,6 @@ $config = Join-Path $root 'AstroHybrid.App\obj\Release\AstroHybrid.exe.config'
 if (-not (Select-String -Path $config -Pattern 'bindingRedirect' -Quiet)) { throw 'generated config has no binding redirects' }
 Copy-Item $config (Join-Path $stage 'AstroHybrid.exe.config')
 Copy-Item (Join-Path $root 'Run-AstroHybrid.bat') $stage
-# The classic launcher, built with AstroHybrid's own icon (no game artwork in the download).
-$csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-$res = Join-Path $root 'AstroHybrid.App\Resources'
-& $csc /nologo /target:winexe /optimize+ "/out:$(Join-Path $stage 'AstroBot Launcher.exe')" "/win32icon:$(Join-Path $res 'astrohybrid.ico')" `
-    "/resource:$(Join-Path $res 'astrohybrid.png'),logo.png" /r:System.Windows.Forms.dll /r:System.Drawing.dll `
-    (Join-Path $root 'Tools\hybrid\launcher\AstroBotLauncher.cs')
-if ($LASTEXITCODE -ne 0) { throw "csc failed ($LASTEXITCODE)" }
 
 # AnyPS5's relinker (needs only the Universal C runtime that ships with Windows 10/11).
 Copy-Item (Join-Path $root 'Build\anyps5\core\relinker\relinker.exe') (Join-Path $stage 'tools')

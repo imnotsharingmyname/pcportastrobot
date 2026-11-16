@@ -14,20 +14,74 @@ namespace AstroHybrid.App.Models
         public DateTime? LastValidated { get; set; }
     }
 
+    // One graphics adapter as Windows reports it. Laptops with hybrid graphics list two: the
+    // processor's integrated GPU (which drives the built-in screen) and the discrete card, so the
+    // launcher must not assume the first one is the card the game renders on (issue #24).
+    public class GpuAdapter
+    {
+        public string Name { get; set; } = "Unknown GPU";
+        public string Vendor { get; set; } = "";
+        public string DriverVersion { get; set; } = "";
+        public string PnpDeviceId { get; set; } = "";
+        public bool IsDiscrete { get; set; } = false;
+        public bool IsIntegrated { get; set; } = false;
+        public bool IsPrimaryDisplay { get; set; } = false;
+        public int RtxSeries { get; set; } = 0;
+        public bool SupportsDlss { get; set; } = false;
+        public bool SupportsFrameGeneration { get; set; } = false;
+        public bool SupportsReflex { get; set; } = false;
+        public int MaxFrameGenMultiplier { get; set; } = 1;
+
+        public string KindLabel => IsDiscrete ? "discrete" : IsIntegrated ? "integrated" : "graphics";
+
+        public string Label => $"{Name} ({KindLabel}){(IsPrimaryDisplay ? ", drives the screen" : "")}";
+    }
+
     public class HardwareInfo
     {
-        public string GpuName { get; set; } = "Unknown GPU";
-        public int RtxSeries { get; set; } = 0;
+        // Every real adapter, in the order Windows reports them. Empty when enumeration fails.
+        public System.Collections.Generic.List<GpuAdapter> Gpus { get; set; } = new();
+
+        // Index into Gpus, or -1 for automatic (the best card: discrete, then NVIDIA RTX).
+        public int SelectedGpuIndex { get; set; } = -1;
+
+        public void SelectGpu(int index)
+        {
+            if (index >= -1 && index < Gpus.Count) SelectedGpuIndex = index;
+        }
+
+        // The card the launcher's features describe and the game is expected to render on.
+        public GpuAdapter? SelectedGpu
+        {
+            get
+            {
+                if (Gpus.Count == 0) return null;
+                if (SelectedGpuIndex >= 0 && SelectedGpuIndex < Gpus.Count) return Gpus[SelectedGpuIndex];
+                // Automatic mirrors what the renderer does: a discrete card wins over integrated
+                // graphics; an RTX card wins over other discrete cards.
+                foreach (var gpu in Gpus)
+                    if (gpu.IsDiscrete && gpu.RtxSeries >= 20) return gpu;
+                foreach (var gpu in Gpus)
+                    if (gpu.IsDiscrete) return gpu;
+                foreach (var gpu in Gpus)
+                    if (gpu.IsPrimaryDisplay) return gpu;
+                return Gpus[0];
+            }
+        }
+
+        public string GpuName => SelectedGpu?.Name ?? "Unknown GPU";
+        public int RtxSeries => SelectedGpu?.RtxSeries ?? 0;
+        public bool SupportsDlss => SelectedGpu?.SupportsDlss == true;
+        public bool SupportsFrameGeneration => SelectedGpu?.SupportsFrameGeneration == true;
+        public bool SupportsReflex => SelectedGpu?.SupportsReflex == true;
+        public int MaxFrameGenMultiplier => SelectedGpu?.MaxFrameGenMultiplier ?? 1;
+
         public string CpuName { get; set; } = "Unknown CPU";
         public int CpuThreads { get; set; } = Environment.ProcessorCount;
         public int RamGb { get; set; } = 0;
         public int ScreenWidth { get; set; } = 1920;
         public int ScreenHeight { get; set; } = 1080;
         public int RefreshRate { get; set; } = 60;
-        public bool SupportsDlss { get; set; } = false;
-        public bool SupportsFrameGeneration { get; set; } = false;
-        public bool SupportsReflex { get; set; } = false;
-        public int MaxFrameGenMultiplier { get; set; } = 1;
     }
 
     public class ControllerInfo

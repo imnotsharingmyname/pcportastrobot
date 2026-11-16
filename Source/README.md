@@ -7,10 +7,9 @@ source tree exactly (same Git tree hash).
 
 | File in the download | Built from |
 |---|---|
-| `Build\RunHybrid\kyty_gpu.dll` | KytyPS5 (Jetsku), tag `u59-windows-20261024-int21` (commit `744705ee1df4b0acb1af382ff5c32ca4a20aa5f7`) + `Source/kyty-hybrid/*.patch` (35 patches) |
-| `Build\RunHybrid\libs\*.prx`, `astrohybrid_host.dll`, `tools\relinker.exe` | AnyPS5, upstream `main` commit `319621ba2e578bd053b0baba2877fe70520e0737` + `Source/anyps5/*.patch` (26 patches) |
+| `Build\RunHybrid\kyty_gpu.dll` | KytyPS5 (Jetsku), tag `u59-windows-20261024-int21` (commit `744705ee1df4b0acb1af382ff5c32ca4a20aa5f7`) + `Source/kyty-hybrid/*.patch` (36 patches) |
+| `Build\RunHybrid\libs\*.prx`, `astrohybrid_host.dll`, `tools\relinker.exe` | AnyPS5, upstream `main` commit `319621ba2e578bd053b0baba2877fe70520e0737` + `Source/anyps5/*.patch` (27 patches) |
 | `AstroHybrid.exe` | `AstroHybrid.App/` in this repository |
-| `AstroBot Launcher.exe` | `Tools/hybrid/launcher/AstroBotLauncher.cs` in this repository |
 | `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `sl.*.dll`, `NvLowLatencyVk.dll` | NVIDIA runtime files, unmodified (DLSS SDK / Streamline 2.14.16), under the licences in `licenses/` |
 | `Build\RunHybrid\anyps5-fonts\*` | Noto fonts, unmodified (SIL Open Font License) |
 

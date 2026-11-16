@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
 using System.Windows.Media;
+using AstroHybrid.App.Models;
 
 namespace AstroHybrid.App
 {
@@ -139,6 +140,26 @@ namespace AstroHybrid.App
                 }
             }
             return "";
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            throw new NotSupportedException();
+        }
+    }
+
+    // UpdateState to Visibility converter
+    public class UpdateStateToVisibilityConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is UpdateState state)
+            {
+                return state.UpdateAvailable && state.LatestUpdate != null && !state.IsDownloading && !state.IsInstalling
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            }
+            return Visibility.Collapsed;
         }
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

@@ -103,6 +103,21 @@
                                   IsChecked="{Binding TriggerState}"
                                   Style="{StaticResource ModernCheckBoxStyle}"/>
                         <TextBlock Text="{Binding TriggerNote2}" Style="{StaticResource MutedTextStyle}" Margin="28,4,0,10" TextWrapping="Wrap"/>
+
+                        <CheckBox Content="DualSense Wireless Speaker (Bluetooth HID audio)"
+                                  IsChecked="{Binding DualSenseWirelessSpeaker}"
+                                  Style="{StaticResource ModernCheckBoxStyle}"/>
+                        <TextBlock Text="{Binding DualSenseWirelessSpeakerNote}" Style="{StaticResource MutedTextStyle}" Margin="28,4,0,10" TextWrapping="Wrap"/>
+
+                        <CheckBox Content="DualSense Wireless Haptics (Bluetooth HID haptics)"
+                                  IsChecked="{Binding DualSenseWirelessHaptics}"
+                                  Style="{StaticResource ModernCheckBoxStyle}"/>
+                        <TextBlock Text="{Binding DualSenseWirelessHapticsNote}" Style="{StaticResource MutedTextStyle}" Margin="28,4,0,10" TextWrapping="Wrap"/>
+
+                        <CheckBox Content="Skip Intro Videos (-skipIntro)"
+                                  IsChecked="{Binding SkipIntro}"
+                                  Style="{StaticResource ModernCheckBoxStyle}"/>
+                        <TextBlock Text="{Binding SkipIntroNote}" Style="{StaticResource MutedTextStyle}" Margin="28,4,0,10" TextWrapping="Wrap"/>
                     </StackPanel>
                 </StackPanel>
             </Border>

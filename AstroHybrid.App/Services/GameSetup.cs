@@ -22,6 +22,8 @@ namespace AstroHybrid.App.Services
         public bool RealTimeSpeed { get; set; }
         // The game code was converted for CPUs without AMD-only instructions (relinker --to-intel).
         public bool IntelConversion { get; set; }
+        // 21:9 render-space patch (the original game constant is 16:9).
+        public bool Ultrawide { get; set; }
         // Guest address of the game's frame-rate block (f64 60.0, f32 1/60, u64 16666 microseconds), found by
         // those values in AstroBot.exe; 0 = not found. Passed to the engine as ASTROHYBRID_GAME_STEP_ADDR.
         public ulong GameStepAddress { get; set; }
@@ -79,6 +81,13 @@ namespace AstroHybrid.App.Services
             ("soft command-buffer assert",
              "554889e5488d3ded6fbb07488d0dc47fc2074c8d052299e407be1f000000ba0100000031c0e8660eb6ff85c07402cd42488d3d3c54d20731c0e88235fbffcd4131c05dc3",
              "554889e5eb2a3ded6fbb07488d0dc47fc2074c8d052299e407be1f000000ba0100000031c0e8660eb6ff85c07402cd42488d3d3c54d20731c0e88235fbff909031c05dc3"),
+        };
+
+        // Astro Bot's internal render aspect constant: 16:9 -> 2.3888889 (3440x1440 / 21:9-class displays).
+        // The patch is kept as a separate executable variant so 16:9 users retain the original framing.
+        private static readonly (string Name, string Original, string Patched)[] UltrawidePatches =
+        {
+            ("ultrawide render aspect", "398EE33F", "8EE31840"),
         };
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -141,14 +150,31 @@ namespace AstroHybrid.App.Services
 
             Report(80, "Applying the faster-lighting patch...");
             var baseBytes = File.ReadAllBytes(Path.Combine(_runHybrid, "AstroBot.exe"));
+            bool clothPatched = ApplyClothPhysicsPatches(baseBytes, Log);
+            bool cmdbufPatched = ApplyCommandBufferPatches(baseBytes, Log);
+            if (clothPatched || cmdbufPatched)
+                File.WriteAllBytes(Path.Combine(_runHybrid, "AstroBot.exe"), baseBytes);
+            var ultrawide = (byte[])baseBytes.Clone();
+            features.Ultrawide = ApplyAllOccurrences(ultrawide, UltrawidePatches, Log);
+            if (features.Ultrawide)
+                WriteVariant(ultrawide, "AstroBot-Ultrawide");
             var nonRt = (byte[])baseBytes.Clone();
             features.FasterLighting = ApplyAll(nonRt, FasterLightingPatches, Log);
             if (features.FasterLighting)
             {
                 WriteVariant(nonRt, "AstroBot-NonRT");
+                var nonRtUltrawide = (byte[])nonRt.Clone();
+                if (features.Ultrawide && ApplyAllOccurrences(nonRtUltrawide, UltrawidePatches, Log))
+                    WriteVariant(nonRtUltrawide, "AstroBot-NonRT-Ultrawide");
                 var soft = (byte[])nonRt.Clone();
                 if (ApplyAll(soft, SoftAssertPatches, Log))
                     WriteVariant(soft, "AstroBot-NonRT-SoftAssert");
+                if (features.Ultrawide)
+                {
+                    var softUltrawide = (byte[])nonRtUltrawide.Clone();
+                    if (ApplyAll(softUltrawide, SoftAssertPatches, Log))
+                        WriteVariant(softUltrawide, "AstroBot-NonRT-Ultrawide-SoftAssert");
+                }
             }
             // Real-time speed needs the frame-rate block; it is found by its initial values in any version (the
             // engine checks the block again before every use and turns the feature off if it is not one).
@@ -158,6 +184,8 @@ namespace AstroHybrid.App.Services
 
             File.WriteAllText(Path.Combine(_runHybrid, GameFeatures.FileName),
                 JsonSerializer.Serialize(features, new JsonSerializerOptions { WriteIndented = true }));
+            InstallationManager.SaveManifest(_root,
+                InstallationManager.CreateManifest(_root, dump, version, titleId, features.SetupAt));
             Report(100, "Done.");
             return features;
         }
@@ -271,6 +299,9 @@ namespace AstroHybrid.App.Services
         {
             DeleteTree(app0);
             Directory.CreateDirectory(app0);
+            var archive = Path.Combine(_runHybrid, "app0.zar");
+            if (File.Exists(archive))
+                File.Delete(archive);
             foreach (var dir in Directory.GetDirectories(dump))
             {
                 var name = Path.GetFileName(dir);
@@ -292,7 +323,17 @@ namespace AstroHybrid.App.Services
                 }
             }
             foreach (var file in Directory.GetFiles(dump))
+            {
+                // app0.zar belongs beside the app0 directory so the runtime can mount it as the
+                // streamed replacement for app0\data. It must not be copied inside app0 itself.
+                if (Path.GetFileName(file).Equals("app0.zar", StringComparison.OrdinalIgnoreCase))
+                {
+                    LinkOrCopy(file, archive);
+                    log("app0.zar: linked beside app0 for streamed data");
+                    continue;
+                }
                 LinkOrCopy(file, Path.Combine(app0, Path.GetFileName(file)));
+            }
             // args.txt carries the game's start arguments; some dumps leave it out, and without "-mode product" the
             // game starts as a development build that reads its data from the developer's host and stops at its
             // error screen. The standard arguments go into app0 (never into the dump).
@@ -334,6 +375,117 @@ namespace AstroHybrid.App.Services
             Directory.Delete(path, false);
         }
 
+        // Keep ClothSimulation and ApCloth stepped at <= 1/60s when real-time game speed runs below 60 FPS (#30, #35).
+        // Leaves the main game loop untouched so gameplay stays 100% real-time while cloth/blankets stay stable.
+        private static bool ApplyClothPhysicsPatches(byte[] data, Action<string> log)
+        {
+            int cave1Match = FindUnique(data, Hex("FE08C3" + new string('C', 26) + "488B05"), out int cave1Count);
+            int cave2Match = FindUnique(data, Hex("FE08C3" + new string('C', 30) + "C5FA1005"), out int cave2Count);
+            int apClothMatch = FindUnique(data, Hex("488B8380000000488B8B88000000C5F8298540F8FFFF4839C8742C"), out int apClothCount);
+            if (cave1Match < 0 || cave2Match < 0 || apClothMatch < 0)
+            {
+                log($"cloth physics patch skipped (matches: cave1={cave1Count}, cave2={cave2Count}, apCloth={apClothCount})");
+                return false;
+            }
+            int cave1Off = cave1Match + 3;
+            int getDtUsOff = cave1Match + 16;
+            int cave2Off = cave2Match + 3;
+            int apClothStoreOff = apClothMatch + 14;
+            int cloth1CallOff = FindUniqueCallTo(data, Hex("C578294580"), Hex("C4E1F96EC0"), getDtUsOff, 0, data.Length, out int cloth1Count);
+            int cloth2Count = 0;
+            int cloth2CallOff = cloth1CallOff < 0 ? -1 : FindUniqueCallTo(data, Hex("C5F82945C0"), Hex("C4E1F96EC0"), getDtUsOff, cloth1CallOff, Math.Min(data.Length, cloth1CallOff + 0x10000), out cloth2Count);
+            if (cloth1CallOff < 0 || cloth2CallOff < 0 || !InSameSection(data, cave1Off, cave2Off, apClothStoreOff, cloth1CallOff, cloth2CallOff))
+            {
+                log($"cloth physics patch skipped (cloth1={cloth1Count}, cloth2={cloth2Count})");
+                return false;
+            }
+
+            // Pin ClothSimulation::get_dt_us calls to 16666 us (1/60s).
+            byte[] fixedUs = Hex("B81A410000");
+            Array.Copy(fixedUs, 0, data, cloth1CallOff, fixedUs.Length);
+            Array.Copy(fixedUs, 0, data, cloth2CallOff, fixedUs.Length);
+
+            // Clamp ApCloth step dt in xmm0 to min(dt, 1.0f/60.0f) via two INT3 code caves.
+            byte[] cave1Code = Hex("C5FA5DC1C5F8298540F8FFFFC3");
+            Array.Copy(cave1Code, 0, data, cave1Off, cave1Code.Length);
+
+            byte[] cave2Prefix = Hex("BA8988883CC4E1F96ECA");
+            Array.Copy(cave2Prefix, 0, data, cave2Off, cave2Prefix.Length);
+            data[cave2Off + 10] = 0xE9;
+            Array.Copy(BitConverter.GetBytes(cave1Off - (cave2Off + 15)), 0, data, cave2Off + 11, 4);
+
+            data[apClothStoreOff] = 0xE8;
+            Array.Copy(BitConverter.GetBytes(cave2Off - (apClothStoreOff + 5)), 0, data, apClothStoreOff + 1, 4);
+            data[apClothStoreOff + 5] = 0x0F;
+            data[apClothStoreOff + 6] = 0x1F;
+            data[apClothStoreOff + 7] = 0x00;
+
+            log($"cloth physics 60Hz clamp applied (cloth1=0x{cloth1CallOff:x}, cloth2=0x{cloth2CallOff:x}, apCloth=0x{apClothStoreOff:x})");
+            return true;
+        }
+
+        // Prevent worker command buffer exhaustion and NULL memcpy crashes in heavy scenes (#47, #50, #6).
+        // Raises the 5-worker command buffer MiB table (7,7,4,4,6 -> 8,8,8,8,8) and skips memcpy when dst is NULL.
+        // Note: Do NOT patch 0x471644 (guard0); its eb 37 jump is shared by non-null allocations and skipping it drops command buffer copies.
+        private static bool ApplyCommandBufferPatches(byte[] data, Action<string> log)
+        {
+            return ApplyAll(data, new[]
+            {
+                ("cmdbuf_worker_mib_table",
+                    "0700000007000000040000000400000006000000100020003000400008000000",
+                    "0800000008000000080000000800000008000000100020003000400008000000"),
+                ("cmdbuf_null_memcpy_guard1",
+                    "4531FFEB0F49C1E4024D29E74983E7FC4D897E18488B7318",
+                    "4531FFEB2649C1E4024D29E74983E7FC4D897E18488B7318"),
+                ("cmdbuf_null_memcpy_guard2",
+                    "4531FFEB0F49C1E4024D29E74983E7FC4D897E18488B7328",
+                    "4531FFEB5849C1E4024D29E74983E7FC4D897E18488B7328"),
+                ("cmdbuf_null_memcpy_guard3",
+                    "4531FFEB134A8D04A5000000004929C74983E7FC4D897E18488B7320",
+                    "4531FFEB634A8D04A5000000004929C74983E7FC4D897E18488B7320"),
+            }, log);
+        }
+
+        private static int FindUniqueCallTo(byte[] data, byte[] prefix, byte[] suffix, int targetOffset, int startOff, int endOff, out int count)
+        {
+            count = 0;
+            int found = -1;
+            int total = prefix.Length + 5 + suffix.Length;
+            int limit = Math.Min(endOff, data.Length) - total;
+            for (int i = Math.Max(0, startOff); i <= limit; i++)
+            {
+                if (data[i] != prefix[0] || data[i + prefix.Length] != 0xE8) continue;
+                bool ok = true;
+                for (int j = 1; j < prefix.Length; j++)
+                    if (data[i + j] != prefix[j]) { ok = false; break; }
+                if (!ok) continue;
+                int callOff = i + prefix.Length;
+                if (callOff + 5 + BitConverter.ToInt32(data, callOff + 1) != targetOffset) continue;
+                for (int j = 0; j < suffix.Length; j++)
+                    if (data[callOff + 5 + j] != suffix[j]) { ok = false; break; }
+                if (!ok) continue;
+                count++;
+                found = callOff;
+                if (count > 1) return -1;
+            }
+            return count == 1 ? found : -1;
+        }
+
+        private static bool InSameSection(byte[] exe, params int[] offsets)
+        {
+            int pe = BitConverter.ToInt32(exe, 0x3C);
+            int sections = BitConverter.ToUInt16(exe, pe + 6);
+            int optional = BitConverter.ToUInt16(exe, pe + 20);
+            for (int s = 0; s < sections; s++)
+            {
+                int o = pe + 24 + optional + s * 40;
+                uint rawSize = BitConverter.ToUInt32(exe, o + 16), rawPtr = BitConverter.ToUInt32(exe, o + 20);
+                if (offsets.All(off => off >= rawPtr && off < rawPtr + rawSize))
+                    return true;
+            }
+            return false;
+        }
+
         private static int FindUnique(byte[] data, byte[] pattern, out int count)
         {
             count = 0;
@@ -373,6 +525,37 @@ namespace AstroHybrid.App.Services
                 var bytes = Hex(patches[i].Patched);
                 Array.Copy(bytes, 0, data, offsets[i], bytes.Length);
                 log($"patch '{patches[i].Name}' at 0x{offsets[i]:x}");
+            }
+            return true;
+        }
+
+        // Some game constants are intentionally duplicated in the executable. The ultrawide aspect
+        // constant is one of those: every copy must change or the game can still use 16:9 in one path.
+        private static bool ApplyAllOccurrences(byte[] data, (string Name, string Original, string Patched)[] patches, Action<string> log)
+        {
+            foreach (var (name, original, patched) in patches)
+            {
+                var source = Hex(original);
+                var replacement = Hex(patched);
+                int count = 0;
+                for (int i = 0; i <= data.Length - source.Length; i++)
+                {
+                    bool match = true;
+                    for (int j = 0; j < source.Length; j++)
+                    {
+                        if (data[i + j] != source[j]) { match = false; break; }
+                    }
+                    if (!match) continue;
+                    Array.Copy(replacement, 0, data, i, replacement.Length);
+                    count++;
+                    log($"patch '{name}' at 0x{i:x}");
+                    i += source.Length - 1;
+                }
+                if (count == 0)
+                {
+                    log($"patch '{name}': found 0 times, skipped (this game version differs)");
+                    return false;
+                }
             }
             return true;
         }

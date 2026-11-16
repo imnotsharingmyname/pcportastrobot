@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using AstroHybrid.App.Models;
 
 namespace AstroHybrid.App.ViewModels
@@ -15,7 +17,8 @@ namespace AstroHybrid.App.ViewModels
         }
 
         // Resolution
-        public string[] ResolutionLabels => new[] { "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440" };
+        // Indices 0..3 = 16:9, indices 4..5 = 21:9 ultrawide (#58)
+        public string[] ResolutionLabels => new[] { "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "2560 x 1080 (21:9)", "3440 x 1440 (21:9)" };
 
         public int ResolutionIndex
         {
@@ -28,6 +31,80 @@ namespace AstroHybrid.App.ViewModels
                     OnPropertyChanged();
                     _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
                 }
+            }
+        }
+
+        // Graphics card (issue #24). A laptop with hybrid graphics reports two adapters, and the one
+        // that drives the built-in screen is usually the integrated GPU: the launcher must describe
+        // (and enable NVIDIA features for) a card the user can pick, not just the first adapter.
+        public bool HasGpuChoice => (_mainViewModel.HardwareInfo?.Gpus.Count ?? 0) > 1;
+
+        public string[] GpuLabels
+        {
+            get
+            {
+                var labels = new List<string> { "Automatic - best graphics card" };
+                foreach (var gpu in _mainViewModel.HardwareInfo?.Gpus ?? new List<GpuAdapter>())
+                    labels.Add(gpu.Label);
+                return labels.ToArray();
+            }
+        }
+
+        public int GpuIndex
+        {
+            get => (_mainViewModel.HardwareInfo?.SelectedGpuIndex ?? -1) + 1;
+            set
+            {
+                var hardware = _mainViewModel.HardwareInfo;
+                var selected = value - 1;
+                if (hardware == null || selected < -1 || selected >= hardware.Gpus.Count || hardware.SelectedGpuIndex == selected)
+                    return;
+
+                hardware.SelectGpu(selected);
+                _mainViewModel.Settings.Gpu = selected;
+
+                // DLSS and frame generation need the NVIDIA card: a card without them turns the
+                // options off instead of leaving settings the launcher cannot honour.
+                if (!hardware.SupportsDlss && _mainViewModel.Settings.Upscale != 0)
+                    _mainViewModel.Settings.Upscale = 0;
+                if (!hardware.SupportsFrameGeneration && _mainViewModel.Settings.FrameGenMode != 0)
+                    _mainViewModel.Settings.FrameGenMode = 0;
+
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(GpuNote));
+                OnPropertyChanged(nameof(HardwareNote));
+                OnPropertyChanged(nameof(UpscaleIndex));
+                OnPropertyChanged(nameof(FrameGenIndex));
+                OnPropertyChanged(nameof(SupportsDlss));
+                OnPropertyChanged(nameof(SupportsReflex));
+                OnPropertyChanged(nameof(IsFrameGenAvailable));
+                _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.HardwareInfo));
+                _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+            }
+        }
+
+        public string GpuNote
+        {
+            get
+            {
+                var hardware = _mainViewModel.HardwareInfo;
+                if (hardware == null || hardware.Gpus.Count == 0)
+                    return "No graphics card detected.";
+
+                var detected = string.Join(", ", hardware.Gpus.Select(g =>
+                    $"{g.Name} ({(g.IsDiscrete ? "discrete" : g.IsIntegrated ? "integrated" : "graphics")})"));
+                var text = "Detected: " + detected + ".";
+
+                if (hardware.SelectedGpuIndex < 0)
+                    text += " Automatic uses the discrete card: the renderer prefers one over integrated graphics.";
+                else
+                    text += " The choice is passed to the game as ANYPS5_GPU; the renderer also prefers a discrete card by itself.";
+
+                if (hardware.SelectedGpu?.RtxSeries >= 20)
+                    text += " DLSS, Reflex and frame generation use this card.";
+                else if (hardware.Gpus.Any(g => g.RtxSeries >= 20))
+                    text += " The NVIDIA options need the RTX card: pick it, or Automatic, to use them.";
+                return text;
             }
         }
 
@@ -45,6 +122,54 @@ namespace AstroHybrid.App.ViewModels
                 }
             }
         }
+
+        // Ultrawide render-space patch (issue #29/#33/#58).
+        public bool Ultrawide
+        {
+            get => _mainViewModel.Settings.Ultrawide;
+            set
+            {
+                if (_mainViewModel.Settings.Ultrawide != value)
+                {
+                    _mainViewModel.Settings.Ultrawide = value;
+                    if (value && _mainViewModel.Settings.Size < 4)
+                    {
+                        _mainViewModel.Settings.Size = _mainViewModel.Settings.Size == 3 ? 5 : 4;
+                    }
+                    else if (!value && _mainViewModel.Settings.Size >= 4)
+                    {
+                        _mainViewModel.Settings.Size = _mainViewModel.Settings.Size == 5 ? 3 : 2;
+                    }
+                    OnPropertyChanged();
+                    OnPropertyChanged(nameof(ResolutionIndex));
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
+        }
+
+        public string UltrawideNote => "Uses the 21:9 game patch and 21:9 window dimensions (2560x1080 / 3440x1440) when enabled; 16:9 remains unchanged.";
+
+        // Ray Tracing / Lighting mode (0 = OFF / Non-RT, 1 = ON / Ray Tracing)
+        public string[] RayTracingLabels => new[] { "OFF - Faster lighting (Non-RT, recommended)", "ON - Ray Tracing (Original lighting)" };
+
+        public int RayTracingIndex
+        {
+            get => _mainViewModel.Settings.Lighting;
+            set
+            {
+                if (_mainViewModel.Settings.Lighting != value)
+                {
+                    _mainViewModel.Settings.Lighting = value;
+                    OnPropertyChanged();
+                    OnPropertyChanged(nameof(RayTracingNote));
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
+        }
+
+        public string RayTracingNote => _mainViewModel.Settings.Lighting == 1
+            ? "Ray Tracing ON: runs AstroBot.exe with full GI probes and ray-traced lighting shaders (higher GPU load)."
+            : "Ray Tracing OFF: runs AstroBot-NonRT-SoftAssert.exe for faster performance and steadier frame times.";
 
         // NVIDIA frame generation presents the frames itself, and its VSync works only on D3D12 (Streamline
         // DLSS-G guide, 22.5); this port draws with Vulkan, so VSync applies only with frame generation off.

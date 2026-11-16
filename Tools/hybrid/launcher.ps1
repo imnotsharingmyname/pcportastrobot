@@ -10,7 +10,7 @@ $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $settingsPath = Join-Path $root 'Build\astrohybrid-settings.json'
 
 $lightingLabels = @('Faster lighting (recommended)', 'Original lighting (slower)')
-$lightingExes   = @('AstroBot-NonRT.exe', 'AstroBot.exe')
+$lightingExes   = @('AstroBot-NonRT-SoftAssert.exe', 'AstroBot.exe')
 $fpsLabels = @('30 FPS - steady, even pacing (recommended)', '40 FPS', '45 FPS', '60 FPS', '120 FPS', 'No limit')
 $fpsValues = @('30', '40', '45', '60', '120', 'unlimited')
 $sizeLabels = @('1280 x 720', '1600 x 900', '1920 x 1080', '2560 x 1440')
@@ -64,6 +64,13 @@ $fullscreen.Checked = [bool]$settings.fullscreen
 $fullscreen.Location = New-Object Drawing.Point(150, $y)
 $form.Controls.Add($fullscreen)
 $y += 28
+$ultrawide = New-Object Windows.Forms.CheckBox
+$ultrawide.Text = 'Ultrawide 21:9 rendering'
+$ultrawide.AutoSize = $true
+$ultrawide.Checked = [bool]$settings.ultrawide
+$ultrawide.Location = New-Object Drawing.Point(150, $y)
+$form.Controls.Add($ultrawide)
+$y += 28
 $realspeed = New-Object Windows.Forms.CheckBox
 $realspeed.Text = 'Real-time game speed (no slow motion below 60 FPS)'
 $realspeed.AutoSize = $true
@@ -91,7 +98,7 @@ $cancel.Location = New-Object Drawing.Point(342, 320)
 $cancel.DialogResult = 'Cancel'
 $play.Add_Click({
     try {
-        $out = [ordered]@{ lighting = $lighting.SelectedIndex; fps = $fps.SelectedIndex; size = $size.SelectedIndex; fullscreen = $fullscreen.Checked; realspeed = $realspeed.Checked }
+        $out = [ordered]@{ lighting = $lighting.SelectedIndex; fps = $fps.SelectedIndex; size = $size.SelectedIndex; fullscreen = $fullscreen.Checked; ultrawide = $ultrawide.Checked; realspeed = $realspeed.Checked }
         [void][IO.Directory]::CreateDirectory((Split-Path $settingsPath -Parent))
         [IO.File]::WriteAllText($settingsPath, ($out | ConvertTo-Json))
         $form.DialogResult = 'OK'
@@ -104,11 +111,19 @@ $form.CancelButton = $cancel
 $form.Controls.AddRange(@($play, $cancel))
 
 $result = $form.ShowDialog()
-$chosen = @{ lighting = $lighting.SelectedIndex; fps = $fps.SelectedIndex; size = $size.SelectedIndex; fullscreen = $fullscreen.Checked; realspeed = $realspeed.Checked }
+$chosen = @{ lighting = $lighting.SelectedIndex; fps = $fps.SelectedIndex; size = $size.SelectedIndex; fullscreen = $fullscreen.Checked; ultrawide = $ultrawide.Checked; realspeed = $realspeed.Checked }
 $form.Dispose()
 if ($result -ne 'OK') { exit 0 }
 
-$env:ASTROHYBRID_EXE = $lightingExes[$chosen.lighting]
+    $env:ASTROHYBRID_EXE = $lightingExes[$chosen.lighting]
+    if ($chosen.ultrawide) {
+        $env:ASTROHYBRID_EXE = if ($chosen.lighting -eq 0) { 'AstroBot-NonRT-Ultrawide-SoftAssert.exe' } else { 'AstroBot-Ultrawide.exe' }
+        if ($chosen.lighting -eq 0 -and -not (Test-Path (Join-Path $root 'Build\RunHybrid\AstroBot-NonRT-Ultrawide-SoftAssert.exe'))) {
+            $env:ASTROHYBRID_EXE = 'AstroBot-NonRT-Ultrawide.exe'
+        }
+    } elseif ($chosen.lighting -eq 0 -and -not (Test-Path (Join-Path $root 'Build\RunHybrid\AstroBot-NonRT-SoftAssert.exe'))) {
+        $env:ASTROHYBRID_EXE = 'AstroBot-NonRT.exe'
+    }
 $env:ASTROHYBRID_FPS_LIMIT = $fpsValues[$chosen.fps]
 $env:KYTY_GPU_WIDTH = [string]$sizeValues[$chosen.size][0]
 $env:KYTY_GPU_HEIGHT = [string]$sizeValues[$chosen.size][1]

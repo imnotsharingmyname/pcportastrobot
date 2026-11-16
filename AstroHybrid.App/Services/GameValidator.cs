@@ -67,8 +67,10 @@ namespace AstroHybrid.App.Services
                 // Any version is accepted; ones other than the tested one get a note, not a refusal.
                 bool testedVersion = string.IsNullOrEmpty(gameInfo.Version) || gameInfo.Version == ExpectedVersion;
 
-                // Check for required directories
-                var requiredDirs = new[] { "sce_module", "sce_sys", "data" };
+                // A normal extracted dump has a data directory.  A streamed ZArchive dump has
+                // app0.zar instead, so do not make users create a meaningless empty data folder
+                // just to get through setup.
+                var requiredDirs = new[] { "sce_module", "sce_sys" };
                 foreach (var dir in requiredDirs)
                 {
                     var dirPath = Path.Combine(gamePath, dir);
@@ -78,6 +80,15 @@ namespace AstroHybrid.App.Services
                         gameInfo.ValidationError = $"Required directory '{dir}' not found in game dump.";
                         return gameInfo;
                     }
+                }
+
+                var dataPath = Path.Combine(gamePath, "data");
+                var archivePath = Path.Combine(gamePath, "app0.zar");
+                if (!Directory.Exists(dataPath) && !File.Exists(archivePath))
+                {
+                    gameInfo.IsValid = false;
+                    gameInfo.ValidationError = "Neither a 'data' directory nor 'app0.zar' was found in the game dump.";
+                    return gameInfo;
                 }
 
                 gameInfo.IsValid = true;
