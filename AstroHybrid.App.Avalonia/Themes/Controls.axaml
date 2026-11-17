@@ -1,13 +1,21 @@
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-  <!-- Shared button body -->
+  <!--
+    Control themes mirrored from AstroHybrid.App/Resources/Styles.xaml at f59fb37.
+    Sizes, paddings, radii and state colours are the WPF values; hover, pressed
+    and disabled states use the same literals the WPF templates use.
+
+    Note: ContentPresenter carries TextElement.Foreground explicitly. Without it
+    a theme's hover/disabled Foreground change does not reach the text.
+  -->
+
+  <!-- ============ Buttons ============ -->
   <ControlTheme x:Key="PrimaryButton" TargetType="Button">
     <Setter Property="Background" Value="{DynamicResource PrimaryBrush}" />
     <Setter Property="BorderBrush" Value="{DynamicResource PrimaryBrush}" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Foreground" Value="White" />
-    <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="CornerRadius" Value="6" />
     <Setter Property="Padding" Value="20,10" />
     <Setter Property="MinWidth" Value="100" />
@@ -25,6 +33,7 @@
                 Padding="{TemplateBinding Padding}">
           <ContentPresenter Content="{TemplateBinding Content}"
                             ContentTemplate="{TemplateBinding ContentTemplate}"
+                            TextElement.Foreground="{TemplateBinding Foreground}"
                             HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                             VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
         </Border>
@@ -32,18 +41,19 @@
     </Setter>
     <Style Selector="^:pointerover /template/ Border#Bg">
       <Setter Property="Background" Value="{DynamicResource PrimaryLightBrush}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource PrimaryLightBrush}" />
     </Style>
     <Style Selector="^:pressed /template/ Border#Bg">
       <Setter Property="Background" Value="{DynamicResource PrimaryDarkBrush}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource PrimaryDarkBrush}" />
     </Style>
     <Style Selector="^:disabled /template/ Border#Bg">
-      <Setter Property="Background" Value="#444466" />
-      <Setter Property="BorderBrush" Value="#444466" />
+      <Setter Property="Background" Value="{DynamicResource PrimaryDisabledBackgroundBrush}" />
     </Style>
     <Style Selector="^:disabled">
-      <Setter Property="Foreground" Value="#888888" />
+      <Setter Property="Foreground" Value="{DynamicResource PrimaryDisabledForegroundBrush}" />
+    </Style>
+    <Style Selector="^:focus-visible /template/ Border#Bg">
+      <Setter Property="BorderBrush" Value="{DynamicResource PrimaryLightBrush}" />
+      <Setter Property="BorderThickness" Value="2" />
     </Style>
   </ControlTheme>
 
@@ -54,6 +64,7 @@
     <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
     <Setter Property="CornerRadius" Value="6" />
     <Setter Property="Padding" Value="20,10" />
+    <Setter Property="MinWidth" Value="100" />
     <Setter Property="MinHeight" Value="40" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
@@ -68,6 +79,7 @@
                 Padding="{TemplateBinding Padding}">
           <ContentPresenter Content="{TemplateBinding Content}"
                             ContentTemplate="{TemplateBinding ContentTemplate}"
+                            TextElement.Foreground="{TemplateBinding Foreground}"
                             HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                             VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
         </Border>
@@ -78,25 +90,24 @@
       <Setter Property="BorderBrush" Value="{DynamicResource PrimaryBrush}" />
     </Style>
     <Style Selector="^:pressed /template/ Border#Bg">
-      <Setter Property="Background" Value="{DynamicResource PrimaryBrush}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource PrimaryBrush}" />
-    </Style>
-    <Style Selector="^:pressed">
-      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="{DynamicResource BorderBrush}" />
     </Style>
     <Style Selector="^:disabled /template/ Border#Bg">
-      <Setter Property="Background" Value="#222233" />
-      <Setter Property="BorderBrush" Value="#222233" />
+      <Setter Property="Background" Value="{DynamicResource SecondaryDisabledBackgroundBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource SecondaryDisabledBackgroundBrush}" />
     </Style>
     <Style Selector="^:disabled">
-      <Setter Property="Foreground" Value="#666666" />
+      <Setter Property="Foreground" Value="{DynamicResource SecondaryDisabledForegroundBrush}" />
+    </Style>
+    <Style Selector="^:focus-visible /template/ Border#Bg">
+      <Setter Property="BorderBrush" Value="{DynamicResource PrimaryLightBrush}" />
     </Style>
   </ControlTheme>
 
   <ControlTheme x:Key="TextButton" TargetType="Button">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource PrimaryBrush}" />
     <Setter Property="CornerRadius" Value="4" />
     <Setter Property="Padding" Value="10,5" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -105,30 +116,34 @@
       <ControlTemplate TargetType="Button">
         <Border x:Name="Bg"
                 Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
                 CornerRadius="{TemplateBinding CornerRadius}"
                 Padding="{TemplateBinding Padding}">
           <ContentPresenter Content="{TemplateBinding Content}"
                             ContentTemplate="{TemplateBinding ContentTemplate}"
+                            TextElement.Foreground="{TemplateBinding Foreground}"
                             HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                             VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
         </Border>
       </ControlTemplate>
     </Setter>
     <Style Selector="^:pointerover /template/ Border#Bg">
-      <Setter Property="Background" Value="#220066CC" />
+      <Setter Property="Background" Value="{DynamicResource TextButtonHoverBrush}" />
     </Style>
     <Style Selector="^:pointerover">
       <Setter Property="Foreground" Value="{DynamicResource PrimaryLightBrush}" />
     </Style>
     <Style Selector="^:pressed /template/ Border#Bg">
-      <Setter Property="Background" Value="#440066CC" />
+      <Setter Property="Background" Value="{DynamicResource TextButtonPressedBrush}" />
     </Style>
   </ControlTheme>
 
+  <!-- Legacy: the shell still uses Button nav items until the shell is replaced. -->
   <ControlTheme x:Key="NavButton" TargetType="Button">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="BorderThickness" Value="0,0,3,0" />
+    <Setter Property="BorderThickness" Value="0" />
     <Setter Property="FocusAdorner" Value="{x:Null}" />
     <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
     <Setter Property="CornerRadius" Value="6" />
@@ -147,26 +162,78 @@
                 Padding="{TemplateBinding Padding}">
           <ContentPresenter Content="{TemplateBinding Content}"
                             ContentTemplate="{TemplateBinding ContentTemplate}"
+                            TextElement.Foreground="{TemplateBinding Foreground}"
                             HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                             VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
         </Border>
       </ControlTemplate>
     </Setter>
     <Style Selector="^:pointerover /template/ Border#NavBg">
-      <Setter Property="Background" Value="#22FFFFFF" />
+      <Setter Property="Background" Value="{DynamicResource NavHoverBrush}" />
     </Style>
     <Style Selector="^:pointerover">
-      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
     </Style>
     <Style Selector="^.active /template/ Border#NavBg">
-      <Setter Property="Background" Value="#330066CC" />
+      <Setter Property="Background" Value="{DynamicResource NavActiveBrush}" />
       <Setter Property="BorderBrush" Value="{DynamicResource PrimaryBrush}" />
+      <Setter Property="BorderThickness" Value="0,0,3,0" />
     </Style>
     <Style Selector="^.active">
-      <Setter Property="Foreground" Value="{DynamicResource PrimaryBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NavSelectedTextBrush}" />
     </Style>
   </ControlTheme>
 
+  <!-- WPF NavButtonStyle targets RadioButton: selection derives from the page. -->
+  <ControlTheme x:Key="NavRadio" TargetType="RadioButton">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
+    <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="16,12" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="HorizontalContentAlignment" Value="Left" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="Template">
+      <ControlTemplate TargetType="RadioButton">
+        <Border x:Name="NavBg"
+                Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
+                CornerRadius="{TemplateBinding CornerRadius}"
+                Padding="{TemplateBinding Padding}">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            ContentTemplate="{TemplateBinding ContentTemplate}"
+                            TextElement.Foreground="{TemplateBinding Foreground}"
+                            HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+    <Style Selector="^:pointerover /template/ Border#NavBg">
+      <Setter Property="Background" Value="{DynamicResource NavHoverBrush}" />
+    </Style>
+    <Style Selector="^:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+    </Style>
+    <Style Selector="^:checked /template/ Border#NavBg">
+      <Setter Property="Background" Value="{DynamicResource NavActiveBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource PrimaryBrush}" />
+      <Setter Property="BorderThickness" Value="0,0,3,0" />
+    </Style>
+    <Style Selector="^:checked">
+      <Setter Property="Foreground" Value="{DynamicResource NavSelectedTextBrush}" />
+    </Style>
+    <Style Selector="^:focus-visible /template/ Border#NavBg">
+      <Setter Property="BorderBrush" Value="{DynamicResource PrimaryLightBrush}" />
+      <Setter Property="BorderThickness" Value="0,0,3,0" />
+    </Style>
+  </ControlTheme>
+
+  <!-- ============ ComboBox ============ -->
   <ControlTheme x:Key="ComboBoxItemTheme" TargetType="ComboBoxItem">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
@@ -181,6 +248,7 @@
                 Padding="{TemplateBinding Padding}">
           <ContentPresenter Content="{TemplateBinding Content}"
                             ContentTemplate="{TemplateBinding ContentTemplate}"
+                            TextElement.Foreground="{TemplateBinding Foreground}"
                             HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" />
         </Border>
       </ControlTemplate>
@@ -189,24 +257,25 @@
       <Setter Property="Background" Value="{DynamicResource SurfaceLightBrush}" />
     </Style>
     <Style Selector="^:selected /template/ Border#Row">
-      <Setter Property="Background" Value="#330066CC" />
+      <Setter Property="Background" Value="{DynamicResource NavActiveBrush}" />
     </Style>
     <Style Selector="^:selected">
-      <Setter Property="Foreground" Value="{DynamicResource PrimaryBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NavSelectedTextBrush}" />
     </Style>
   </ControlTheme>
 
   <ControlTheme x:Key="ModernComboBox" TargetType="ComboBox">
-    <Setter Property="Background" Value="{DynamicResource SurfaceLightBrush}" />
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
     <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
     <Setter Property="CornerRadius" Value="6" />
     <Setter Property="Padding" Value="12,8" />
     <Setter Property="MinHeight" Value="40" />
-    <Setter Property="MinWidth" Value="180" />
+    <Setter Property="MinWidth" Value="200" />
     <Setter Property="HorizontalAlignment" Value="Stretch" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Cursor" Value="Hand" />
     <Setter Property="MaxDropDownHeight" Value="200" />
     <Setter Property="ItemContainerTheme" Value="{StaticResource ComboBoxItemTheme}" />
     <Setter Property="Template">
@@ -225,16 +294,14 @@
                           ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
                           HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                           VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+          <!-- WPF fills an 8x4 chevron; an open path would stroke a thin V. -->
           <Path Grid.Column="1"
-                Width="10" Height="6"
-                Margin="0,0,10,0"
+                Width="8" Height="4"
+                Margin="0,0,12,0"
                 HorizontalAlignment="Right"
                 VerticalAlignment="Center"
-                Data="M0,0 L5,5 L10,0"
-                Stroke="{TemplateBinding Foreground}"
-                StrokeThickness="1.6"
-                StrokeLineCap="Round"
-                StrokeJoin="Round" />
+                Data="M0,0 L8,0 L4,4 Z"
+                Fill="{DynamicResource TextSecondaryBrush}" />
           <Popup x:Name="PART_Popup"
                  IsOpen="{TemplateBinding IsDropDownOpen, Mode=TwoWay}"
                  MinWidth="{Binding Bounds.Width, RelativeSource={RelativeSource TemplatedParent}}"
@@ -247,7 +314,6 @@
                     BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="1"
                     CornerRadius="0,0,6,6"
-                    Padding="4"
                     Margin="0,1,0,0">
               <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                             VerticalScrollBarVisibility="Auto"
@@ -267,14 +333,19 @@
       <Setter Property="BorderBrush" Value="{DynamicResource PrimaryBrush}" />
     </Style>
     <Style Selector="^:disabled /template/ Border#Bg">
-      <Setter Property="Background" Value="#222233" />
-      <Setter Property="BorderBrush" Value="#222233" />
+      <Setter Property="Background" Value="{DynamicResource SecondaryDisabledBackgroundBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource SecondaryDisabledBackgroundBrush}" />
     </Style>
     <Style Selector="^:disabled">
-      <Setter Property="Foreground" Value="#666666" />
+      <Setter Property="Foreground" Value="{DynamicResource SecondaryDisabledForegroundBrush}" />
+      <Setter Property="Cursor" Value="Arrow" />
+    </Style>
+    <Style Selector="^:disabled /template/ Path">
+      <Setter Property="Fill" Value="{DynamicResource SecondaryDisabledForegroundBrush}" />
     </Style>
   </ControlTheme>
 
+  <!-- ============ CheckBox ============ -->
   <ControlTheme x:Key="ModernCheckBox" TargetType="CheckBox">
     <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
     <Setter Property="Cursor" Value="Hand" />
@@ -283,7 +354,7 @@
         <Grid ColumnDefinitions="Auto,*">
           <Border x:Name="CheckBorder"
                   Width="20" Height="20"
-                  Background="Transparent"
+                  Background="{DynamicResource SurfaceBrush}"
                   BorderBrush="{DynamicResource BorderBrush}"
                   BorderThickness="1"
                   CornerRadius="4"
@@ -303,6 +374,7 @@
                             Margin="10,0,0,0"
                             Content="{TemplateBinding Content}"
                             ContentTemplate="{TemplateBinding ContentTemplate}"
+                            TextElement.Foreground="{TemplateBinding Foreground}"
                             VerticalAlignment="Center" />
         </Grid>
       </ControlTemplate>
@@ -318,13 +390,16 @@
       <Setter Property="IsVisible" Value="True" />
     </Style>
     <Style Selector="^:disabled">
-      <Setter Property="Foreground" Value="#666666" />
+      <Setter Property="Foreground" Value="{DynamicResource SecondaryDisabledForegroundBrush}" />
+      <Setter Property="Cursor" Value="Arrow" />
     </Style>
     <Style Selector="^:disabled /template/ Border#CheckBorder">
-      <Setter Property="BorderBrush" Value="#333355" />
+      <Setter Property="Background" Value="{DynamicResource SecondaryDisabledBackgroundBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource SecondaryDisabledBackgroundBrush}" />
     </Style>
   </ControlTheme>
 
+  <!-- ============ ListBoxItem ============ -->
   <ControlTheme x:Key="ModernListBoxItem" TargetType="ListBoxItem">
     <Setter Property="Padding" Value="10,8" />
     <Setter Property="CornerRadius" Value="4" />
@@ -336,7 +411,8 @@
                 CornerRadius="{TemplateBinding CornerRadius}"
                 Padding="{TemplateBinding Padding}">
           <ContentPresenter Content="{TemplateBinding Content}"
-                            ContentTemplate="{TemplateBinding ContentTemplate}" />
+                            ContentTemplate="{TemplateBinding ContentTemplate}"
+                            TextElement.Foreground="{TemplateBinding Foreground}" />
         </Border>
       </ControlTemplate>
     </Setter>
@@ -344,10 +420,10 @@
       <Setter Property="Background" Value="{DynamicResource SurfaceLightBrush}" />
     </Style>
     <Style Selector="^:selected /template/ Border#Row">
-      <Setter Property="Background" Value="#330066CC" />
+      <Setter Property="Background" Value="{DynamicResource NavActiveBrush}" />
     </Style>
     <Style Selector="^:selected">
-      <Setter Property="Foreground" Value="{DynamicResource PrimaryBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NavSelectedTextBrush}" />
     </Style>
   </ControlTheme>
 </ResourceDictionary>
