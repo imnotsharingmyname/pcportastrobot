@@ -1,0 +1,80 @@
+From b4930bbbcec819ad871576dcd82ec0281b0266e7 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Tue, 17 Nov 2026 11:21:41 +0100
+Subject: [PATCH] feat(avplayer): skip the boot logo videos with
+ ASTROHYBRID_SKIP_INTRO
+
+The Windows launcher sets ASTROHYBRID_SKIP_INTRO, but nothing reads it: the boot
+logos are video sessions and they played in full. When the variable is 1, a
+session that starts inside the first ASTROHYBRID_SKIP_INTRO_WINDOW seconds
+(default 45) is reported as finished at once, up to ASTROHYBRID_SKIP_INTRO_COUNT
+sessions (default 3). The window keeps story cutscenes, which start after
+gameplay, unaffected.
+---
+ core/libs/prx/libSceAvPlayer/src/Player.cpp | 34 +++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/core/libs/prx/libSceAvPlayer/src/Player.cpp b/core/libs/prx/libSceAvPlayer/src/Player.cpp
+index 3f928b7ea8..67ea4b7266 100644
+--- a/core/libs/prx/libSceAvPlayer/src/Player.cpp
++++ b/core/libs/prx/libSceAvPlayer/src/Player.cpp
+@@ -2,8 +2,10 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <chrono>
+ #include <cctype>
++#include <cstdlib>
+ #include <cstring>
+ #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
+ #include "prx/libc/include/General.hpp"
+@@ -13,6 +15,32 @@ namespace AvPlayer {
+ 
+ namespace {
+ 
++// ASTROHYBRID_SKIP_INTRO=1: the boot logos are videos, and the game starts them in
++// the first seconds of the process. A session that starts inside that window is
++// reported as finished at once, so the logos do not play. The window keeps story
++// cutscenes -- which start after gameplay -- untouched.
++//   ASTROHYBRID_SKIP_INTRO_COUNT   how many sessions may be skipped (default 3)
++//   ASTROHYBRID_SKIP_INTRO_WINDOW  the window in seconds (default 45)
++bool TakeSkipIntroSlot() {
++    static const auto started = std::chrono::steady_clock::now();
++    static const int count = [] {
++        const char* value = std::getenv("ASTROHYBRID_SKIP_INTRO");
++        if (value == nullptr || value[0] != '1') return 0;
++        const char* text  = std::getenv("ASTROHYBRID_SKIP_INTRO_COUNT");
++        const long  limit = text != nullptr ? std::strtol(text, nullptr, 10) : 3;
++        return limit > 0 && limit < 32 ? static_cast<int>(limit) : 3;
++    }();
++    static const auto window = [] {
++        const char* text    = std::getenv("ASTROHYBRID_SKIP_INTRO_WINDOW");
++        const long  seconds = text != nullptr ? std::strtol(text, nullptr, 10) : 45;
++        return std::chrono::seconds(seconds > 0 && seconds < 600 ? seconds : 45);
++    }();
++    static std::atomic<int> used {0};
++    if (count == 0) return false;
++    if (std::chrono::steady_clock::now() - started > window) return false;
++    return used.fetch_add(1, std::memory_order_relaxed) < count;
++}
++
+ bool EqualsIgnoreCase(std::string_view left, std::string_view right) {
+     return std::ranges::equal(left, right, [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); });
+ }
+@@ -282,6 +310,12 @@ int Player::startLocked(std::uint64_t startTime) {
+     previous = state;
+     state = State::Play;
+     queue({EventStatePlay, 0, false, false});
++    if (TakeSkipIntroSlot()) {
++        source->Stop();
++        previous = state;
++        state = State::EndOfFile;
++        queue({EventStateStop, 0, false, false});
++    }
+     return SCE_OK;
+ }
+ 
+-- 
+2.56.1
+
