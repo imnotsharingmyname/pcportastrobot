@@ -76,7 +76,7 @@ public partial class HomeView : UserControl, IPageRefresh
 
         SetupActions.IsVisible = !ready;
         InstalledActions.IsVisible = ready;
-        VsyncButton.Content = _settings.VSync ? "VSync: On" : "VSync: Off";
+        RtxButton.Content = _settings.Lighting == 1 ? "RTX: ON" : "RTX: OFF";
     }
 
     /// <summary>Called by the shell when the background check finds a release.</summary>
@@ -150,9 +150,13 @@ public partial class HomeView : UserControl, IPageRefresh
     private void OpenController(object? sender, RoutedEventArgs e) => _navigate("Controller");
     private void OpenInstallation(object? sender, RoutedEventArgs e) => _navigate("Installation");
 
-    private void ToggleVsync(object? sender, RoutedEventArgs e)
+    /// <summary>
+    /// Same quick action as the reference: the switch picks between the base build
+    /// (ray-traced lighting) and AstroBot-NonRT (faster lighting).
+    /// </summary>
+    private void ToggleRayTracing(object? sender, RoutedEventArgs e)
     {
-        _settings.VSync = !_settings.VSync;
+        _settings.Lighting = _settings.Lighting == 1 ? 0 : 1;
         _backend.SaveSettings(_settings);
         RefreshPage();
     }

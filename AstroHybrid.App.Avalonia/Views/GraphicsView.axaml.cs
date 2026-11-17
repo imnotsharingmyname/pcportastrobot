@@ -109,6 +109,17 @@ public partial class GraphicsView : UserControl, IPageRefresh
             ? "Renders at the 21:9 aspect; 16:9 users keep the original framing."
             : "The 21:9 patch is not in this runtime; re-run setup to build it.";
 
+        // Ray Tracing is the lighting build: 0 is the patched Non-RT executable,
+        // 1 is the base executable with Kyty's software ray tracing.
+        var lightingAvailable = _backend.HasVariant("AstroBot-NonRT");
+        RayTracingBox.IsEnabled = lightingAvailable;
+        RayTracingBox.SelectedIndex = _settings.Lighting == 1 ? 1 : 0;
+        RayTracingNote.Text = !lightingAvailable
+            ? "The lighting patches are not in this runtime; re-run setup to build AstroBot-NonRT."
+            : _settings.Lighting == 1
+                ? "ON: the base build. Kyty's software ray tracing runs the game's tiled lighting and GI passes (KYTY_RT_SOFTWARE)."
+                : "OFF: AstroBot-NonRT, the faster lighting build. Switch to ON to play the original ray-traced lighting.";
+
         var index = Array.FindIndex(resolutions, r => r.Width == _settings.Width && r.Height == _settings.Height);
         ResolutionBox.SelectedIndex = index >= 0 ? index : 2;
 
@@ -218,7 +229,12 @@ public partial class GraphicsView : UserControl, IPageRefresh
         _settings.GpuIndex = GpuBox.SelectedIndex > 0 ? GpuBox.SelectedIndex - 1 : -1;
         _settings.VSync = VsyncBox.IsChecked == true;
         _settings.LowLatency = LowLatencyBox.IsChecked == true && LowLatencyBox.IsEnabled;
+        _settings.Lighting = RayTracingBox.SelectedIndex == 1 ? 1 : 0;
         _settings.OverlayMode = OverlayBox.SelectedIndex >= 0 ? OverlayValues[OverlayBox.SelectedIndex] : "";
+
+        RayTracingNote.Text = _settings.Lighting == 1
+            ? "ON: the base build. Kyty's software ray tracing runs the game's tiled lighting and GI passes (KYTY_RT_SOFTWARE)."
+            : "OFF: AstroBot-NonRT, the faster lighting build. Switch to ON to play the original ray-traced lighting.";
 
         _backend.SaveSettings(_settings);
         _backend.SetStatus("Settings saved");

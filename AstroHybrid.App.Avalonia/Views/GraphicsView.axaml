@@ -52,21 +52,23 @@
         </StackPanel>
       </Border>
 
-      <!-- NVIDIA RTX Features: kept for parity, rows disabled and explained. -->
+      <!-- NVIDIA RTX Features: kept for parity. Ray Tracing is real; the DLSS rows
+           stay disabled and explained. -->
       <Border Classes="card">
         <StackPanel>
           <TextBlock Text="NVIDIA RTX Features" Classes="section" Margin="0,0,0,10" />
           <TextBlock Classes="muted" Margin="0,0,0,15" TextWrapping="Wrap"
-                     Text="Vulkan low-latency only. Ray Tracing, DLSS and Frame Generation are Windows-only and are shown here for parity." />
+                     Text="Ray Tracing picks the game's lighting build. DLSS and Frame Generation are Windows-only and are shown here for parity." />
 
           <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                 RowSpacing="10">
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Ray Tracing (RTX)" Classes="body"
                        VerticalAlignment="Center" />
             <ComboBox Grid.Row="0" Grid.Column="1" x:Name="RayTracingBox" Width="400"
-                      HorizontalAlignment="Left" IsEnabled="False" />
-            <TextBlock Grid.Row="1" Grid.Column="1" Classes="muted"
-                       Text="Ray Tracing is a Windows feature of the NVIDIA layer and is not implemented here." />
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="RayTracingNote" Classes="muted"
+                       TextWrapping="Wrap"
+                       Text="Ray Tracing is a game build, not a driver feature." />
 
             <TextBlock Grid.Row="2" Grid.Column="0" Text="Upscaling" Classes="body"
                        VerticalAlignment="Center" />

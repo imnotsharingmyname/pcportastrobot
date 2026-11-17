@@ -167,8 +167,9 @@
           <WrapPanel x:Name="InstalledActions" IsVisible="False">
             <Button Content="Graphics Settings" Margin="0,0,12,0" MinWidth="160"
                     Click="OpenGraphics" />
-            <Button x:Name="VsyncButton" Content="VSync: On" Margin="0,0,12,0" MinWidth="140"
-                    Click="ToggleVsync" />
+            <Button x:Name="RtxButton" Content="RTX: OFF" Margin="0,0,12,0" MinWidth="140"
+                    Click="ToggleRayTracing"
+                    ToolTip.Tip="Toggles Ray Tracing between OFF (Non-RT faster lighting) and ON (Ray Tracing)" />
             <Button Content="Controller Settings" Margin="0,0,12,0" MinWidth="160"
                     Click="OpenController" />
             <Button Content="Installation" MinWidth="140" Click="OpenInstallation" />
