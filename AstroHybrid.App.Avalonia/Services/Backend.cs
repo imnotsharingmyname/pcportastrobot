@@ -20,10 +20,33 @@ public sealed class AppSettings
     public bool Fullscreen { get; set; }
     public bool VSync { get; set; }
     public bool GameSpeed { get; set; } = true;
+    public int GameSpeedPercent { get; set; } = 100;
     public bool PadMotion { get; set; }
     public bool DirectAudio { get; set; } = true;
     public string AudioSink { get; set; } = "";
     public string ExtraEnv { get; set; } = "";
+
+    // Graphics
+    public string OverlayMode { get; set; } = "";
+    public bool LowLatency { get; set; }
+
+    // Controller
+    public string ControllerPref { get; set; } = "auto";
+    public int RumblePercent { get; set; } = 100;
+    public bool RumbleSwitchBoost { get; set; }
+    public bool DsWirelessSpeaker { get; set; }
+    public bool DsWirelessHaptics { get; set; }
+    public bool TriggerState { get; set; } = true;
+
+    // Advanced
+    public int Lighting { get; set; }
+    public int Language { get; set; } = -1;
+    public string Priority { get; set; } = "normal";
+    public int CpPriority { get; set; }
+    public bool HangWatchdog { get; set; }
+    public bool ShaderCache { get; set; } = true;
+    public bool DrawPrep { get; set; } = true;
+    public bool SkipIntro { get; set; }
 }
 
 public sealed class AppSettingsStore
@@ -65,6 +88,8 @@ public sealed class ProcessResult
     public string Output { get; init; } = "";
     public bool Success => ExitCode == 0;
 }
+
+public sealed record GamePadInfo(string Name, string Type, bool HasHaptics, bool HasMotion, bool HasTriggers);
 
 public sealed class Backend
 {
@@ -209,12 +234,76 @@ public sealed class Backend
             arguments.Add("--env");
             arguments.Add("ASTROHYBRID_GAME_SPEED");
             arguments.Add("1");
+            if (settings.GameSpeedPercent is > 0 and < 100)
+            {
+                arguments.Add("--env");
+                arguments.Add("ASTROHYBRID_GAME_SPEED_PERCENT");
+                arguments.Add(settings.GameSpeedPercent.ToString());
+            }
         }
         if (settings.PadMotion)
         {
             arguments.Add("--env");
             arguments.Add("ASTROHYBRID_PAD_MOTION");
             arguments.Add("1");
+        }
+        if (!string.IsNullOrWhiteSpace(settings.OverlayMode))
+        {
+            arguments.Add("--env");
+            arguments.Add("ASTROHYBRID_OVERLAY");
+            arguments.Add(settings.OverlayMode);
+        }
+        if (settings.LowLatency)
+        {
+            arguments.Add("--env");
+            arguments.Add("ASTROHYBRID_LOW_LATENCY");
+            arguments.Add("1");
+        }
+        if (!string.IsNullOrWhiteSpace(settings.ControllerPref) && settings.ControllerPref != "auto")
+        {
+            arguments.Add("--env");
+            arguments.Add("ASTROHYBRID_PAD_PREFER");
+            arguments.Add(settings.ControllerPref);
+        }
+        if (settings.RumblePercent != 100)
+        {
+            arguments.Add("--env");
+            arguments.Add("ASTROHYBRID_RUMBLE_SCALE");
+            arguments.Add(settings.RumblePercent.ToString());
+        }
+        arguments.Add("--env");
+        arguments.Add("ASTROHYBRID_RUMBLE_SWITCH_FLOOR");
+        arguments.Add(settings.RumbleSwitchBoost
+            ? (96 * settings.RumblePercent / 100).ToString()
+            : "0");
+        arguments.Add("--env");
+        arguments.Add("ASTROHYBRID_DS_WIRELESS_SPEAKER");
+        arguments.Add(settings.DsWirelessSpeaker ? "1" : "0");
+        arguments.Add("--env");
+        arguments.Add("ASTROHYBRID_DS_WIRELESS_HAPTICS");
+        arguments.Add(settings.DsWirelessHaptics ? "1" : "0");
+        if (!settings.TriggerState)
+        {
+            arguments.Add("--env");
+            arguments.Add("APS5_PAD_TRIGGER_STATE");
+            arguments.Add("0");
+        }
+        if (settings.Language >= 0)
+        {
+            arguments.Add("--env");
+            arguments.Add("ANYPS5_LANGUAGE");
+            arguments.Add(settings.Language.ToString());
+        }
+        if (settings.CpPriority > 0)
+        {
+            arguments.Add("--env");
+            arguments.Add("KYTY_CP_PRIORITY");
+            arguments.Add(settings.CpPriority.ToString());
+        }
+        if (settings.Priority != "normal")
+        {
+            arguments.Add("--priority");
+            arguments.Add(settings.Priority);
         }
         foreach (var pair in ParseEnv(settings.ExtraEnv))
         {
@@ -306,25 +395,40 @@ public sealed class Backend
         }
     }
 
-    public IReadOnlyList<string> DetectGamePads()
+    public IReadOnlyList<GamePadInfo> DetectGamePads()
     {
-        var result = new List<string>();
+        var result = new List<GamePadInfo>();
         try
         {
             var devices = File.ReadAllText("/proc/bus/input/devices");
             foreach (var block in devices.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
             {
-                if (block.Contains("js", StringComparison.Ordinal) &&
-                    (block.Contains("Steam", StringComparison.OrdinalIgnoreCase) ||
-                     block.Contains("Controller", StringComparison.OrdinalIgnoreCase) ||
-                     block.Contains("Pad", StringComparison.OrdinalIgnoreCase)))
+                if (!block.Contains("js", StringComparison.Ordinal) ||
+                    !(block.Contains("Steam", StringComparison.OrdinalIgnoreCase) ||
+                      block.Contains("Controller", StringComparison.OrdinalIgnoreCase) ||
+                      block.Contains("Pad", StringComparison.OrdinalIgnoreCase) ||
+                      block.Contains("DualSense", StringComparison.OrdinalIgnoreCase) ||
+                      block.Contains("DualShock", StringComparison.OrdinalIgnoreCase) ||
+                      block.Contains("Xbox", StringComparison.OrdinalIgnoreCase)))
                 {
-                    var name = block.Split('\n').FirstOrDefault(line => line.StartsWith("N: Name=", StringComparison.Ordinal));
-                    if (name is not null)
-                    {
-                        result.Add(name.Replace("N: Name=", "").Trim('"'));
-                    }
+                    continue;
                 }
+
+                var name = block.Split('\n')
+                    .FirstOrDefault(line => line.StartsWith("N: Name=", StringComparison.Ordinal));
+                if (name is null)
+                {
+                    continue;
+                }
+
+                var label = name.Replace("N: Name=", "").Trim('"');
+                var family = PadFamily(label);
+                result.Add(new GamePadInfo(
+                    label,
+                    family,
+                    family != "Generic",
+                    family is "PlayStation" or "Switch Pro",
+                    family == "PlayStation"));
             }
         }
         catch
@@ -332,7 +436,34 @@ public sealed class Backend
             // /proc is optional outside Linux; the page simply shows no pads.
         }
 
-        return result.Distinct().ToList();
+        return result
+            .GroupBy(pad => pad.Name, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
+    }
+
+    private static string PadFamily(string name)
+    {
+        if (name.Contains("DualSense", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("DualShock", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("PlayStation", StringComparison.OrdinalIgnoreCase))
+        {
+            return "PlayStation";
+        }
+
+        if (name.Contains("Switch", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Nintendo", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Switch Pro";
+        }
+
+        if (name.Contains("Xbox", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("X-Box", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Xbox";
+        }
+
+        return "Generic";
     }
 
     public string CpuName
@@ -508,6 +639,129 @@ public sealed class Backend
 
     private string GamePathOrDefault() =>
         _gamePath.Length > 0 ? _gamePath : DefaultGamePath;
+
+    private string _installSize = "";
+    private DateTime _installSizeAt;
+
+    public string InstalledAt
+    {
+        get
+        {
+            try
+            {
+                var binary = Path.Combine(HybridDirectory, "AstroBot");
+                return File.Exists(binary)
+                    ? File.GetLastWriteTime(binary).ToString("yyyy-MM-dd HH:mm")
+                    : "—";
+            }
+            catch
+            {
+                return "—";
+            }
+        }
+    }
+
+    /// <summary>Size of Build/RunHybrid, cached for half a minute.</summary>
+    public async Task<string> InstallSizeAsync()
+    {
+        if (_installSize.Length > 0 && (DateTime.UtcNow - _installSizeAt).TotalSeconds < 30)
+        {
+            return _installSize;
+        }
+
+        if (!Directory.Exists(HybridDirectory))
+        {
+            _installSize = "";
+            return _installSize;
+        }
+
+        try
+        {
+            var start = new ProcessStartInfo("du")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            start.ArgumentList.Add("-sh");
+            start.ArgumentList.Add(HybridDirectory);
+            using var du = Process.Start(start);
+            if (du is null)
+            {
+                return "";
+            }
+
+            var output = await du.StandardOutput.ReadToEndAsync();
+            await du.WaitForExitAsync();
+            _installSize = output.Split('\t')[0].Trim();
+            _installSizeAt = DateTime.UtcNow;
+        }
+        catch
+        {
+            _installSize = "";
+        }
+
+        return _installSize;
+    }
+
+    /// <summary>Pinned AnyPS5 and Kyty commits the runtime was built from.</summary>
+    public (string AnyPs5, string Kyty) ToolVersions()
+    {
+        string Read(string script)
+        {
+            try
+            {
+                var path = Path.Combine(Root, "Tools", "linux", script);
+                if (!File.Exists(path))
+                {
+                    return "—";
+                }
+
+                foreach (var line in File.ReadLines(path))
+                {
+                    if (line.StartsWith("PIN=", StringComparison.Ordinal))
+                    {
+                        var pin = line[4..].Trim();
+                        return pin.Length >= 7 ? pin[..7] + " (pinned)" : pin;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return "—";
+        }
+
+        return (Read("prepare-anyps5.sh"), Read("prepare-kyty.sh"));
+    }
+
+    /// <summary>Removes Build/RunHybrid. The game dump is never touched.</summary>
+    public bool RemoveRuntime()
+    {
+        try
+        {
+            if (GameRunning)
+            {
+                SetStatus("Stop the game before removing the runtime");
+                return false;
+            }
+
+            if (Directory.Exists(HybridDirectory))
+            {
+                Directory.Delete(HybridDirectory, true);
+            }
+
+            _installSize = "";
+            SetStatus("Runtime removed");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            SetStatus($"Could not remove the runtime: {exception.Message}");
+            return false;
+        }
+    }
 
     public string HardwareSummary()
     {

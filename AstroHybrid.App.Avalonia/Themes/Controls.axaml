@@ -395,7 +395,7 @@
     </Style>
     <Style Selector="^:disabled /template/ Border#CheckBorder">
       <Setter Property="Background" Value="{DynamicResource SecondaryDisabledBackgroundBrush}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource SecondaryDisabledBackgroundBrush}" />
+      <Setter Property="BorderBrush" Value="#333355" />
     </Style>
   </ControlTheme>
 

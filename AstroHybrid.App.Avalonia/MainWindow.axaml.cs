@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
@@ -27,6 +28,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, RadioButton> _nav;
     private readonly Dictionary<string, UserControl> _pages = new();
     private string _current = "Home";
+    private bool _firstRunChecked;
 
     public MainWindow()
     {
@@ -89,7 +91,7 @@ public partial class MainWindow : Window
         "Graphics" => _pages.TryGetValue("Graphics", out var graphics) ? graphics : new GraphicsView(_backend, _settings),
         "Controller" => _pages.TryGetValue("Controller", out var controller) ? controller : new ControllerView(_backend, _settings),
         "Advanced" => _pages.TryGetValue("Advanced", out var advanced) ? advanced : new AdvancedView(_backend, _settings),
-        "Installation" => _pages.TryGetValue("Installation", out var installation) ? installation : new SetupView(_backend, _settings),
+        "Installation" => _pages.TryGetValue("Installation", out var installation) ? installation : new InstallationView(_backend, _settings),
         _ => _pages.TryGetValue("Home", out var home)
             ? home
             : new HomeView(_backend, _settings, Select),
@@ -214,6 +216,47 @@ public partial class MainWindow : Window
 
         _backend.SetStatus("Applied best settings for this PC");
         RefreshChrome();
+    }
+
+    protected override void OnOpened(EventArgs e)
+    {
+        base.OnOpened(e);
+        if (_firstRunChecked)
+        {
+            return;
+        }
+
+        _firstRunChecked = true;
+        if (!_backend.HybridReady)
+        {
+            _ = RunFirstRunSetupAsync();
+        }
+    }
+
+    /// <summary>
+    /// Mirrors App.xaml.cs: when no hybrid runtime exists, the setup surface is
+    /// shown before the shell, so Play is never visible-disabled with no route.
+    /// Cancelling with a dump present opens the shell; without one the app exits.
+    /// </summary>
+    private async Task RunFirstRunSetupAsync()
+    {
+        Hide();
+        var setup = new SetupWindow(_backend, _settings);
+        var closed = new TaskCompletionSource();
+        setup.Closed += (_, _) => closed.TrySetResult();
+        setup.Show();
+        await closed.Task;
+
+        if (_backend.HybridReady || Directory.Exists(_settings.GamePath))
+        {
+            Show();
+            Select("Home");
+            SetInitialStatus();
+        }
+        else
+        {
+            Close();
+        }
     }
 
     private void OnClosing(object? sender, WindowClosingEventArgs e)

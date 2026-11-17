@@ -228,6 +228,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     for name, value in args.env:
         env[name] = value
     log(f"== launching {binary}" + (" (hybrid)" if args.hybrid else ""))
+    # Negative niceness (higher priority) needs privileges; without them the game
+    # still runs, just at the normal level.
+    increment = {"abovenormal": -5, "high": -10}.get(args.priority)
+    if increment is not None:
+        try:
+            os.nice(increment)
+        except OSError as error:
+            log(f"== could not raise priority to {args.priority} ({error}); continuing at the current level")
     os.chdir(run)
     os.execve(binary, [str(binary), *args.extra], env)
 
@@ -255,6 +263,8 @@ def main(argv: list[str]) -> int:
     p_run.add_argument("--direct-audio", action="store_true",
                        help="route the game's stream to the default sink, bypassing filter chains")
     p_run.add_argument("--audio-sink", default="", help="PipeWire sink name for --direct-audio")
+    p_run.add_argument("--priority", choices=("normal", "abovenormal", "high"), default="normal",
+                       help="raise the game's scheduling priority (abovenormal/high may need privileges)")
     p_run.add_argument("extra", nargs=argparse.REMAINDER)
     p_run.set_defaults(func=cmd_run)
 
