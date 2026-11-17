@@ -6,6 +6,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Threading;
+using System.Threading.Tasks;
 using AstroHybrid.App.Avalonia.Services;
 
 namespace AstroHybrid.App.Avalonia.Views;
@@ -15,6 +16,9 @@ public partial class HomeView : UserControl, IPageRefresh
     private readonly Backend _backend;
     private readonly AppSettings _settings;
     private readonly Action<string> _navigate;
+    private readonly UpdateService _updates = new();
+    private UpdateInfo? _update;
+    private bool _updateDismissed;
 
     public HomeView(Backend backend, AppSettings settings, Action<string> navigate)
     {
@@ -55,6 +59,7 @@ public partial class HomeView : UserControl, IPageRefresh
         GameVersionValue.Text = version;
         TitleIdRun.Text = titleId;
         BuildText.Text = Backend.BuildSha;
+        ApplyUpdate();
 
         CpuValue.Text = _backend.CpuName;
         var gpu = _backend.GpuName;
@@ -72,6 +77,57 @@ public partial class HomeView : UserControl, IPageRefresh
         SetupActions.IsVisible = !ready;
         InstalledActions.IsVisible = ready;
         VsyncButton.Content = _settings.VSync ? "VSync: On" : "VSync: Off";
+    }
+
+    /// <summary>Called by the shell when the background check finds a release.</summary>
+    public void ShowUpdate(UpdateInfo? info)
+    {
+        _update = info;
+        _updateDismissed = false;
+        ApplyUpdate();
+    }
+
+    private void ApplyUpdate()
+    {
+        var available = _update is not null && !_updateDismissed;
+        AvailableBadge.IsVisible = _update is not null;
+        BuildBadge.IsVisible = _update is null;
+        if (_update is not null)
+        {
+            AvailableText.Text = _update.Version;
+        }
+
+        NewsCard.IsVisible = available;
+        if (_update is not null)
+        {
+            NewsVersion.Text = _update.Version;
+            NewsNotes.Text = string.IsNullOrWhiteSpace(_update.Notes)
+                ? "No release notes were published."
+                : _update.Notes.Trim();
+        }
+    }
+
+    private void DismissUpdate(object? sender, RoutedEventArgs e)
+    {
+        _updateDismissed = true;
+        ApplyUpdate();
+    }
+
+    private async void InstallUpdate(object? sender, RoutedEventArgs e)
+    {
+        if (_update is null)
+        {
+            return;
+        }
+
+        NewsUpdateButton.IsEnabled = false;
+        var ok = await _updates.DownloadAndApplyAsync(_update,
+            (progress, status) => Dispatcher.UIThread.Post(() => _backend.SetStatus(status, progress < 1)));
+        NewsUpdateButton.IsEnabled = true;
+        if (ok)
+        {
+            _backend.SetStatus("Update installed — restart the launcher");
+        }
     }
 
     private string PrimaryDisplayLabel()

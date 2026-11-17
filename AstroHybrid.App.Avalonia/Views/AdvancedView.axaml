@@ -57,14 +57,14 @@
                      Text="Samples the game's stacks into Logs when it produces no output for two minutes." />
 
           <CheckBox x:Name="ShaderCacheBox" Content="Persistent Shader Cache (eliminates compile hitches)"
-                    IsEnabled="False" />
+                    IsCheckedChanged="OnCheckCommitted" />
           <TextBlock Classes="muted" Margin="30,4,0,10"
-                     Text="Kyty keeps its pipeline cache on disk already; this switch is Windows-only." />
+                     Text="On keeps Kyty's _PipelineCache between runs; off clears it and disables the background save, so shaders compile again on the next launch." />
 
           <CheckBox x:Name="DrawPrepBox" Content="Draw Prep Tuning (reduces CP spin with background apps)"
-                    IsEnabled="False" />
+                    IsCheckedChanged="OnCheckCommitted" />
           <TextBlock Classes="muted" Margin="30,4,0,10"
-                     Text="Windows-only runtime option; there is no Linux equivalent." />
+                     Text="On uses Kyty's parallel draw preparation; off reverts to no preparation." />
 
           <CheckBox x:Name="MotionBox" Content="Motion Controls (accelerometer/gyroscope)"
                     IsCheckedChanged="OnCheckCommitted" />
@@ -87,9 +87,9 @@
                      Text="Sends the game's haptic channel over Bluetooth." />
 
           <CheckBox x:Name="SkipIntroBox" Content="Skip Intro Videos (-skipIntro)"
-                    IsEnabled="False" />
+                    IsCheckedChanged="OnCheckCommitted" />
           <TextBlock Classes="muted" Margin="30,4,0,10"
-                     Text="Windows-only runtime option; the Linux build has no equivalent yet." />
+                     Text="Finishes the boot logo videos immediately. Only sessions started in the first 45 seconds are affected, so story cutscenes still play." />
         </StackPanel>
       </Border>
 

@@ -264,6 +264,27 @@ public sealed class Backend
             arguments.Add("KYTY_GPU_INDEX");
             arguments.Add(settings.GpuIndex.ToString());
         }
+        if (settings.SkipIntro)
+        {
+            arguments.Add("--env");
+            arguments.Add("ASTROHYBRID_SKIP_INTRO");
+            arguments.Add("1");
+        }
+        if (!settings.ShaderCache)
+        {
+            // Kyty persists its pipeline cache in _PipelineCache; clearing it here and
+            // disabling the background save makes the next run compile from scratch.
+            ClearPipelineCache();
+            arguments.Add("--env");
+            arguments.Add("KYTY_PIPELINE_CACHE_SAVE");
+            arguments.Add("0");
+        }
+        if (!settings.DrawPrep)
+        {
+            arguments.Add("--env");
+            arguments.Add("KYTY_DRAW_PREP");
+            arguments.Add("off");
+        }
         if (settings.LowLatency)
         {
             arguments.Add("--env");
@@ -658,6 +679,28 @@ public sealed class Backend
 
     private string _installSize = "";
     private DateTime _installSizeAt;
+
+    /// <summary>Removes Kyty's persisted pipeline cache for this title.</summary>
+    public void ClearPipelineCache()
+    {
+        try
+        {
+            var directory = Path.Combine(HybridDirectory, "_PipelineCache");
+            if (!Directory.Exists(directory))
+            {
+                return;
+            }
+
+            foreach (var file in Directory.GetFiles(directory, "*.bin"))
+            {
+                File.Delete(file);
+            }
+        }
+        catch
+        {
+            // A cache that cannot be cleared only costs a recompile.
+        }
+    }
 
     /// <summary>True when the setup produced this runtime variant.</summary>
     public bool HasVariant(string name) =>

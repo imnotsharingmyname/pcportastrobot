@@ -126,6 +126,10 @@
             <Button x:Name="ReleaseLink" Theme="{StaticResource TextButton}"
                     Content="View Release" IsVisible="False"
                     VerticalAlignment="Center" Click="OpenReleasePage" />
+            <Button x:Name="UpdateButton" Theme="{StaticResource PrimaryButton}"
+                    Content="Update" MinWidth="120" MinHeight="48"
+                    FontSize="16" FontWeight="SemiBold" IsVisible="False"
+                    Click="InstallUpdate" />
             <Button x:Name="StopButton" Theme="{StaticResource SecondaryButton}"
                     Content="Stop" MinWidth="100" MinHeight="48"
                     IsVisible="False" Click="StopGame" />

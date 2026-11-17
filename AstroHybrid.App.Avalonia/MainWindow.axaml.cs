@@ -24,11 +24,13 @@ public partial class MainWindow : Window
     private const double WorkAreaMargin = 80;
 
     private readonly Backend _backend;
+    private readonly UpdateService _updates = new();
     private readonly AppSettings _settings;
     private readonly Dictionary<string, RadioButton> _nav;
     private readonly Dictionary<string, UserControl> _pages = new();
     private string _current = "Home";
     private bool _firstRunChecked;
+    private UpdateInfo? _update;
 
     public MainWindow()
     {
@@ -60,6 +62,53 @@ public partial class MainWindow : Window
         Select("Home");
         SetInitialStatus();
         RefreshChrome();
+        _ = CheckUpdatesAsync();
+    }
+
+    /// <summary>
+    /// Mirrors the Windows launcher: read the release feed in the background and
+    /// offer the update only when it carries a Linux package. An offline or
+    /// failed check leaves the launcher on the BUILD badge.
+    /// </summary>
+    private async Task CheckUpdatesAsync()
+    {
+        UpdateInfo? info = null;
+        try
+        {
+            info = await _updates.CheckAsync();
+        }
+        catch
+        {
+            // No network, no update; the BUILD badge stays.
+        }
+
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            _update = info;
+            UpdateButton.IsVisible = info is not null;
+            if (_pages.TryGetValue("Home", out var page) && page is HomeView home)
+            {
+                home.ShowUpdate(info);
+            }
+        });
+    }
+
+    private async void InstallUpdate(object? sender, RoutedEventArgs e)
+    {
+        if (_update is null)
+        {
+            return;
+        }
+
+        UpdateButton.IsEnabled = false;
+        var ok = await _updates.DownloadAndApplyAsync(_update,
+            (progress, status) => Dispatcher.UIThread.Post(() => _backend.SetStatus(status, progress < 1)));
+        UpdateButton.IsEnabled = true;
+        if (ok)
+        {
+            UpdateButton.IsVisible = false;
+            _backend.SetStatus("Update installed — restart the launcher");
+        }
     }
 
     /// <summary>
