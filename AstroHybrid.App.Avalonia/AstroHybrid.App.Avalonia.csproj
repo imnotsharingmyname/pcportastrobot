@@ -28,4 +28,10 @@
   <Target Name="WriteBuildInfo" AfterTargets="Build">
     <Exec Command="git rev-parse --short HEAD > &quot;$(TargetDir)build-info.txt&quot;" IgnoreExitCode="true" StandardOutputImportance="Low" />
   </Target>
+
+  <!-- Single-file publish copies only the bundle, so the manifest is written
+       next to the published executable as well. -->
+  <Target Name="WritePublishBuildInfo" AfterTargets="Publish">
+    <Exec Command="git rev-parse --short HEAD > &quot;$(PublishDir)build-info.txt&quot;" IgnoreExitCode="true" StandardOutputImportance="Low" />
+  </Target>
 </Project>
