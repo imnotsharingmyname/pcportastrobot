@@ -76,9 +76,6 @@ public partial class GraphicsView : UserControl, IPageRefresh
         TargetFpsBox.ItemsSource = new[] { "No lock - game as fast as it can" };
         TargetFpsBox.SelectedIndex = 0;
 
-        var gpu = _backend.GpuName;
-        GpuBox.ItemsSource = new[] { gpu.Length > 0 ? gpu : "Automatic - best graphics card" };
-        GpuBox.SelectedIndex = 0;
 
         Loaded += (_, _) => RefreshPage();
     }
@@ -90,6 +87,22 @@ public partial class GraphicsView : UserControl, IPageRefresh
         var ultrawideAvailable = _backend.HasVariant("AstroBot-Ultrawide");
         var resolutions = ultrawideAvailable ? UltrawideResolutions : WidescreenResolutions;
         ResolutionBox.ItemsSource = ultrawideAvailable ? UltrawideLabels : WidescreenLabels;
+
+        var devices = VulkanDevices.Enumerate();
+        var gpuLabels = new List<string> { "Automatic - best graphics card" };
+        foreach (var device in devices)
+        {
+            gpuLabels.Add(device.Name);
+        }
+
+        GpuBox.ItemsSource = gpuLabels;
+        GpuBox.IsEnabled = devices.Count > 1;
+        GpuBox.SelectedIndex = _settings.GpuIndex >= 0 && _settings.GpuIndex < devices.Count
+            ? _settings.GpuIndex + 1
+            : 0;
+        GpuNote.Text = devices.Count > 1
+            ? "The selected adapter is passed to the renderer; Automatic lets the driver choose."
+            : "Only one Vulkan device was found, so there is nothing to choose.";
 
         UltrawideBox.IsEnabled = ultrawideAvailable;
         UltrawideNote.Text = ultrawideAvailable
@@ -202,6 +215,7 @@ public partial class GraphicsView : UserControl, IPageRefresh
         _settings.FpsLimit = FpsBox.SelectedIndex >= 0 ? FpsValues[FpsBox.SelectedIndex] : 60;
         _settings.Fullscreen = FullscreenBox.IsChecked == true;
         _settings.Ultrawide = UltrawideBox.IsChecked == true && UltrawideBox.IsEnabled;
+        _settings.GpuIndex = GpuBox.SelectedIndex > 0 ? GpuBox.SelectedIndex - 1 : -1;
         _settings.VSync = VsyncBox.IsChecked == true;
         _settings.LowLatency = LowLatencyBox.IsChecked == true && LowLatencyBox.IsEnabled;
         _settings.OverlayMode = OverlayBox.SelectedIndex >= 0 ? OverlayValues[OverlayBox.SelectedIndex] : "";

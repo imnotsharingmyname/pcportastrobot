@@ -20,6 +20,7 @@ public sealed class AppSettings
     public bool Fullscreen { get; set; }
     public bool VSync { get; set; }
     public bool Ultrawide { get; set; }
+    public int GpuIndex { get; set; } = -1;
     public bool GameSpeed { get; set; } = true;
     public int GameSpeedPercent { get; set; } = 100;
     public bool PadMotion { get; set; }
@@ -256,6 +257,12 @@ public sealed class Backend
             arguments.Add("--env");
             arguments.Add("ASTROHYBRID_OVERLAY");
             arguments.Add(settings.OverlayMode);
+        }
+        if (settings.GpuIndex >= 0)
+        {
+            arguments.Add("--env");
+            arguments.Add("KYTY_GPU_INDEX");
+            arguments.Add(settings.GpuIndex.ToString());
         }
         if (settings.LowLatency)
         {

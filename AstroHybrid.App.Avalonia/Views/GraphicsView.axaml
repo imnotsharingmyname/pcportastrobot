@@ -26,9 +26,8 @@
             <TextBlock Grid.Row="4" Grid.Column="0" Text="Graphics card" Classes="body"
                        VerticalAlignment="Center" />
             <ComboBox Grid.Row="4" Grid.Column="1" x:Name="GpuBox" Width="400"
-                      HorizontalAlignment="Left" IsEnabled="False" />
-            <TextBlock Grid.Row="5" Grid.Column="1" Classes="muted"
-                       Text="This build cannot pick an adapter; the Vulkan driver's default device is used." />
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="5" Grid.Column="1" x:Name="GpuNote" Classes="muted" />
 
             <CheckBox Grid.Row="6" Grid.Column="1" x:Name="VsyncBox"
                       Content="VSync (no tearing; may add a little input delay)"
