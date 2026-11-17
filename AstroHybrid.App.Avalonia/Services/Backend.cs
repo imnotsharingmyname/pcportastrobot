@@ -18,6 +18,7 @@ public sealed class AppSettings
     public int Height { get; set; } = 1080;
     public int FpsLimit { get; set; } = 60;
     public bool Fullscreen { get; set; }
+    public bool VSync { get; set; }
     public bool GameSpeed { get; set; } = true;
     public bool PadMotion { get; set; }
     public bool DirectAudio { get; set; } = true;
@@ -103,9 +104,22 @@ public sealed class Backend
         Python = "python3";
     }
 
-    public AppSettings LoadSettings() => _store.Load();
+    private string _gamePath = "";
 
-    public void SaveSettings(AppSettings settings) => _store.Save(settings);
+    public AppSettings LoadSettings()
+    {
+        var settings = _store.Load();
+        _gamePath = settings.GamePath;
+        return settings;
+    }
+
+    public void SaveSettings(AppSettings settings)
+    {
+        _gamePath = settings.GamePath;
+        _store.Save(settings);
+    }
+
+    public void SetGamePath(string path) => _gamePath = path;
 
     public bool HybridReady =>
         File.Exists(Path.Combine(HybridDirectory, "AstroBot")) &&
@@ -183,6 +197,12 @@ public sealed class Backend
             arguments.Add("--env");
             arguments.Add("KYTY_GPU_FULLSCREEN");
             arguments.Add("1");
+        }
+        if (settings.VSync)
+        {
+            arguments.Add("--env");
+            arguments.Add("KYTY_GPU_PRESENT_MODE");
+            arguments.Add("Fifo");
         }
         if (settings.GameSpeed)
         {
@@ -315,74 +335,185 @@ public sealed class Backend
         return result.Distinct().ToList();
     }
 
-    public string HardwareSummary()
+    public string CpuName
     {
-        var cpu = "Unknown CPU";
-        var memory = "";
-        try
+        get
         {
-            foreach (var line in File.ReadLines("/proc/cpuinfo"))
+            try
             {
-                if (line.StartsWith("model name", StringComparison.Ordinal))
+                foreach (var line in File.ReadLines("/proc/cpuinfo"))
                 {
-                    cpu = line.Split(':', 2)[1].Trim();
-                    break;
+                    if (line.StartsWith("model name", StringComparison.Ordinal))
+                    {
+                        return line.Split(':', 2)[1].Trim();
+                    }
                 }
             }
-        }
-        catch
-        {
-        }
-
-        try
-        {
-            foreach (var line in File.ReadLines("/proc/meminfo"))
+            catch
             {
-                if (line.StartsWith("MemTotal:", StringComparison.Ordinal))
+            }
+
+            return "Unknown CPU";
+        }
+    }
+
+    public string MemoryLabel
+    {
+        get
+        {
+            try
+            {
+                foreach (var line in File.ReadLines("/proc/meminfo"))
                 {
-                    var kb = double.Parse(line.Split(':')[1].Trim().Split(' ')[0]);
-                    memory = $"{kb / 1024 / 1024:0.0} GiB";
-                    break;
+                    if (line.StartsWith("MemTotal:", StringComparison.Ordinal))
+                    {
+                        var kb = double.Parse(line.Split(':')[1].Trim().Split(' ')[0]);
+                        return $"{kb / 1024 / 1024:0} GiB";
+                    }
                 }
             }
-        }
-        catch
-        {
-        }
+            catch
+            {
+            }
 
-        var gpu = "";
-        try
+            return "";
+        }
+    }
+
+    public string GpuName
+    {
+        get
         {
-            var process = new ProcessStartInfo("lspci")
+            try
             {
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-            };
-            process.ArgumentList.Add("-nn");
-            using var lspci = Process.Start(process);
-            if (lspci is not null)
-            {
+                var start = new ProcessStartInfo("lspci")
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                };
+                start.ArgumentList.Add("-nn");
+                using var lspci = Process.Start(start);
+                if (lspci is null)
+                {
+                    return "";
+                }
+
                 var output = lspci.StandardOutput.ReadToEnd();
                 lspci.WaitForExit(1000);
                 var gpuLine = output.Split('\n')
                     .FirstOrDefault(line => line.Contains("VGA", StringComparison.Ordinal) ||
                                             line.Contains("3D controller", StringComparison.Ordinal));
-                if (gpuLine is not null)
+                if (gpuLine is null)
                 {
-                    var classEnd = gpuLine.IndexOf("]: ", StringComparison.Ordinal);
-                    var rest = classEnd >= 0 ? gpuLine[(classEnd + 3)..] : gpuLine;
-                    rest = Regex.Replace(rest, @"\s*\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\].*$", "");
-                    var brackets = Regex.Matches(rest, @"\[([^\]]+)\]");
-                    gpu = brackets.Count > 0
-                        ? brackets[brackets.Count - 1].Groups[1].Value.Trim()
-                        : rest.Trim();
+                    return "";
+                }
+
+                var classEnd = gpuLine.IndexOf("]: ", StringComparison.Ordinal);
+                var rest = classEnd >= 0 ? gpuLine[(classEnd + 3)..] : gpuLine;
+                rest = Regex.Replace(rest, @"\s*\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\].*$", "");
+                var brackets = Regex.Matches(rest, @"\[([^\]]+)\]");
+                return brackets.Count > 0 ? brackets[^1].Groups[1].Value.Trim() : rest.Trim();
+            }
+            catch
+            {
+                return "";
+            }
+        }
+    }
+
+    /// <summary>Game version from the dump's sce_sys/param.json, or empty.</summary>
+    public string GameVersion => GameInfo.Version;
+
+    /// <summary>Title id from the dump's sce_sys/param.json, or the tested id.</summary>
+    public string GameTitleId => GameInfo.TitleId.Length > 0 ? GameInfo.TitleId : "PPSA21567";
+
+    public bool GameInfoAvailable => GameInfo.Version.Length > 0 || GameInfo.TitleId.Length > 0;
+
+    /// <summary>Short commit the launcher was built from.</summary>
+    public static string BuildSha
+    {
+        get
+        {
+            try
+            {
+                var file = Path.Combine(AppContext.BaseDirectory, "build-info.txt");
+                if (File.Exists(file))
+                {
+                    var text = File.ReadAllText(file).Trim();
+                    if (text.Length > 0)
+                    {
+                        return text;
+                    }
                 }
             }
+            catch
+            {
+            }
+
+            // Development runs from a checkout: ask git directly.
+            try
+            {
+                var start = new ProcessStartInfo("git")
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                start.ArgumentList.Add("rev-parse");
+                start.ArgumentList.Add("--short");
+                start.ArgumentList.Add("HEAD");
+                using var git = Process.Start(start);
+                if (git is not null)
+                {
+                    var text = git.StandardOutput.ReadToEnd().Trim();
+                    git.WaitForExit(1000);
+                    if (text.Length > 0)
+                    {
+                        return text;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return "unknown";
+        }
+    }
+
+    public (string TitleId, string Version) GameInfo => ReadGameInfo();
+
+    private (string TitleId, string Version) ReadGameInfo()
+    {
+        var path = Path.Combine(GamePathOrDefault(), "sce_sys", "param.json");
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return ("", "");
+            }
+
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            string Get(string name) =>
+                document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                    ? value.GetString() ?? ""
+                    : "";
+            return (Get("titleId"), Get("contentVersion"));
         }
         catch
         {
+            return ("", "");
         }
+    }
 
+    private string GamePathOrDefault() =>
+        _gamePath.Length > 0 ? _gamePath : DefaultGamePath;
+
+    public string HardwareSummary()
+    {
+        var cpu = CpuName;
+        var memory = MemoryLabel;
+        var gpu = GpuName;
         var session = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") ?? "unknown session";
         return $"{cpu}{(memory.Length > 0 ? $" · {memory} RAM" : "")}" +
                $"{(gpu.Length > 0 ? $"\nGPU: {gpu}" : "")}\nDisplay: {session}";

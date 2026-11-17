@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media;
@@ -11,10 +12,6 @@ namespace AstroHybrid.App.Avalonia.Views;
 
 public partial class HomeView : UserControl, IPageRefresh
 {
-    private static readonly IBrush Success = Brush.Parse("#00D4AA");
-    private static readonly IBrush Warning = Brush.Parse("#FFAA00");
-    private static readonly IBrush Error = Brush.Parse("#FF4444");
-
     private readonly Backend _backend;
     private readonly AppSettings _settings;
     private readonly Action<string> _navigate;
@@ -26,65 +23,84 @@ public partial class HomeView : UserControl, IPageRefresh
         _settings = settings;
         _navigate = navigate;
 
-        _backend.GameOutput += OnGameOutput;
         _backend.GameRunningChanged += OnGameRunningChanged;
         Loaded += (_, _) => RefreshPage();
     }
 
     public void RefreshPage()
     {
-        var exists = Directory.Exists(_settings.GamePath);
+        var dumpExists = Directory.Exists(_settings.GamePath);
         var runtime = _backend.HybridReady;
-        var ready = runtime && exists;
+        var ready = runtime && dumpExists;
 
+        // Status copy matches the launcher's own wording, not a claim about updates.
         HeroStatus.Text = ready
-            ? "Ready to play"
-            : exists
-                ? "Runtime not built — open Installation"
-                : "Game dump not found — open Installation";
-        HeroStatus.Foreground = ready ? Success : exists ? Warning : Error;
+            ? "Installed and Ready"
+            : dumpExists
+                ? "Setup required"
+                : runtime
+                    ? "Game dump not found"
+                    : "Not Installed";
+        HeroStatus.Foreground = ready
+            ? Resource("SuccessBrush", "#00D4AA")
+            : dumpExists
+                ? Resource("WarningBrush", "#FFAA00")
+                : Resource("ErrorBrush", "#FF4444");
 
-        InstallValue.Text = ready ? "Ready" : exists ? "Setup required" : "Not found";
-        RuntimeValue.Text = runtime ? "Hybrid runtime installed" : "Hybrid runtime missing";
+        var info = _backend.GameInfo;
+        var version = info.Version.Length > 0 ? info.Version : "—";
+        var titleId = info.TitleId.Length > 0 ? info.TitleId : "PPSA21567";
 
-        var hardware = _backend.HardwareSummary();
-        var lines = hardware.Split('\n');
-        var cpuLine = lines.Length > 0 ? lines[0] : "Unknown CPU";
-        var cpuParts = cpuLine.Split('·');
-        CpuValue.Text = cpuParts[0].Trim();
-        GpuValue.Text = lines.FirstOrDefault(line => line.StartsWith("GPU:", StringComparison.Ordinal))
-            ?.Substring(4).Trim() ?? "—";
-        RamValue.Text = cpuParts.Length > 1 ? cpuParts[1].Trim() : "—";
-        DisplayValue.Text = lines.FirstOrDefault(line => line.StartsWith("Display:", StringComparison.Ordinal))
-            ?.Substring(8).Trim()
-            ?? Environment.GetEnvironmentVariable("XDG_SESSION_TYPE")
-            ?? "—";
+        GameVersionText.Text = version;
+        GameVersionValue.Text = version;
+        TitleIdRun.Text = titleId;
+        BuildText.Text = Backend.BuildSha;
 
-        var fps = _settings.FpsLimit > 0 ? $"{_settings.FpsLimit} FPS" : "Unlimited";
+        CpuValue.Text = _backend.CpuName;
+        var gpu = _backend.GpuName;
+        GpuValue.Text = gpu.Length > 0 ? gpu : "—";
+        var memory = _backend.MemoryLabel;
+        RamValue.Text = memory.Length > 0 ? memory : "—";        DisplayValue.Text = PrimaryDisplayLabel();
+
         ConfigText.Text =
-            $"{_settings.Width} × {_settings.Height}   ·   {fps}   ·   " +
+            $"{_settings.Width} × {_settings.Height}   ·   " +
             $"{(_settings.Fullscreen ? "Fullscreen" : "Windowed")}   ·   " +
+            $"VSync {(_settings.VSync ? "On" : "Off")}   ·   " +
+            $"{(_settings.FpsLimit > 0 ? $"{_settings.FpsLimit} FPS" : "No limit")}   ·   " +
             $"Audio {(_settings.DirectAudio ? "direct" : "default")}";
+
+        SetupActions.IsVisible = !ready;
+        InstalledActions.IsVisible = ready;
+        VsyncButton.Content = _settings.VSync ? "VSync: On" : "VSync: Off";
     }
+
+    private string PrimaryDisplayLabel()
+    {
+        var screens = TopLevel.GetTopLevel(this)?.Screens;
+        var screen = screens?.Primary ?? screens?.All.FirstOrDefault();
+        if (screen is null)
+        {
+            return Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") ?? "—";
+        }
+
+        var dip = screen.Bounds.Size.ToSize(1 / screen.Scaling);
+        return $"{dip.Width:0}×{dip.Height:0}";
+    }
+
+    private IBrush Resource(string key, string fallback) =>
+        this.FindResource(key) as IBrush ?? Brush.Parse(fallback);
 
     private void OpenGraphics(object? sender, RoutedEventArgs e) => _navigate("Graphics");
+    private void OpenController(object? sender, RoutedEventArgs e) => _navigate("Controller");
     private void OpenInstallation(object? sender, RoutedEventArgs e) => _navigate("Installation");
 
-    private void OnGameOutput(string line) =>
-        Dispatcher.UIThread.Post(() => AppendLog(line));
-
-    private void OnGameRunningChanged(bool running) =>
-        Dispatcher.UIThread.Post(() =>
-        {
-            AppendLog(running ? "Game process started." : "Game process exited.");
-            RefreshPage();
-        });
-
-    private void AppendLog(string line)
+    private void ToggleVsync(object? sender, RoutedEventArgs e)
     {
-        LogBox.Text = (LogBox.Text ?? "") + line + Environment.NewLine;
-        LogBox.CaretIndex = LogBox.Text?.Length ?? 0;
+        _settings.VSync = !_settings.VSync;
+        _backend.SaveSettings(_settings);
+        RefreshPage();
     }
 
-    private void ClearLog(object? sender, RoutedEventArgs e) => LogBox.Text = "";
+    private void OnGameRunningChanged(bool running) =>
+        Dispatcher.UIThread.Post(RefreshPage);
 }

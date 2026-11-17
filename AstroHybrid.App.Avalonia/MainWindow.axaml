@@ -1,5 +1,6 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:automation="using:Avalonia.Automation"
         x:Class="AstroHybrid.App.Avalonia.MainWindow"
         Title="AstroHybrid"
         Width="1100" Height="720"
@@ -22,8 +23,9 @@
           <StackPanel Orientation="Horizontal" Spacing="12">
             <Border Width="40" Height="40" CornerRadius="8"
                     Background="{DynamicResource PrimaryBrush}">
-              <TextBlock Text="★" FontSize="24" Foreground="White"
-                         HorizontalAlignment="Center" VerticalAlignment="Center" />
+              <Path Data="{StaticResource IconStar}" Width="22" Height="22"
+                    Stretch="Uniform" Fill="White"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
             <StackPanel VerticalAlignment="Center" Spacing="1">
               <TextBlock Text="AstroHybrid" FontSize="18" FontWeight="Bold" />
@@ -35,49 +37,70 @@
 
         <!-- Navigation -->
         <StackPanel Grid.Row="1" Margin="10,20,10,0" Spacing="4">
-          <Button x:Name="NavHome" Theme="{StaticResource NavButton}" Classes="active" Click="ShowHome">
+
+          <RadioButton x:Name="NavHome" Theme="{StaticResource NavRadio}" GroupName="Nav"
+                       Click="ShowHome" automation:AutomationProperties.Name="Home">
             <StackPanel Orientation="Horizontal">
-              <TextBlock Text="🏠" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <Path Data="{StaticResource IconHome}" Width="16" Height="16"
+                    Stretch="Uniform" StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+                    Stroke="{Binding $parent[RadioButton].Foreground}"
+                    Margin="0,0,12,0" VerticalAlignment="Center" />
               <TextBlock Text="Home" VerticalAlignment="Center" />
             </StackPanel>
-          </Button>
+          </RadioButton>
 
-          <Button x:Name="NavGraphics" Theme="{StaticResource NavButton}" Click="ShowGraphics">
+          <RadioButton x:Name="NavGraphics" Theme="{StaticResource NavRadio}" GroupName="Nav"
+                       Click="ShowGraphics" automation:AutomationProperties.Name="Graphics">
             <StackPanel Orientation="Horizontal">
-              <TextBlock Text="🎮" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <Path Data="{StaticResource IconGraphics}" Width="16" Height="16"
+                    Stretch="Uniform" StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+                    Stroke="{Binding $parent[RadioButton].Foreground}"
+                    Margin="0,0,12,0" VerticalAlignment="Center" />
               <TextBlock Text="Graphics" VerticalAlignment="Center" />
             </StackPanel>
-          </Button>
+          </RadioButton>
 
-          <Button x:Name="NavController" Theme="{StaticResource NavButton}" Click="ShowController">
+          <RadioButton x:Name="NavController" Theme="{StaticResource NavRadio}" GroupName="Nav"
+                       Click="ShowController" automation:AutomationProperties.Name="Controller">
             <StackPanel Orientation="Horizontal">
-              <TextBlock Text="🎯" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <Path Data="{StaticResource IconController}" Width="16" Height="16"
+                    Stretch="Uniform" StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+                    Stroke="{Binding $parent[RadioButton].Foreground}"
+                    Margin="0,0,12,0" VerticalAlignment="Center" />
               <TextBlock Text="Controller" VerticalAlignment="Center" />
             </StackPanel>
-          </Button>
+          </RadioButton>
 
-          <Button x:Name="NavAdvanced" Theme="{StaticResource NavButton}" Click="ShowAdvanced">
+          <RadioButton x:Name="NavAdvanced" Theme="{StaticResource NavRadio}" GroupName="Nav"
+                       Click="ShowAdvanced" automation:AutomationProperties.Name="Advanced">
             <StackPanel Orientation="Horizontal">
-              <TextBlock Text="⚙️" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <Path Data="{StaticResource IconAdvanced}" Width="16" Height="16"
+                    Stretch="Uniform" StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+                    Stroke="{Binding $parent[RadioButton].Foreground}"
+                    Margin="0,0,12,0" VerticalAlignment="Center" />
               <TextBlock Text="Advanced" VerticalAlignment="Center" />
             </StackPanel>
-          </Button>
+          </RadioButton>
 
-          <Button x:Name="NavInstallation" Theme="{StaticResource NavButton}" Click="ShowInstallation">
+          <RadioButton x:Name="NavInstallation" Theme="{StaticResource NavRadio}" GroupName="Nav"
+                       Click="ShowInstallation" automation:AutomationProperties.Name="Installation">
             <StackPanel Orientation="Horizontal">
-              <TextBlock Text="📦" FontSize="16" MinWidth="16" Margin="0,0,12,0" VerticalAlignment="Center" />
+              <Path Data="{StaticResource IconInstallation}" Width="16" Height="16"
+                    Stretch="Uniform" StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+                    Stroke="{Binding $parent[RadioButton].Foreground}"
+                    Margin="0,0,12,0" VerticalAlignment="Center" />
               <TextBlock Text="Installation" VerticalAlignment="Center" />
             </StackPanel>
-          </Button>
+          </RadioButton>
         </StackPanel>
 
-        <!-- Status footer -->
+        <!-- Status -->
         <Border Grid.Row="2" Padding="20"
                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
           <StackPanel Spacing="4">
             <TextBlock Text="STATUS" FontSize="12"
-                       Foreground="{DynamicResource TextMutedBrush}" />
-            <TextBlock x:Name="StatusText" Classes="body" Text="Loading…" />
+                       Foreground="{DynamicResource TextMutedReadableBrush}" />
+            <TextBlock x:Name="StatusText" Classes="body" Text="Ready" />
             <ProgressBar x:Name="StatusProgress" Height="4" IsIndeterminate="True"
                          IsVisible="False" Margin="0,8,0,0" />
           </StackPanel>
@@ -100,6 +123,9 @@
 
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10"
                       HorizontalAlignment="Right">
+            <Button x:Name="ReleaseLink" Theme="{StaticResource TextButton}"
+                    Content="View Release" IsVisible="False"
+                    VerticalAlignment="Center" Click="OpenReleasePage" />
             <Button x:Name="StopButton" Theme="{StaticResource SecondaryButton}"
                     Content="Stop" MinWidth="100" MinHeight="48"
                     IsVisible="False" Click="StopGame" />

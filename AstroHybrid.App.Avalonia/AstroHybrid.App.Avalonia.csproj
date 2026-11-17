@@ -22,4 +22,10 @@
   <ItemGroup>
     <AvaloniaResource Include="Assets/**" />
   </ItemGroup>
+
+  <!-- The Home badge shows the build commit. The shipped folder is not a git
+       checkout, so the SHA is captured at build time next to the binary. -->
+  <Target Name="WriteBuildInfo" AfterTargets="Build">
+    <Exec Command="git rev-parse --short HEAD > &quot;$(TargetDir)build-info.txt&quot;" IgnoreExitCode="true" StandardOutputImportance="Low" />
+  </Target>
 </Project>
