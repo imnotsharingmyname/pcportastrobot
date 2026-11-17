@@ -19,6 +19,7 @@ public sealed class AppSettings
     public int FpsLimit { get; set; } = 60;
     public bool Fullscreen { get; set; }
     public bool VSync { get; set; }
+    public bool Ultrawide { get; set; }
     public bool GameSpeed { get; set; } = true;
     public int GameSpeedPercent { get; set; } = 100;
     public bool PadMotion { get; set; }
@@ -192,7 +193,10 @@ public sealed class Backend
             return;
         }
 
-        var arguments = new List<string> { Script, "run", "--hybrid", "--game", settings.GamePath };
+        var arguments = new List<string>
+        {
+            Script, "run", "--hybrid", "--game", settings.GamePath, "--exe", VariantName(settings),
+        };
         if (settings.DirectAudio)
         {
             arguments.Add("--direct-audio");
@@ -642,6 +646,38 @@ public sealed class Backend
 
     private string _installSize = "";
     private DateTime _installSizeAt;
+
+    /// <summary>True when the setup produced this runtime variant.</summary>
+    public bool HasVariant(string name) =>
+        File.Exists(Path.Combine(HybridDirectory, name));
+
+    /// <summary>
+    /// The variant the graphics choices ask for, falling back to one that exists.
+    /// The Windows setup prefers a soft-assert build so a command-buffer overflow
+    /// follows the engine's failure path; the same preference applies here.
+    /// </summary>
+    public string VariantName(AppSettings settings)
+    {
+        var nonRt = settings.Lighting == 0;
+        var ultrawide = settings.Ultrawide;
+        var candidates = (nonRt, ultrawide) switch
+        {
+            (true, true) => new[] { "AstroBot-NonRT-Ultrawide-SoftAssert", "AstroBot-NonRT-Ultrawide", "AstroBot-NonRT", "AstroBot" },
+            (true, false) => new[] { "AstroBot-NonRT-SoftAssert", "AstroBot-NonRT", "AstroBot" },
+            (false, true) => new[] { "AstroBot-Ultrawide", "AstroBot" },
+            _ => new[] { "AstroBot" },
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (HasVariant(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return "AstroBot";
+    }
 
     public string InstalledAt
     {

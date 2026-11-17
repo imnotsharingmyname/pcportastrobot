@@ -195,6 +195,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             fail("Build/Run/AstroBot is missing; run 'setup' without --hybrid first")
         subprocess.run([sys.executable, str(ROOT / "Tools" / "linux" / "make-run-hybrid.py")],
                        check=True)
+        subprocess.run([sys.executable, str(ROOT / "Tools" / "linux" / "patch_game.py"),
+                        "--run", str(RUN_HYBRID), "--game", str(game)], check=True)
     else:
         unwrap(game)
         relink(game, RUN, False)
@@ -204,7 +206,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     run = RUN_HYBRID if args.hybrid else RUN
-    binary = run / "AstroBot"
+    binary = run / (args.exe or "AstroBot")
     if not binary.is_file():
         fail(f"{binary} is missing; run 'astrohybrid.py setup' first")
     if args.direct_audio:
@@ -263,6 +265,8 @@ def main(argv: list[str]) -> int:
     p_run.add_argument("--direct-audio", action="store_true",
                        help="route the game's stream to the default sink, bypassing filter chains")
     p_run.add_argument("--audio-sink", default="", help="PipeWire sink name for --direct-audio")
+    p_run.add_argument("--exe", default="AstroBot",
+                       help="runtime variant to launch (AstroBot, AstroBot-NonRT, AstroBot-Ultrawide, ...)")
     p_run.add_argument("--priority", choices=("normal", "abovenormal", "high"), default="normal",
                        help="raise the game's scheduling priority (abovenormal/high may need privileges)")
     p_run.add_argument("extra", nargs=argparse.REMAINDER)

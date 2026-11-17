@@ -13,14 +13,24 @@ namespace AstroHybrid.App.Avalonia.Views;
 
 public partial class GraphicsView : UserControl, IPageRefresh
 {
-    private static readonly (int Width, int Height)[] Resolutions =
+    private static readonly (int Width, int Height)[] WidescreenResolutions =
     {
         (1280, 720), (1600, 900), (1920, 1080), (2560, 1440),
     };
 
-    private static readonly string[] ResolutionLabels =
+    private static readonly string[] WidescreenLabels =
     {
         "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440",
+    };
+
+    private static readonly (int Width, int Height)[] UltrawideResolutions =
+    {
+        (1280, 720), (1600, 900), (1920, 1080), (2560, 1440), (2560, 1080), (3440, 1440),
+    };
+
+    private static readonly string[] UltrawideLabels =
+    {
+        "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "2560 x 1080 (21:9)", "3440 x 1440 (21:9)",
     };
 
     private static readonly int[] FpsValues = { 30, 35, 45, 50, 55, 60, 0 };
@@ -49,7 +59,6 @@ public partial class GraphicsView : UserControl, IPageRefresh
         _backend = backend;
         _settings = settings;
 
-        ResolutionBox.ItemsSource = ResolutionLabels;
         FpsBox.ItemsSource = FpsLabels;
         OverlayBox.ItemsSource = OverlayLabels;
 
@@ -78,7 +87,16 @@ public partial class GraphicsView : UserControl, IPageRefresh
     {
         _loading = true;
 
-        var index = Array.FindIndex(Resolutions, r => r.Width == _settings.Width && r.Height == _settings.Height);
+        var ultrawideAvailable = _backend.HasVariant("AstroBot-Ultrawide");
+        var resolutions = ultrawideAvailable ? UltrawideResolutions : WidescreenResolutions;
+        ResolutionBox.ItemsSource = ultrawideAvailable ? UltrawideLabels : WidescreenLabels;
+
+        UltrawideBox.IsEnabled = ultrawideAvailable;
+        UltrawideNote.Text = ultrawideAvailable
+            ? "Renders at the 21:9 aspect; 16:9 users keep the original framing."
+            : "The 21:9 patch is not in this runtime; re-run setup to build it.";
+
+        var index = Array.FindIndex(resolutions, r => r.Width == _settings.Width && r.Height == _settings.Height);
         ResolutionBox.SelectedIndex = index >= 0 ? index : 2;
 
         var fpsIndex = Array.IndexOf(FpsValues, _settings.FpsLimit);
@@ -88,6 +106,7 @@ public partial class GraphicsView : UserControl, IPageRefresh
         OverlayBox.SelectedIndex = overlayIndex >= 0 ? overlayIndex : 0;
 
         FullscreenBox.IsChecked = _settings.Fullscreen;
+        UltrawideBox.IsChecked = _settings.Ultrawide && ultrawideAvailable;
         VsyncBox.IsChecked = _settings.VSync;
         LowLatencyBox.IsChecked = _settings.LowLatency;
 
@@ -174,13 +193,15 @@ public partial class GraphicsView : UserControl, IPageRefresh
             return;
         }
 
+        var resolutions = _backend.HasVariant("AstroBot-Ultrawide") ? UltrawideResolutions : WidescreenResolutions;
         var resolution = ResolutionBox.SelectedIndex >= 0
-            ? Resolutions[ResolutionBox.SelectedIndex]
+            ? resolutions[ResolutionBox.SelectedIndex]
             : (Width: 1920, Height: 1080);
         _settings.Width = resolution.Width;
         _settings.Height = resolution.Height;
         _settings.FpsLimit = FpsBox.SelectedIndex >= 0 ? FpsValues[FpsBox.SelectedIndex] : 60;
         _settings.Fullscreen = FullscreenBox.IsChecked == true;
+        _settings.Ultrawide = UltrawideBox.IsChecked == true && UltrawideBox.IsEnabled;
         _settings.VSync = VsyncBox.IsChecked == true;
         _settings.LowLatency = LowLatencyBox.IsChecked == true && LowLatencyBox.IsEnabled;
         _settings.OverlayMode = OverlayBox.SelectedIndex >= 0 ? OverlayValues[OverlayBox.SelectedIndex] : "";
@@ -194,7 +215,7 @@ public partial class GraphicsView : UserControl, IPageRefresh
     {
         var bestWidth = 1280;
         var bestHeight = 720;
-        foreach (var candidate in Resolutions)
+        foreach (var candidate in WidescreenResolutions)
         {
             if (candidate.Item1 <= available.Width && candidate.Item2 <= available.Height)
             {

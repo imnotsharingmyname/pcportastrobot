@@ -20,9 +20,8 @@
                       Content="Start in fullscreen" IsCheckedChanged="OnCheckCommitted" />
 
             <CheckBox Grid.Row="2" Grid.Column="1" x:Name="UltrawideBox"
-                      Content="Ultrawide 21:9 rendering" IsEnabled="False" />
-            <TextBlock Grid.Row="3" Grid.Column="1" Classes="muted"
-                       Text="The 21:9 patch is a Windows game patch; this build renders 16:9 only." />
+                      Content="Ultrawide 21:9 rendering" IsCheckedChanged="OnCheckCommitted" />
+            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="UltrawideNote" Classes="muted" />
 
             <TextBlock Grid.Row="4" Grid.Column="0" Text="Graphics card" Classes="body"
                        VerticalAlignment="Center" />
