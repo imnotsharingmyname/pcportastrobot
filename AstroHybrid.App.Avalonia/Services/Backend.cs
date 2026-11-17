@@ -352,6 +352,7 @@ public sealed class Backend
                 _game = null;
             }
 
+            StopWatchdog();
             process.Dispose();
             GameRunningChanged?.Invoke(false);
             SetStatus(stopped ? "Game stopped" : code == 0 ? "Game exited" : $"Game exited (code {code})");
@@ -361,6 +362,10 @@ public sealed class Backend
         {
             _game = process;
             process.Start();
+            if (settings.HangWatchdog)
+            {
+                StartWatchdog();
+            }
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             SetStatus("Running");
@@ -861,11 +866,130 @@ public sealed class Backend
         return new ProcessResult { ExitCode = process.ExitCode, Output = output.ToString() };
     }
 
+    private DateTime _lastOutput = DateTime.UtcNow;
+    private Timer? _watchdog;
+    private bool _hangReported;
+
     private void Emit(string? line)
     {
         if (line is not null)
         {
+            _lastOutput = DateTime.UtcNow;
             GameOutput?.Invoke(line);
+        }
+    }
+
+    private void StartWatchdog()
+    {
+        StopWatchdog();
+        _hangReported = false;
+        _lastOutput = DateTime.UtcNow;
+        _watchdog = new Timer(_ => CheckHang(), null, TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(30));
+    }
+
+    private void StopWatchdog()
+    {
+        _watchdog?.Dispose();
+        _watchdog = null;
+    }
+
+    /// <summary>
+    /// Launcher-side equivalent of the Windows hang watchdog: when the runtime has
+    /// produced no output for two minutes, write its stacks to Logs once.
+    /// </summary>
+    private void CheckHang()
+    {
+        var process = _game;
+        if (_hangReported || process is null || process.HasExited)
+        {
+            return;
+        }
+
+        if ((DateTime.UtcNow - _lastOutput).TotalSeconds < 120)
+        {
+            return;
+        }
+
+        _hangReported = true;
+        var path = WriteHangReport(process);
+        GameOutput?.Invoke(path is null
+            ? "Hang watchdog: the game stopped producing output and no report could be written."
+            : $"Hang watchdog: no output for two minutes; report written to {path}");
+        SetStatus("Hang watchdog: diagnostics recorded");
+    }
+
+    private string? WriteHangReport(Process process)
+    {
+        try
+        {
+            Directory.CreateDirectory(LogDirectory);
+            var path = Path.Combine(LogDirectory, $"hang-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+            var report = new StringBuilder();
+            report.AppendLine($"pid {process.Id} at {DateTime.Now:O}");
+
+            var wchan = File.Exists($"/proc/{process.Id}/wchan")
+                ? File.ReadAllText($"/proc/{process.Id}/wchan").Trim()
+                : "?";
+            report.AppendLine($"wchan: {wchan}");
+
+            var tasks = Directory.Exists($"/proc/{process.Id}/task")
+                ? Directory.GetDirectories($"/proc/{process.Id}/task")
+                : Array.Empty<string>();
+            report.AppendLine($"threads: {tasks.Length}");
+
+            foreach (var task in tasks)
+            {
+                var tid = Path.GetFileName(task);
+                var stackPath = Path.Combine(task, "stack");
+                report.AppendLine($"-- thread {tid}");
+                if (File.Exists(stackPath))
+                {
+                    try
+                    {
+                        report.AppendLine(File.ReadAllText(stackPath));
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        report.AppendLine("(stack needs root)");
+                    }
+                }
+            }
+
+            // gdb gives real backtraces when it is installed.
+            try
+            {
+                var start = new ProcessStartInfo("gdb")
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                start.ArgumentList.Add("-p");
+                start.ArgumentList.Add(process.Id.ToString());
+                start.ArgumentList.Add("-batch");
+                start.ArgumentList.Add("-ex");
+                start.ArgumentList.Add("thread apply all bt");
+                using var gdb = Process.Start(start);
+                if (gdb is not null)
+                {
+                    var output = gdb.StandardOutput.ReadToEnd();
+                    gdb.WaitForExit(10000);
+                    report.AppendLine("-- gdb");
+                    report.AppendLine(output);
+                }
+            }
+            catch
+            {
+                report.AppendLine("-- gdb not available");
+            }
+
+            File.WriteAllText(path, report.ToString());
+            return path;
+        }
+        catch
+        {
+            return null;
         }
     }
 
