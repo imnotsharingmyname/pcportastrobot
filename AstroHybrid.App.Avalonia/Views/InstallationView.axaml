@@ -68,10 +68,11 @@
         <StackPanel>
           <TextBlock Text="Actions" Classes="section" Margin="0,0,0,10" />
           <StackPanel Orientation="Horizontal" Spacing="10">
-            <Button Content="Repair Installation" Click="RunSetup" IsEnabled="False" />
+            <Button Content="Repair Installation" Click="RunSetup"
+                    ToolTip.Tip="Re-runs the setup against the current dump." />
             <Button Content="Rebuild Installation" Click="RunSetup" />
-            <Button Content="Change Location" IsEnabled="False"
-                    ToolTip.Tip="The runtime lives in Build/RunHybrid inside this checkout." />
+            <Button Content="Change Location" Click="RunSetup"
+                    ToolTip.Tip="Opens setup, where the game dump folder can be changed. The runtime always lives in Build/RunHybrid." />
           </StackPanel>
           <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,10,0,0">
             <Button Theme="{StaticResource TextButton}" Content="Open Install Folder" Click="OpenInstallFolder" />
