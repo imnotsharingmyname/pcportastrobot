@@ -1,4 +1,4 @@
-From 5499f5138fa06a6ee25fde4e2b3102faa32dabf2 Mon Sep 17 00:00:00 2001
+From 9e603a731984f935209dc1eb4e0e630fe54fefdc Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 468 +++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 512 ++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2894 insertions(+), 11 deletions(-)
+ 21 files changed, 2938 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2414,10 +2414,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..ee0a3b4a
+index 00000000..d55919d0
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,512 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2473,6 +2473,7 @@ index 00000000..ee0a3b4a
 +	void* destroy = nullptr;
 +
 +	ffxContext    context   = nullptr;
++	ffxContext    fg_context = nullptr;
 +	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 +	SwapchainFns  fns {};
 +	uint64_t      frame_id = 0;
@@ -2599,7 +2600,11 @@ index 00000000..ee0a3b4a
 +	// The callback is set through a second frame-generation context (or a raw
 +	// swapchain configure key), which this module does not create yet, so the
 +	// wrapper cannot present. The stock presenter stays.
-+	FSRFG_LOG("FSR-FG: needs the frame-generation context for a present callback; "
++	// The second context exists and ffxConfigure now returns 0, so the present
++	// callback is registered. Presenting through the wrapper still dies in its
++	// non-interpolated branch, and not reproducibly run to run, so the stock
++	// presenter stays until that is solved.
++	FSRFG_LOG("FSR-FG: frame-generation context exists but presenting faults; "
 +	          "using the stock presenter\n");
 +	return false;
 +
@@ -2694,6 +2699,51 @@ index 00000000..ee0a3b4a
 +		return FFX_API_RETURN_OK;
 +	};
 +
++	// FFX splits presentation from generation: the swapchain context has no
++	// present callback of its own, and its present path calls one. The callback is
++	// supplied by a second, frame-generation context and wired to the swapchain
++	// through ffxConfigureDescFrameGeneration.
++	{
++		static PFN_vkGetDeviceProcAddr get_device_proc = nullptr;
++		if (get_device_proc == nullptr) {
++			void* loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
++			if (loader != nullptr) {
++				get_device_proc = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
++				    dlsym(loader, "vkGetDeviceProcAddr"));
++			}
++		}
++
++		ffxCreateBackendVKDesc backend {};
++		backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
++		backend.deviceContext.vkDevice         = device;
++		backend.deviceContext.vkPhysicalDevice = physical;
++		backend.deviceContext.vkDeviceProcAddr = get_device_proc;
++
++		ffxCreateContextDescFrameGeneration generation {};
++		generation.header.type   = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
++		generation.header.pNext  = &backend.header;
++		generation.displaySize   = {create_info.imageExtent.width, create_info.imageExtent.height};
++		generation.maxRenderSize = {create_info.imageExtent.width, create_info.imageExtent.height};
++		generation.backBufferFormat = FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM;
++
++		using CreateFn2 = ffxReturnCode_t (*)(ffxContext*, ffxCreateContextDescHeader*,
++		                                      const ffxAllocationCallbacks*);
++		const auto create2 = reinterpret_cast<CreateFn2>(state.create);
++		const auto created2 = create2(&state.fg_context, &generation.header, nullptr);
++		FSRFG_LOG("FSR-FG: frame-generation context result=%d\n", static_cast<int>(created2));
++		if (created2 != FFX_API_RETURN_OK || state.fg_context == nullptr) {
++			state.fg_context = nullptr;
++			return false;
++		}
++	}
++
++	state.fns.create      = reinterpret_cast<PFN_vkCreateSwapchainKHR>(functions.pOutCreateSwapchainFFXAPI);
++	state.fns.destroy     = reinterpret_cast<PFN_vkDestroySwapchainKHR>(functions.pOutDestroySwapchainFFXAPI);
++	state.fns.get_images  = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(functions.pOutGetSwapchainImagesKHR);
++	state.fns.acquire     = reinterpret_cast<PFN_vkAcquireNextImageKHR>(functions.pOutAcquireNextImageKHR);
++	state.fns.present     = reinterpret_cast<PFN_vkQueuePresentKHR>(functions.pOutQueuePresentKHR);
++	state.fns.presented_count = reinterpret_cast<uint64_t (*)(VkSwapchainKHR)>(functions.pOutGetLastPresentCountFFXAPI);
++
 +	ffxConfigureDescFrameGeneration configure {};
 +	configure.header.type            = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
 +	configure.swapChain              = reinterpret_cast<void*>(wrapped);
@@ -2711,17 +2761,11 @@ index 00000000..ee0a3b4a
 +	using ConfigureFn = ffxReturnCode_t (*)(ffxContext*, ffxConfigureDescHeader*);
 +	const auto configure_fn = reinterpret_cast<ConfigureFn>(state.configure);
 +	if (configure_fn != nullptr) {
-+		const auto configured = configure_fn(&state.context,
++		const auto configured = configure_fn(&state.fg_context,
 +		                                     reinterpret_cast<ffxConfigureDescHeader*>(&configure));
 +		FSRFG_LOG("FSR-FG: ffxConfigure result=%d\n", static_cast<int>(configured));
 +	}
 +
-+	state.fns.create      = reinterpret_cast<PFN_vkCreateSwapchainKHR>(functions.pOutCreateSwapchainFFXAPI);
-+	state.fns.destroy     = reinterpret_cast<PFN_vkDestroySwapchainKHR>(functions.pOutDestroySwapchainFFXAPI);
-+	state.fns.get_images  = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(functions.pOutGetSwapchainImagesKHR);
-+	state.fns.acquire     = reinterpret_cast<PFN_vkAcquireNextImageKHR>(functions.pOutAcquireNextImageKHR);
-+	state.fns.present     = reinterpret_cast<PFN_vkQueuePresentKHR>(functions.pOutQueuePresentKHR);
-+	state.fns.presented_count = reinterpret_cast<uint64_t (*)(VkSwapchainKHR)>(functions.pOutGetLastPresentCountFFXAPI);
 +	FSRFG_LOG("FSR-FG: wrapped handle=%p\n", (void*)wrapped);
 +	// FFX's wrapper faults on its first acquire even with the dispatch wired, so
 +	// the swapchain is not wrapped: the stock presenter stays in place and the
