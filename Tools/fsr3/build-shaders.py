@@ -256,66 +256,78 @@ def _str(name: str, values: list[str]) -> str:
     return f"static const char* {name}[] = {{{items}}};"
 
 
+# The field names POPULATE_SHADER_BLOB_FFX reads, grouped per binding class.
+# (reflection key, singular stem used in the emitted array names)
+FIELD_GROUPS = [
+    ("cb", "constantBuffer"),
+    ("srv_texture", "srvTexture"),
+    ("uav_texture", "uavTexture"),
+    ("srv_buffer", "srvBuffer"),
+    ("uav_buffer", "uavBuffer"),
+    ("sampler", "sampler"),
+]
+
+COUNTS = ["numConstantBuffers", "numSRVTextures", "numUAVTextures",
+          "numSRVBuffers", "numUAVBuffers", "numSamplers",
+          "numRTAccelerationStructures"]
+
+
 def emit_pass(pass_key: str, modules: list[tuple[bytes, str, dict]],
-              keys: list[int], prefix: str) -> str:
-    """Emit the .c body: one blob per permutation key plus the lookup tables."""
+              keys: list[int], prefix: str, options: list[str]) -> str:
+    """Emit the .c body: one module per permutation key plus the lookup tables."""
     stem = f"{prefix}_{pass_key}"
-    lines: list[str] = ['#include <ffx_internal_types.h>', ""]
+    lines: list[str] = ['#include "fsr3_shader_blob_header.h"', ""]
 
     for key, (blob, entry, reflection) in enumerate(modules):
         name = f"{stem}_{key}"
         lines.append(f"static const uint8_t {name}_data[] = {{"
                      + ",".join(str(b) for b in blob) + "};")
-        for group, cname in ORDERING:
+        for group, singular in FIELD_GROUPS:
             pairs = reflection[group]
             if pairs:
-                lines.append(_u32(f"{name}_{cname}s", [b for b, _ in pairs]))
-                lines.append(_u32(f"{name}_{cname}Counts", [1] * len(pairs)))
-                lines.append(_u32(f"{name}_{cname}Spaces", [0] * len(pairs)))
-                lines.append(_str(f"{name}_{cname}Names", [n for _, n in pairs]))
+                lines.append(_u32(f"{name}_{singular}Bindings", [b for b, _ in pairs]))
+                lines.append(_u32(f"{name}_{singular}Counts", [1] * len(pairs)))
+                lines.append(_u32(f"{name}_{singular}Spaces", [0] * len(pairs)))
+                lines.append(_str(f"{name}_{singular}Names", [n for _, n in pairs]))
             else:
-                lines.append(_u32(f"{name}_{cname}s", [0]))
-                lines.append(_u32(f"{name}_{cname}Counts", [0]))
-                lines.append(_u32(f"{name}_{cname}Spaces", [0]))
-                lines.append(_str(f"{name}_{cname}Names", [""]))
+                lines.append(_u32(f"{name}_{singular}Bindings", [0]))
+                lines.append(_u32(f"{name}_{singular}Counts", [0]))
+                lines.append(_u32(f"{name}_{singular}Spaces", [0]))
+                lines.append(_str(f"{name}_{singular}Names", [""]))
         lines.append(_u32(f"{name}_rtZero", [0]))
         lines.append(_str(f"{name}_rtNames", [""]))
 
     entries: list[str] = []
     for key, (blob, entry, reflection) in enumerate(modules):
         name = f"{stem}_{key}"
-        counts = {group: len(reflection[group]) for group, _ in ORDERING}
-        entries.append(
-            f"{{ {name}_data, sizeof({name}_data), \"{entry}\", "
-            f"{counts['cb']}, {counts['srv_texture']}, {counts['uav_texture']}, "
-            f"{counts['srv_buffer']}, {counts['uav_buffer']}, {counts['sampler']}, 0, "
-            f"{name}_boundConstantBufferNames, {name}_boundConstantBuffers, {name}_boundConstantBufferCounts, {name}_boundConstantBufferSpaces, "
-            f"{name}_boundSRVTextureNames, {name}_boundSRVTextures, {name}_boundSRVTextureCounts, {name}_boundSRVTextureSpaces, "
-            f"{name}_boundUAVTextureNames, {name}_boundUAVTextures, {name}_boundUAVTextureCounts, {name}_boundUAVTextureSpaces, "
-            f"{name}_boundSRVBufferNames, {name}_boundSRVBuffers, {name}_boundSRVBufferCounts, {name}_boundSRVBufferSpaces, "
-            f"{name}_boundUAVBufferNames, {name}_boundUAVBuffers, {name}_boundUAVBufferCounts, {name}_boundUAVBufferSpaces, "
-            f"{name}_boundSamplerNames, {name}_boundSamplers, {name}_boundSamplerCounts, {name}_boundSamplerSpaces, "
-            f"{name}_rtNames, {name}_rtZero, {name}_rtZero, {name}_rtZero }}")
+        counts = [len(reflection[group]) for group, _ in FIELD_GROUPS] + [0]
+        fields = [f"{name}_data", f"sizeof({name}_data)", f'"{entry}"']
+        fields += [str(value) for value in counts]
+        for _group, singular in FIELD_GROUPS:
+            fields += [f"{name}_{singular}Names", f"{name}_{singular}Bindings",
+                       f"{name}_{singular}Counts", f"{name}_{singular}Spaces"]
+        fields += [f"{name}_rtNames", f"{name}_rtZero", f"{name}_rtZero", f"{name}_rtZero"]
+        entries.append("{ " + ", ".join(fields) + " }")
 
-    lines.append(f"const FfxShaderBlob g_{stem}_PermutationInfo[] = {{")
+    lines.append(f"const FfxShaderBlobHeader g_{stem}_PermutationInfo[] = {{")
     lines.append(",\n".join(entries))
     lines.append("};")
-    # 64 entries, indexed by the permutation key. A key that was not built maps
-    # to -1: the lookup then faults loudly instead of running a shader compiled
-    # for different options.
+
     table = [-1] * 64
     for position, key in enumerate(keys):
         if 0 <= key < 64:
             table[key] = position
     table_text = "{" + ",".join(str(v) for v in table) + "}"
     lines.append(f"const int32_t g_{stem}_IndirectionTable[64] = " + table_text + ";")
-    # The lookup asks for a wave64 table on AMD hardware. Subgroup size is a
-    # device property in Vulkan, not something the SPIR-V encodes, so the same
-    # modules serve both names.
-    lines.append(f"const FfxShaderBlob g_{stem}_wave64_PermutationInfo[] = {{")
-    lines.append(",\n".join(entries))
-    lines.append("};")
-    lines.append(f"const int32_t g_{stem}_wave64_IndirectionTable[64] = " + table_text + ";")
+    # The lookup asks for wave64 and 16-bit tables on AMD hardware. Subgroup size
+    # is a device property in Vulkan and the modules are fp32, so the same
+    # entries serve every name: a device asking for fp16 gets correct output with
+    # less through-put, not a wrong image.
+    for suffix in ("wave64", "16bit", "wave64_16bit"):
+        lines.append(f"const FfxShaderBlobHeader g_{stem}_{suffix}_PermutationInfo[] = {{")
+        lines.append(",\n".join(entries))
+        lines.append("};")
+        lines.append(f"const int32_t g_{stem}_{suffix}_IndirectionTable[64] = " + table_text + ";")
     return "\n".join(lines) + "\n"
 
 
@@ -387,13 +399,27 @@ def main() -> int:
 
             out_key = f"{kit['prefix']}_{pass_key}"
             (out / f"{out_key}_permutations.c").write_text(
-                emit_pass(pass_key, modules, compiled_keys, kit["prefix"]))
+                emit_pass(pass_key, modules, compiled_keys, kit["prefix"], options))
+            key_struct = [f"typedef struct {kit['prefix']}_{pass_key}_PermutationKey {{",
+                          "    int32_t index;"]
+            key_struct += [f"    int32_t {option};" for option in options]
+            key_struct.append(f"}} {kit['prefix']}_{pass_key}_PermutationKey;")
             (out / f"{out_key}_permutations.h").write_text(
                 "// Generated by Tools/fsr3/build-shaders.py\n#pragma once\n"
-                f"extern const FfxShaderBlob g_{out_key}_PermutationInfo[];\n"
-                f"extern const int32_t g_{out_key}_IndirectionTable[];\n"
-                f"extern const FfxShaderBlob g_{out_key}_wave64_PermutationInfo[];\n"
-                f"extern const int32_t g_{out_key}_wave64_IndirectionTable[];\n")
+                + "\n".join(key_struct) + "\n"
+                "#include \"fsr3_shader_blob_header.h\"\n"
+                + "".join(
+                    f"extern const FfxShaderBlobHeader g_{out_key}{suffix}_PermutationInfo[];\n"
+                    f"extern const int32_t g_{out_key}{suffix}_IndirectionTable[64];\n"
+                    for suffix in ("", "_wave64", "_16bit", "_wave64_16bit")))
+            # The shaderblobs translation unit includes the wave64 and 16-bit
+            # tables by their own names; the modules are shared. The generic
+            # modules are fp32, so a device that asks for fp16 gets correct output
+            # with less through-put rather than a wrong image.
+            for suffix in ("wave64", "16bit", "wave64_16bit"):
+                (out / f"{out_key}_{suffix}_permutations.h").write_text(
+                    "// Generated by Tools/fsr3/build-shaders.py\n#pragma once\n"
+                    f"#include \"{out_key}_permutations.h\"\n")
             print(f"  {kit_name}/{pass_key}: {len(modules)} modules")
 
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
