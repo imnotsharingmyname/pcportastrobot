@@ -1,4 +1,4 @@
-From df56b68f9f15e71cc4a7247c3c718c7e3d087917 Mon Sep 17 00:00:00 2001
+From 4384b368a53eb630d5c2ee8cd390809b74d9cf10 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 552 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 431 ++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 434 ++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2846 insertions(+), 11 deletions(-)
+ 21 files changed, 2849 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2403,10 +2403,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..5168fed0
+index 00000000..932d9197
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,434 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2562,7 +2562,10 @@ index 00000000..5168fed0
 +	// Acquire is reached and faults inside imageAcquireQueue.submit even with a valid
 +	// semaphore, a valid buffer count and a supplied submitFunc, so the fault is in
 +	// the provider's queue wrapper itself. Declining keeps the stock presenter.
-+	FSRFG_LOG("FSR-FG: the provider faults in its queue submit; using the stock presenter\n");
++	// Verified at the fault: the acquire queue's handle, family and submit function
++	// are all valid, and submit still faults, so the wrapper's own bookkeeping is at
++	// fault. Declining keeps the stock presenter.
++	FSRFG_LOG("FSR-FG: provider queue submit faults with valid handles; stock presenter\n");
 +	return false;
 +
 +	// The swapchain can be wrapped, but nothing feeds it yet: the per-frame
