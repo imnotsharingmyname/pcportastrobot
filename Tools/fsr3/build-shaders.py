@@ -61,6 +61,47 @@ KEY_ORDER = [
     "FFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING",
 ]
 
+KITS = {
+    "upscaler": {
+        "root": "upscalers/fsr3",
+        "prefix": "ffx_fsr3upscaler",
+        "include": ["include/gpu", "include", "internal/shaders"],
+        "keys": [
+            "FFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE",
+            "FFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT",
+            "FFX_FSR3UPSCALER_OPTION_LOW_RESOLUTION_MOTION_VECTORS",
+            "FFX_FSR3UPSCALER_OPTION_JITTERED_MOTION_VECTORS",
+            "FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH",
+            "FFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING",
+        ],
+    },
+    "frameinterpolation": {
+        "root": "framegeneration/fsr3",
+        "prefix": "ffx_frameinterpolation",
+        "include": ["include/gpu", "include", "internal/shaders"],
+        "keys": [
+            "FFX_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS",
+            "FFX_FRAMEINTERPOLATION_OPTION_JITTERED_MOTION_VECTORS",
+            "FFX_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH",
+        ],
+        # The 2.4.0 drop calls MotionVectorJitterCancellation() in
+        # ffx_frameinterpolation_callbacks_hlsl.h without defining it anywhere, so
+        # every permutation with jittered motion vectors fails to compile. The
+        # option is optional at dispatch time, so those permutations are simply not
+        # built; their indirection entries stay -1 and the dispatch leaves the flag
+        # off. Inventing the function would change image stability with a guess.
+        "forced": {"FFX_FRAMEINTERPOLATION_OPTION_JITTERED_MOTION_VECTORS": 0},
+    },
+    "opticalflow": {
+        "root": "framegeneration/fsr3",
+        "prefix": "ffx_opticalflow",
+        "include": ["include/gpu", "include", "internal/shaders"],
+        "keys": [
+            "FFX_OPTICALFLOW_OPTION_HDR_COLOR_INPUT",
+        ],
+    },
+}
+
 UPSCALER_PASSES = {
     "prepare_inputs_pass": "ffx_fsr3upscaler_prepare_inputs_pass.hlsl",
     "luma_pyramid_pass": "ffx_fsr3upscaler_luma_pyramid_pass.hlsl",
@@ -72,6 +113,37 @@ UPSCALER_PASSES = {
     "rcas_pass": "ffx_fsr3upscaler_rcas_pass.hlsl",
     "debug_view_pass": "ffx_fsr3upscaler_debug_view_pass.hlsl",
     "autogen_reactive_pass": "ffx_fsr3upscaler_autogen_reactive_pass.hlsl",
+}
+
+FRAMEINTERPOLATION_PASSES = {
+    "setup_pass": "ffx_frameinterpolation_setup_pass.hlsl",
+    "reconstruct_previous_depth_pass": "ffx_frameinterpolation_reconstruct_previous_depth_pass.hlsl",
+    "optical_flow_vector_field_pass": "ffx_frameinterpolation_optical_flow_vector_field_pass.hlsl",
+    "game_motion_vector_field_pass": "ffx_frameinterpolation_game_motion_vector_field_pass.hlsl",
+    "disocclusion_mask_pass": "ffx_frameinterpolation_disocclusion_mask_pass.hlsl",
+    "reconstruct_and_dilate_pass": "ffx_frameinterpolation_reconstruct_and_dilate_pass.hlsl",
+    "compute_inpainting_pyramid_pass": "ffx_frameinterpolation_compute_inpainting_pyramid_pass.hlsl",
+    "compute_game_vector_field_inpainting_pyramid_pass":
+        "ffx_frameinterpolation_compute_game_vector_field_inpainting_pyramid_pass.hlsl",
+    "inpainting_pass": "ffx_frameinterpolation_inpainting_pass.hlsl",
+    "frameinterpolation_pass": "ffx_frameinterpolation_pass.hlsl",
+    "debug_view_pass": "ffx_frameinterpolation_debug_view_pass.hlsl",
+}
+
+OPTICALFLOW_PASSES = {
+    "prepare_luma_pass": "ffx_opticalflow_prepare_luma_pass.hlsl",
+    "compute_luminance_pyramid_pass": "ffx_opticalflow_compute_luminance_pyramid_pass.hlsl",
+    "generate_scd_histogram_pass": "ffx_opticalflow_generate_scd_histogram_pass.hlsl",
+    "compute_scd_divergence_pass": "ffx_opticalflow_compute_scd_divergence_pass.hlsl",
+    "compute_optical_flow_advanced_pass_v5": "ffx_opticalflow_compute_optical_flow_advanced_pass_v5.hlsl",
+    "filter_optical_flow_pass_v5": "ffx_opticalflow_filter_optical_flow_pass_v5.hlsl",
+    "scale_optical_flow_advanced_pass_v5": "ffx_opticalflow_scale_optical_flow_advanced_pass_v5.hlsl",
+}
+
+PASSES_BY_KIT = {
+    "upscaler": UPSCALER_PASSES,
+    "frameinterpolation": FRAMEINTERPOLATION_PASSES,
+    "opticalflow": OPTICALFLOW_PASSES,
 }
 
 ORDERING = [
@@ -185,9 +257,9 @@ def _str(name: str, values: list[str]) -> str:
 
 
 def emit_pass(pass_key: str, modules: list[tuple[bytes, str, dict]],
-              keys: list[int]) -> str:
-    """Emit the .c body: one blob per permutation key plus the lookup table."""
-    stem = f"ffx_fsr3upscaler_{pass_key}"
+              keys: list[int], prefix: str) -> str:
+    """Emit the .c body: one blob per permutation key plus the lookup tables."""
+    stem = f"{prefix}_{pass_key}"
     lines: list[str] = ['#include <ffx_internal_types.h>', ""]
 
     for key, (blob, entry, reflection) in enumerate(modules):
@@ -235,8 +307,15 @@ def emit_pass(pass_key: str, modules: list[tuple[bytes, str, dict]],
     for position, key in enumerate(keys):
         if 0 <= key < 64:
             table[key] = position
-    lines.append(f"const int32_t g_{stem}_IndirectionTable[64] = "
-                 + "{" + ",".join(str(v) for v in table) + "};")
+    table_text = "{" + ",".join(str(v) for v in table) + "}"
+    lines.append(f"const int32_t g_{stem}_IndirectionTable[64] = " + table_text + ";")
+    # The lookup asks for a wave64 table on AMD hardware. Subgroup size is a
+    # device property in Vulkan, not something the SPIR-V encodes, so the same
+    # modules serve both names.
+    lines.append(f"const FfxShaderBlob g_{stem}_wave64_PermutationInfo[] = {{")
+    lines.append(",\n".join(entries))
+    lines.append("};")
+    lines.append(f"const int32_t g_{stem}_wave64_IndirectionTable[64] = " + table_text + ";")
     return "\n".join(lines) + "\n"
 
 
@@ -260,6 +339,8 @@ def main() -> int:
     parser.add_argument("--dxc", required=True, help="path to the dxc binary")
     parser.add_argument("--out", default="Build/fsr3/shaders")
     parser.add_argument("--keys", default="all", help="'all' or a comma list of key indices")
+    parser.add_argument("--kits", default=None,
+                        help="comma list of upscaler,frameinterpolation,opticalflow (default: all)")
     args = parser.parse_args()
 
     sdk = pathlib.Path(args.sdk).expanduser().resolve()
@@ -267,42 +348,56 @@ def main() -> int:
     if not pathlib.Path(dxc).exists():
         raise SystemExit(f"dxc not found at {dxc}")
 
-    kit = sdk / "Kits" / "FidelityFX" / "upscalers" / "fsr3"
-    shaders = kit / "internal" / "shaders"
-    include = [kit / "include" / "gpu", kit / "include", shaders]
-
     out = pathlib.Path(args.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     work = out / "spv"
     work.mkdir(exist_ok=True)
 
     keys = list(range(64)) if args.keys == "all" else [int(v) for v in args.keys.split(",")]
+    selected = args.kits.split(",") if args.kits else list(KITS)
 
     manifest: dict[str, dict] = {}
-    for pass_key, filename in UPSCALER_PASSES.items():
-        modules = []
-        for key in keys:
-            defines = {name: 1 if key & (1 << bit) else 0
-                       for bit, name in enumerate(KEY_ORDER)}
-            blob = compile_pass(dxc, shaders / filename, include, defines,
-                                work / f"{pass_key}.{key}.spv")
-            reflection = reflect(blob)
-            modules.append((blob, "CS", reflection))
-            manifest[f"{pass_key}@{key}"] = {
-                "size": len(blob),
-                "bindings": {k: [b for b, _ in v] for k, v in reflection.items()},
-            }
+    for kit_name in selected:
+        kit = KITS[kit_name]
+        root = sdk / "Kits" / "FidelityFX" / kit["root"]
+        shaders = root / "internal" / "shaders"
+        include = [root / path for path in kit["include"]]
+        options = kit["keys"]
+        pass_keys = list(range(1 << len(options))) if keys == list(range(64)) else keys
 
-        (out / f"ffx_fsr3upscaler_{pass_key}_permutations.c").write_text(
-            emit_pass(pass_key, modules, keys))
-        (out / f"ffx_fsr3upscaler_{pass_key}_permutations.h").write_text(
-            "// Generated by Tools/fsr3/build-shaders.py\n#pragma once\n"
-            f"extern const FfxShaderBlob g_ffx_fsr3upscaler_{pass_key}_PermutationInfo[];\n"
-            f"extern const int32_t g_ffx_fsr3upscaler_{pass_key}_IndirectionTable[];\n")
-        print(f"  {pass_key}: {len(modules)} modules")
+        for pass_key, filename in PASSES_BY_KIT[kit_name].items():
+            forced = kit.get("forced", {})
+            modules = []
+            compiled_keys: list[int] = []
+            for key in [k for k in pass_keys if k < (1 << len(options))]:
+                defines = {name: 1 if key & (1 << bit) else 0
+                           for bit, name in enumerate(options)}
+                if any(defines[name] != value for name, value in forced.items()):
+                    continue
+                defines.update(forced)
+                compiled_keys.append(key)
+                blob = compile_pass(dxc, shaders / filename, include, defines,
+                                    work / f"{kit['prefix']}_{pass_key}.{key}.spv")
+                reflection = reflect(blob)
+                modules.append((blob, "CS", reflection))
+                manifest[f"{kit_name}/{pass_key}@{key}"] = {
+                    "size": len(blob),
+                    "bindings": {k: [b for b, _ in v] for k, v in reflection.items()},
+                }
+
+            out_key = f"{kit['prefix']}_{pass_key}"
+            (out / f"{out_key}_permutations.c").write_text(
+                emit_pass(pass_key, modules, compiled_keys, kit["prefix"]))
+            (out / f"{out_key}_permutations.h").write_text(
+                "// Generated by Tools/fsr3/build-shaders.py\n#pragma once\n"
+                f"extern const FfxShaderBlob g_{out_key}_PermutationInfo[];\n"
+                f"extern const int32_t g_{out_key}_IndirectionTable[];\n"
+                f"extern const FfxShaderBlob g_{out_key}_wave64_PermutationInfo[];\n"
+                f"extern const int32_t g_{out_key}_wave64_IndirectionTable[];\n")
+            print(f"  {kit_name}/{pass_key}: {len(modules)} modules")
 
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
-    print(f"== wrote {len(UPSCALER_PASSES)} passes to {out}")
+    print(f"== wrote {sum(len(PASSES_BY_KIT[k]) for k in selected)} passes to {out}")
     return 0
 
 
