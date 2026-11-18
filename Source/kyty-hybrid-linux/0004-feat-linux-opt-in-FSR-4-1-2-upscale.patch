@@ -1,4 +1,4 @@
-From f40400b8d00950094b47c70438cd6e743d517d19 Mon Sep 17 00:00:00 2001
+From b9bcddeff3162f4c77f8609dbfa5a081ab3f4489 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 538 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 261 +++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 263 +++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  54 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2655 insertions(+), 11 deletions(-)
+ 21 files changed, 2657 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2389,10 +2389,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..80336741
+index 00000000..c8d9beeb
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,263 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2578,12 +2578,14 @@ index 00000000..80336741
 +		return false;
 +	}
 +
++	FSRFG_LOG("FSR-FG: context created, querying replacement functions\n");
 +	ffxQueryDescSwapchainReplacementFunctionsVK functions {};
 +	functions.header.type = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK;
 +
-+	using QueryFn = ffxReturnCode_t (*)(ffxContext, ffxQueryDescHeader*);
++	// The provider takes the context by pointer and dereferences it.
++	using QueryFn = ffxReturnCode_t (*)(ffxContext*, ffxQueryDescHeader*);
 +	const auto query = reinterpret_cast<QueryFn>(state.query);
-+	if (query(state.context, reinterpret_cast<ffxQueryDescHeader*>(&functions)) != FFX_API_RETURN_OK) {
++	if (query(&state.context, reinterpret_cast<ffxQueryDescHeader*>(&functions)) != FFX_API_RETURN_OK) {
 +		FSRFG_LOG("FSR-FG: cannot query the swapchain replacement functions\n");
 +		return false;
 +	}
