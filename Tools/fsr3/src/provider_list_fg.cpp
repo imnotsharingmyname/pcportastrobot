@@ -6,13 +6,15 @@
 #include "ffx_provider.h"
 
 #include "ffx_provider_fsr3framegeneration.h"
+#include "ffx_provider_fsr3framegenerationswapchain.h"
 
 #include <array>
 
 namespace {
 
-std::array<ffxProvider*, 1> Providers() {
-    return { &ffxProvider_Fsr3FrameGeneration::GetInstance() };
+std::array<ffxProvider*, 2> Providers() {
+    return { &ffxProvider_Fsr3FrameGeneration::GetInstance(),
+             &ffxProvider_Fsr3FrameGenerationSwapChain::GetInstance() };
 }
 
 } // namespace

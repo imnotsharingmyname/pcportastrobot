@@ -1,4 +1,4 @@
-From a9ff8fd4a84fbd6632d90e58bfb037a45c8f7f6d Mon Sep 17 00:00:00 2001
+From d01d961a1a7cc76ca5ea61fe87b490869ad30c66 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -7,7 +7,10 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  CMakeLists.txt                                |   1 +
  src/fsr4/include/ffx_api.h                    | 213 +++++++
  src/fsr4/include/ffx_api_types.h              | 257 +++++++++
+ src/fsr4/include/ffx_framegeneration.h        | 299 ++++++++++
+ .../include/ffx_framegeneration_api_types.h   |  72 +++
  src/fsr4/include/ffx_upscale.h                | 230 ++++++++
+ .../include/vk/ffx_api_framegeneration_vk.h   | 150 +++++
  src/fsr4/include/vk/ffx_api_vk.h              | 308 ++++++++++
  .../host_gpu/renderer/cache/textureCache.cpp  |  42 ++
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
@@ -15,16 +18,19 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 538 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 247 ++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 240 ++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  53 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
- .../presentation/window/swapchain.cpp         |  55 +-
+ .../presentation/window/swapchain.cpp         |  57 +-
  .../presentation/window/vulkanWindow.cpp      |  39 ++
- 17 files changed, 2060 insertions(+), 10 deletions(-)
+ 20 files changed, 2576 insertions(+), 10 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
+ create mode 100644 src/fsr4/include/ffx_framegeneration.h
+ create mode 100644 src/fsr4/include/ffx_framegeneration_api_types.h
  create mode 100644 src/fsr4/include/ffx_upscale.h
+ create mode 100644 src/fsr4/include/vk/ffx_api_framegeneration_vk.h
  create mode 100644 src/fsr4/include/vk/ffx_api_vk.h
  create mode 100644 src/graphics/host_gpu/renderer/fsr4.cpp
  create mode 100644 src/graphics/host_gpu/renderer/fsr4.h
@@ -525,6 +531,389 @@ index 00000000..380c4c0a
 +    float min; ///< Lower bound of the interval.
 +    float max; ///< Upper bound of the interval.
 +} FfxApiFloatBounds;
+diff --git a/src/fsr4/include/ffx_framegeneration.h b/src/fsr4/include/ffx_framegeneration.h
+new file mode 100644
+index 00000000..dd9dbf9c
+--- /dev/null
++++ b/src/fsr4/include/ffx_framegeneration.h
+@@ -0,0 +1,299 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2026 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++
++#include "ffx_api.h"
++#include "ffx_framegeneration_api_types.h"
++
++#define FFX_FRAMEGENERATION_VERSION_MAJOR 4
++#define FFX_FRAMEGENERATION_VERSION_MINOR 0
++#define FFX_FRAMEGENERATION_VERSION_PATCH 2
++
++#define FFX_FRAMEGENERATION_MAKE_VERSION(major, minor, patch) (((major) << 22) | ((minor) << 12) | (patch))
++#define FFX_FRAMEGENERATION_VERSION                           FFX_FRAMEGENERATION_MAKE_VERSION(FFX_FRAMEGENERATION_VERSION_MAJOR, FFX_FRAMEGENERATION_VERSION_MINOR, FFX_FRAMEGENERATION_VERSION_PATCH)
++
++#define FFX_FRAMEGENERATION_PREPARE_REPLACEMENT_SUFFIX "PrepareV2"
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++enum FfxApiCreateContextFramegenerationFlags
++{
++    FFX_FRAMEGENERATION_ENABLE_ASYNC_WORKLOAD_SUPPORT             = (1 << 0),  ///< A bit indicating that async compute workloads should be supported. Enables generation work on async compute queues.
++    FFX_FRAMEGENERATION_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS  = (1 << 1),  ///< A bit indicating if the motion vectors are rendered at display resolution.
++    FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION = (1 << 2),  ///< A bit indicating that the motion vectors have the jittering pattern applied to them.
++    FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED                     = (1 << 3),  ///< A bit indicating that the input depth buffer data provided is inverted [1..0].
++    FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE                     = (1 << 4),  ///< A bit indicating that the input depth buffer data provided is using an infinite far plane.
++    FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE                 = (1 << 5),  ///< A bit indicating if the input color data provided to all inputs is using a high-dynamic range.
++    FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING                     = (1 << 6),  ///< A bit indicating that the runtime should check some API values and report issues.
++};
++
++enum FfxApiDispatchFramegenerationFlags
++{
++    FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_TEAR_LINES       = (1 << 0),  ///< A bit indicating that the debug tear lines will be drawn to the generated output.
++    FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_RESET_INDICATORS = (1 << 1),  ///< A bit indicating that the debug reset indicators will be drawn to the generated output.
++    FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW             = (1 << 2),  ///< A bit indicating that the generated output resource will contain debug views with relevant information.
++    FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY = (1 << 3),  ///< A bit indicating that the context should only run frame interpolation and not modify the swapchain.
++    FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_PACING_LINES     = (1 << 4),  ///< A bit indicating that the debug pacing lines will be drawn to the generated output.
++    FFX_FRAMEGENERATION_FLAG_RESERVED_1                  = (1 << 5),  ///< Reserved for future use.
++    FFX_FRAMEGENERATION_FLAG_RESERVED_2                  = (1 << 6),  ///< Reserved for future use.
++};
++
++enum FfxApiUiCompositionFlags
++{
++    FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_USE_PREMUL_ALPHA                    = (1 << 0),  ///< A bit indicating that we use premultiplied alpha for UI composition.
++    FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_ENABLE_INTERNAL_UI_DOUBLE_BUFFERING = (1 << 1),  ///< A bit indicating that the swapchain should doublebuffer the UI resource.
++};
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x01)
++struct ffxCreateContextDescFrameGeneration
++{
++    ffxCreateContextDescHeader header;            ///< Description header for frame generation context creation.
++    uint32_t                   flags;             ///< A combination of zero or more values from FfxApiCreateContextFramegenerationFlags.
++    struct FfxApiDimensions2D  displaySize;       ///< The resolution at which both rendered and generated frames will be displayed.
++    struct FfxApiDimensions2D  maxRenderSize;     ///< The maximum rendering resolution.
++    uint32_t                   backBufferFormat;  ///< The surface format for the backbuffer. One of the values from FfxApiSurfaceFormat.
++};
++
++#define FFX_API_CALLBACK_DESC_TYPE_FRAMEGENERATION_PRESENT FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x05)
++typedef struct ffxCallbackDescFrameGenerationPresent
++{
++    ffxDispatchDescHeader header;                 ///< Description header for present callback dispatch.
++    void*                 device;                 ///< The GPU device (ID3D12Device for DX12, VkDevice for Vulkan) passed during context creation.
++    void*                 commandList;            ///< A command list (ID3D12GraphicsCommandList for DX12, VkCommandBuffer for Vulkan) that will be executed before presentation.
++    struct FfxApiResource currentBackBuffer;      ///< Backbuffer image either rendered or generated.
++    struct FfxApiResource currentUI;              ///< UI image for composition if passed. Otherwise empty.
++    struct FfxApiResource outputSwapChainBuffer;  ///< Output image that will be presented.
++    bool                  isGeneratedFrame;       ///< true if this frame is generated, false if rendered.
++    uint64_t              frameID;                ///< Identifier used to select internal resources when async support is enabled. Must increment by exactly one (1) for each frame. Any non-exactly-one difference will reset the frame generation logic.
++} ffxCallbackDescFrameGenerationPresent;
++
++#define FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x03)
++typedef struct ffxDispatchDescFrameGeneration
++{
++    ffxDispatchDescHeader header;                      ///< Description header for frame generation dispatch.
++    void*                 commandList;                 ///< The command list (ID3D12GraphicsCommandList for DX12, VkCommandBuffer for Vulkan) to record frame generation commands.
++    struct FfxApiResource presentColor;                ///< The current presentation color buffer to be used as source for frame generation.
++    struct FfxApiResource outputs[4];                  ///< Output destination targets for generated frames (1 for each frame in numGeneratedFrames).
++    uint32_t              numGeneratedFrames;          ///< The number of frames to generate from the input color target.
++    bool                  reset;                       ///< A boolean value which when set to true, indicates the camera has moved discontinuously and frame generation should reset.
++    uint32_t              backbufferTransferFunction;  ///< The transfer function used to convert frame generation source color data to linear RGB. One of the values from FfxApiBackbufferTransferFunction.
++    float                 minMaxLuminance[2];          ///< Min and max luminance values (in nits), used when converting HDR colors to linear RGB.
++    struct FfxApiRect2D   generationRect;              ///< The area of the backbuffer that should be used for frame generation in case only a part of the screen is active (e.g. due to movie bars).
++    uint64_t              frameID;                     ///< Identifier used to select internal resources when async support is enabled. Must increment by exactly one (1) for each frame. Any non-exactly-one difference will reset the frame generation logic.
++} ffxDispatchDescFrameGeneration;
++
++typedef ffxReturnCode_t (*FfxApiPresentCallbackFunc)(ffxCallbackDescFrameGenerationPresent* params, void* pUserCtx);
++typedef ffxReturnCode_t (*FfxApiFrameGenerationDispatchFunc)(ffxDispatchDescFrameGeneration* params, void* pUserCtx);
++
++#define FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x02)
++struct ffxConfigureDescFrameGeneration
++{
++    ffxConfigureDescHeader            header;                              ///< Description header for frame generation configuration.
++    void*                             swapChain;                           ///< The swapchain to use with frame generation (IDXGISwapChain for DX12, VkSwapchainKHR for Vulkan).
++    FfxApiPresentCallbackFunc         presentCallback;                     ///< Callback function called when finalizing the frame image for presentation and UI composition.
++    void*                             presentCallbackUserContext;          ///< User context pointer to be passed to the present callback function.
++    FfxApiFrameGenerationDispatchFunc frameGenerationCallback;             ///< Callback function called to dispatch frame generation work and generate interpolated frames.
++    void*                             frameGenerationCallbackUserContext;  ///< User context pointer to be passed to the frame generation callback function.
++    bool                              frameGenerationEnabled;              ///< Sets the state of frame generation. Set to false to disable frame generation.
++    bool                              allowAsyncWorkloads;                 ///< Sets the state of async workloads. Set to true to enable generation work on async compute.
++    struct FfxApiResource             HUDLessColor;                        ///< The hudless back buffer image to use for UI extraction from backbuffer resource. May be empty.
++    uint32_t                          flags;                               ///< Zero or combination of flags from FfxApiDispatchFrameGenerationFlags.
++    bool                              onlyPresentGenerated;                ///< Set to true to only present generated frames.
++    struct FfxApiRect2D               generationRect;                      ///< The area of the backbuffer that should be used for generation in case only a part of the screen is used e.g. due to movie bars
++    uint64_t                          frameID;                             ///< Identifier used to select internal resources when async support is enabled. Must increment by exactly one (1) for each frame. Any non-exactly-one difference will reset the frame generation logic.
++};
++
++#pragma FFX_PRAGMA_WARNING_PUSH
++#pragma FFX_PRAGMA_WARNING_DISABLE_DEPRECATIONS
++
++#define FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x04)
++struct FFX_DEPRECATION("ffxDispatchDescFrameGenerationPrepare is deprecated, use ffxDispatchDescFrameGeneration" FFX_FRAMEGENERATION_PREPARE_REPLACEMENT_SUFFIX) ffxDispatchDescFrameGenerationPrepare
++{
++    ffxDispatchDescHeader      header;             ///< Description header for frame generation prepare dispatch.
++    uint64_t                   frameID;            ///< Frame identifier used to select internal resources when async support is enabled. Must increment by exactly one (1) for each frame. Any non-exactly-one difference will reset the frame generation logic.
++    uint32_t                   flags;              ///< Zero or combination of values from FfxApiDispatchFrameGenerationFlags.
++    void*                      commandList;        ///< The command list (ID3D12GraphicsCommandList for DX12, VkCommandBuffer for Vulkan) to record frame generation prepare commands.
++    struct FfxApiDimensions2D  renderSize;         ///< The dimensions used to render game content, dilatedDepth, dilatedMotionVectors are expected to be of ths size.
++    struct FfxApiFloatCoords2D jitterOffset;       ///< The subpixel jitter offset applied to the camera.
++    struct FfxApiFloatCoords2D motionVectorScale;  ///< The scale factor to convert motion vectors to pixel space. Internally: pixelSpaceMV = motionVector * motionVectorScale. Set to renderSize if motion vectors are in UV space [0,1], or to (1.0, 1.0) if motion vectors are already in pixel space. When using display-resolution motion vectors, set to displaySize.
++
++    float                 frameTimeDelta;           ///< Time elapsed in milliseconds since the last frame.
++    bool                  unused_reset;             ///< A (currently unused) boolean value which when set to true, indicates FrameGeneration will be called in reset mode
++    float                 cameraNear;               ///< The distance to the near plane of the camera.
++    float                 cameraFar;                ///< The distance to the far plane of the camera. This is used only used in case of non infinite depth.
++    float                 cameraFovAngleVertical;   ///< The camera angle field of view in the vertical direction (expressed in radians).
++    float                 viewSpaceToMetersFactor;  ///< The scale factor to convert view space units to meters
++    struct FfxApiResource depth;                    ///< The depth buffer data for the current frame.
++    struct FfxApiResource motionVectors;            ///< The motion vector data for the current frame.
++};
++
++#pragma FFX_PRAGMA_WARNING_POP
++
++#define FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION_KEYVALUE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x06)
++struct ffxConfigureDescFrameGenerationKeyValue
++{
++    ffxConfigureDescHeader header;  ///< Description header for frame generation key-value configuration.
++    uint64_t               key;     ///< Configuration key, member of the FfxApiConfigureFrameGenerationKey enumeration.
++    uint64_t               u64;     ///< Integer value or enum value to set.
++    void*                  ptr;     ///< Pointer value to set or pointer to value to set.
++};
++
++enum FfxApiConfigureFrameGenerationKey
++{
++    FFX_API_CONFIGURE_FRAMEGENERATION_KEY_DEBUG_VIEW_MODE       = 0,  ///< A key to set a debug view mode of display.
++    FFX_API_CONFIGURE_FRAMEGENERATION_KEY_DEBUG_VIEW_FLOW_SCALE = 1,  ///< A key to set a debug view scale for flow resources.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_FRAMEGENERATION_GPU_MEMORY_USAGE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x07)
++struct ffxQueryDescFrameGenerationGetGPUMemoryUsage
++{
++    ffxQueryDescHeader              header;                         ///< Description header for GPU memory usage query.
++    struct FfxApiEffectMemoryUsage* gpuMemoryUsageFrameGeneration;  ///< Output pointer to receive GPU memory usage information for frame generation.
++};
++
++#define FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION_REGISTERDISTORTIONRESOURCE FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x08)
++//Pass this optional linked struct after ffxConfigureDescFrameGeneration
++struct ffxConfigureDescFrameGenerationRegisterDistortionFieldResource
++{
++    ffxConfigureDescHeader header;           ///< Description header for distortion field resource configuration.
++    struct FfxApiResource  distortionField;  ///< A resource containing distortion offset data. Needs to be 2-component (ie. RG). Read by FG shaders via Sample. Pixel value encodes [UV coordinate of pixel after lens distortion effect - UV coordinate of pixel before lens distortion].
++};
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_HUDLESS FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x09)
++//Pass this optional linked struct at FG context creation to enable app to use different hudlessBackBufferformat (IE.RGBA8_UNORM) from backBufferFormat (IE. BGRA8_UNORM)
++struct ffxCreateContextDescFrameGenerationHudless
++{
++    ffxCreateContextDescHeader header;                   ///< Description header for hudless context creation.
++    uint32_t                   hudlessBackBufferFormat;  ///< The surface format for the hudless back buffer. One of the values from FfxApiSurfaceFormat.
++};
++
++#pragma FFX_PRAGMA_WARNING_PUSH
++#pragma FFX_PRAGMA_WARNING_DISABLE_DEPRECATIONS
++
++#define FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_CAMERAINFO FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x0a)
++// Link this struct after ffxDispatchDescFrameGenerationPrepare. This is a required input to FSR3.1.4 and FSR3.1.5.
++// These fields are now embedded in ffxDispatchDescFrameGenerationPrepareV2.
++struct FFX_DEPRECATION("ffxDispatchDescFrameGenerationPrepareCameraInfo is deprecated, use ffxDispatchDescFrameGeneration" FFX_FRAMEGENERATION_PREPARE_REPLACEMENT_SUFFIX " instead") ffxDispatchDescFrameGenerationPrepareCameraInfo
++{
++    ffxConfigureDescHeader header;             ///< Description header for camera info configuration.
++    float                  cameraPosition[3];  ///< The camera position in world space.
++    float                  cameraUp[3];        ///< The camera up normalized vector in world space.
++    float                  cameraRight[3];     ///< The camera right normalized vector in world space.
++    float                  cameraForward[3];   ///< The camera forward normalized vector in world space.
++};
++
++#pragma FFX_PRAGMA_WARNING_POP
++
++#define FFX_API_QUERY_DESC_TYPE_FRAMEGENERATION_GPU_MEMORY_USAGE_V2 FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x0b)
++struct ffxQueryDescFrameGenerationGetGPUMemoryUsageV2
++{
++    ffxQueryDescHeader              header;                         ///< Description header for GPU memory usage query.
++    void*                           device;                         ///< The GPU device. For DX12: pointer to ID3D12Device. For VK: pointer to VkDeviceContext. App needs to fill out before Query() call.
++    struct FfxApiDimensions2D       maxRenderSize;                  ///< The maximum rendering resolution. App needs to fill out before Query() call.
++    struct FfxApiDimensions2D       displaySize;                    ///< The resolution at which both rendered and generated frames will be displayed. App needs to fill out before Query() call.
++    uint32_t                        createFlags;                    ///< Context creation flags. A combination of zero or more values from FfxApiCreateContextFramegenerationFlags. App needs to fill out before Query() call.
++    uint32_t                        dispatchFlags;                  ///< Dispatch flags. A combination of zero or more values from FfxApiDispatchFrameGenerationFlags. App needs to fill out before Query() call.
++    uint32_t                        backBufferFormat;               ///< The surface format for the backbuffer. One of the values from FfxApiSurfaceFormat. App needs to fill out before Query() call.
++    uint32_t                        hudlessBackBufferFormat;        ///< The surface format for HUDLessColor resource if used. One of the values from FfxApiSurfaceFormat. Otherwise set value to FFX_API_SURFACE_FORMAT_UNKNOWN(0). App needs to fill out before Query() call.
++    struct FfxApiEffectMemoryUsage* gpuMemoryUsageFrameGeneration;  ///< Output pointer to receive GPU memory usage information for frame generation. Populated by Query() call.
++};
++
++
++#define FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2 FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x0c)
++
++struct ffxDispatchDescFrameGenerationPrepareV2
++
++{
++    ffxDispatchDescHeader      header;             ///< Description header for frame generation prepare dispatch.
++    uint64_t                   frameID;            ///< Frame identifier used to select internal resources when async support is enabled. Must increment by exactly one (1) for each frame. Any non-exactly-one difference will reset the frame generation logic.
++    uint32_t                   flags;              ///< Zero or combination of values from FfxApiDispatchFrameGenerationFlags.
++    void*                      commandList;        ///< The command list (ID3D12GraphicsCommandList for DX12, VkCommandBuffer for Vulkan) to record frame generation prepare commands.
++    struct FfxApiDimensions2D  renderSize;         ///< The dimensions used to render game content. dilatedDepth and dilatedMotionVectors are expected to be of this size.
++    struct FfxApiFloatCoords2D jitterOffset;       ///< The subpixel jitter offset applied to the camera.
++    struct FfxApiFloatCoords2D motionVectorScale;  ///< The scale factor to convert motion vectors to pixel space. Internally: pixelSpaceMV = motionVector * motionVectorScale. Set to renderSize if motion vectors are in UV space [0,1], or to (1.0, 1.0) if motion vectors are already in pixel space. When using display-resolution motion vectors, set to displaySize.
++
++    float                 frameTimeDelta;           ///< Time elapsed in milliseconds since the last frame.
++    bool                  reset;                    ///< A boolean value which when set to true, indicates the camera has moved discontinuously and frame generation should reset its internal state.
++    float                 cameraNear;               ///< The distance to the near plane of the camera.
++    float                 cameraFar;                ///< The distance to the far plane of the camera. This is used only in case of non-infinite depth.
++    float                 cameraFovAngleVertical;   ///< The camera angle field of view in the vertical direction (expressed in radians).
++    float                 viewSpaceToMetersFactor;  ///< The scale factor to convert view space units to meters.
++    struct FfxApiResource depth;                    ///< The depth buffer data for the current frame.
++    struct FfxApiResource motionVectors;            ///< The motion vector data for the current frame.
++
++    float cameraPosition[3];  ///< The camera position in world space.
++    float cameraUp[3];        ///< The camera up normalized vector in world space.
++    float cameraRight[3];     ///< The camera right normalized vector in world space.
++    float cameraForward[3];   ///< The camera forward normalized vector in world space.
++};
++
++#define FFX_API_CALLBACK_DESC_TYPE_FRAMEGENERATION_PRESENT_PREMUL_ALPHA FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x0d)
++// This is a structure that is attached to header.pNext of ffxCallbackDescFrameGenerationPresent
++// Provides whether to use premultiplied alpha blending or not for the UI
++typedef struct ffxCallbackDescFrameGenerationPresentPremulAlpha
++{
++    ffxApiHeader header;          ///< Header for versioning & ABI stability.
++    bool         usePremulAlpha;  ///< Toggles whether UI gets premultiplied alpha blending or not.
++} ffxCallbackDescFrameGenerationPresentPremulAlpha;
++
++/// Callback function for waiting on a named fence to reach a specific value.
++/// @param fenceName The name of the fence to wait on.
++/// @param fenceValueToWaitFor The fence value to wait for.
++/// @return 0 on success, non-zero error code on failure.
++typedef int32_t (*FfxWaitCallbackFunc)(wchar_t* fenceName, uint64_t fenceValueToWaitFor);
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x0e)
++// Pass this linked struct at FG context creation to enable new API features - omitting this will prevent new APIs from functioning.
++struct ffxCreateContextDescFrameGenerationVersion
++{
++    ffxCreateContextDescHeader header;   ///< Description header for frame generation version context creation.
++    uint32_t                   version;  ///< The version of the API the application was built against. This must be set to FFX_FRAMEGENERATION_VERSION.
++};
++
++#define FFX_API_FRAME_GENERATION_CONFIG FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATION, 0x0f)
++/// A structure representing the configuration options to pass to FrameInterpolationSwapChain
++///
++/// @ingroup FfxInterface
++typedef struct FfxFrameGenerationConfig
++{
++    ffxApiHeader                      header;                          ///< Header for versioning & ABI stability.
++    void*                             swapChain;                       ///< The <c><i>FfxSwapchain</i></c> to use with frame interpolation.
++    FfxApiPresentCallbackFunc         presentCallback;                 ///< A UI composition callback to call when finalizing the frame image.
++    void*                             presentCallbackContext;          ///< A pointer to be passed to the UI composition callback.
++    FfxApiFrameGenerationDispatchFunc frameGenerationCallback;         ///< The frame generation callback to use to generate the interpolated frame.
++    void*                             frameGenerationCallbackContext;  ///< A pointer to be passed to the frame generation callback.
++    bool                              frameGenerationEnabled;          ///< Sets the state of frame generation. Set to false to disable frame generation.
++    bool                              allowAsyncWorkloads;             ///< Sets the state of async workloads. Set to true to enable interpolation work on async compute.
++    bool                              allowAsyncPresent;               ///< Sets the state of async presentation (console only). Set to true to enable present from async command queue.
++    struct FfxApiResource             HUDLessColor;                    ///< The hudless back buffer image to use for UI extraction from backbuffer resource.
++    uint32_t                          flags;                           ///< Zero or combination of flags from FfxApiDispatchFrameGenerationFlags.
++    bool                              onlyPresentInterpolated;         ///< Set to true to only present interpolated frame.
++    struct FfxApiRect2D               interpolationRect;               ///< Set the area in the backbuffer that will be interpolated.
++    uint64_t                          frameID;                         ///< A frame identifier used to synchronize resource usage in workloads.
++    bool                              drawDebugPacingLines;            ///< Sets the state of pacing debug lines. Set to true to display debug lines.
++} FfxFrameGenerationConfig;
++
++#if defined(__cplusplus)
++}  // extern "C"
++#endif
+diff --git a/src/fsr4/include/ffx_framegeneration_api_types.h b/src/fsr4/include/ffx_framegeneration_api_types.h
+new file mode 100644
+index 00000000..a6908a51
+--- /dev/null
++++ b/src/fsr4/include/ffx_framegeneration_api_types.h
+@@ -0,0 +1,72 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2026 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++#include "ffx_api_types.h"
++
++/*
++Tuning varianceFactor and safetyMarginInMs Tips:
++Calculation of frame pacing algorithm's next target timestamp: 
++target frametime delta = average Frametime - (variance * varianceFactor) - safetyMarginInMs
++
++Default Tuning uses safetyMarginInMs==0.1ms and varianceFactor==0.1.
++Say Tuning set A uses safetyMarginInMs==0.75ms, and varianceFactor==0.1.
++Say Tuning Set B uses safetyMarginInMs==0.01ms and varianceFactor==0.3.
++
++Example #1 - Actual Game Cutscene. Game's framerate after FG ON during camera pan from normal (19ms avg frametime) to complex (37ms avg frametime over 1 sec) and back to normal scene complexity (19ms avg frametime).
++After the panning is done, 
++- Default Tuning now gets stuck at targeting ~33ms after panning to a complex scene. GPU utilization significantly lower in this case.
++- Tuning Set B and Tuning Set A are able to recover close to ~19ms because of these 2 tuning result in lower "target frametime delta" than Default Tuning. 
++
++However, larger varianceFactor or safetyMarginInMs results in higher variance. As seen in Example #2 below.
++
++Example #2 - FFX_API_FSR sample. Set app fps cap to 33.33ms. Use OCAT to capture 10s at default camera position.
++FSR 3.1.0 FG msbetweenpresents ping-pong between 16.552 (5th-percentile) and 16.832 (95th-percentile). Variance is 0.01116.
++Tuning set A FG msbetweenpresents ping-pong between 15.901 (5th-percentile) and 17.500 (95th-percentile). Variance is 0.057674.
++Tuning Set B FG msbetweenpresents ping-pong between 16.589 (5th-percentile) and 16.971 (95th-percentile). Variance is 0.014452.
++
++| FG output Frames timestamp | n | n+1    | n+2   | n+3    | frame delta n+1 to n+2 | frame delta n+2 to n+3 |
++| -------------------------- | - | ------ | ----- | ------ | ---------------------- | ---------------------- |
++| App real frame presents    | 0 |        | 33.33 |        |                        |                        |
++| Default Tuning             | 0 | 16.552 | 33.33 | 49.882 | 16.778                 | 16.552                 |
++| Tuning Set A               | 0 | 15.901 | 33.33 | 49.231 | 17.429                 | 15.901                 |
++| Tuning Set B               | 0 | 16.589 | 33.33 | 49.919 | 16.741                 | 16.589                 |
++
++Analysis of table data in words:
++Ignoring the cost of FI,
++"Tuning set A"'s "target frametime delta" of 15.901 results in larger frame to frame delta (or in other words larger variance) vs Default tuning.
++"Tuning set B"'s "target frametime delta" of 16.589 results in a bit larger frame to frame delta (or in other words a bit larger variance) vs Default tuning.
++
++TLDR:
++If your game when using FG, frame rate is running at an unexpectedly low frame rate, after gradual transition from rendering complex to easy scene complexity, you could try setting "Tuning Set B" to recover lost FPS at cost of a bit higher variance.
++
++*/
++
++//struct definition matches FfxSwapchainFramePacingTuning
++typedef struct FfxApiSwapchainFramePacingTuning
++{
++    float    safetyMarginInMs;                 ///< Frame pacing sleep time's safety margin in milliseconds. Default is 0.1ms.
++    float    varianceFactor;                   ///< Variance factor for consecutive frame times. Valid range [0.0,1.0], default is 0.1.
++    bool     allowHybridSpin;                  ///< Allows pacing spinlock to sleep. Less precise, but power saving. Default is false.
++    uint32_t hybridSpinTime;                   ///< How long to spin if allowHybridSpin is true, in timer resolution units. Not recommended to go below 2, as it will result in frequent overshoots. Default is 2.
++    bool     allowWaitForSingleObjectOnFence;  ///< Allows WaitForSingleObject instead of spinning for fence value. Default is false.
++} FfxApiSwapchainFramePacingTuning;
 diff --git a/src/fsr4/include/ffx_upscale.h b/src/fsr4/include/ffx_upscale.h
 new file mode 100644
 index 00000000..c671a5a4
@@ -761,6 +1150,162 @@ index 00000000..c671a5a4
 +#ifdef __cplusplus
 +}
 +#endif
+diff --git a/src/fsr4/include/vk/ffx_api_framegeneration_vk.h b/src/fsr4/include/vk/ffx_api_framegeneration_vk.h
+new file mode 100644
+index 00000000..d9e40608
+--- /dev/null
++++ b/src/fsr4/include/vk/ffx_api_framegeneration_vk.h
+@@ -0,0 +1,150 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2026 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++#include "ffx_api_vk.h"
++
++#define FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION_MAJOR 4
++#define FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION_MINOR 0
++#define FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION_PATCH 0
++
++#define FFX_FRAMEGENERATION_SWAPCHAIN_VK_MAKE_VERSION(major, minor, patch) (((major) << 22) | ((minor) << 12) | (patch))
++#define FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION FFX_FRAMEGENERATION_SWAPCHAIN_VK_MAKE_VERSION(FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION_MAJOR, FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION_MINOR, FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION_PATCH)
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x01)
++struct ffxCreateContextDescFrameGenerationSwapChainVK
++{
++    ffxCreateContextDescHeader header;
++    VkPhysicalDevice           physicalDevice;     ///< the physicak device used by the program.
++    VkDevice                   device;             ///< the logical device used by the program.
++    VkSwapchainKHR*            swapchain;          ///< the current swapchain to be replaced. Will be destroyed when the context is created. This can be VK_NULL_HANDLE. Will contain the new swapchain on return.
++    VkAllocationCallbacks*     allocator;          ///< optional allocation callbacks.
++    VkSwapchainCreateInfoKHR   createInfo;         ///< the description of the desired swapchain. If its VkSwapchainCreateInfoKHR::oldSwapchain field isn't VK_NULL_HANDLE, it should be the same as the ffxCreateContextDescFrameGenerationSwapChainVK::swapchain field above.
++    VkQueueInfoFFXAPI          gameQueue;          ///< the main graphics queue, where Present is called.
++    VkQueueInfoFFXAPI          asyncComputeQueue;  ///< A queue with Compute capability.
++    VkQueueInfoFFXAPI          presentQueue;       ///< A queue with Transfer and Present capabilities.
++    VkQueueInfoFFXAPI          imageAcquireQueue;  ///< A queue with no capability required.
++};
++
++#define FFX_API_CONFIGURE_DESC_TYPE_FGSWAPCHAIN_REGISTERUIRESOURCE_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x02)
++struct ffxConfigureDescFrameGenerationSwapChainRegisterUiResourceVK
++{
++    ffxConfigureDescHeader header;
++    struct FfxApiResource  uiResource;  ///< Resource containing user interface for composition. May be empty.
++    uint32_t               flags;       ///< Zero or combination of values from FfxApiUiCompositionFlags.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_INTERPOLATIONCOMMANDLIST_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x03)
++struct ffxQueryDescFrameGenerationSwapChainInterpolationCommandListVK
++{
++    ffxQueryDescHeader header;
++    void** pOutCommandList;  ///< Output command nuffer (VkCommandBuffer) to be used for frame generation dispatch.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_INTERPOLATIONTEXTURE_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x04)
++struct ffxQueryDescFrameGenerationSwapChainInterpolationTextureVK
++{
++    ffxQueryDescHeader     header;
++    struct FfxApiResource* pOutTexture;  ///< Output resource in which the frame interpolation result should be placed.
++};
++
++#define FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x07)
++struct ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK
++{
++    ffxDispatchDescHeader header;
++};
++
++#define FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_KEYVALUE_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x08)
++struct ffxConfigureDescFrameGenerationSwapChainKeyValueVK
++{
++    ffxConfigureDescHeader header;
++    uint64_t               key;        ///< Configuration key, member of the FfxApiConfigureFrameGenerationSwapChainKeyVK enumeration.
++    uint64_t               u64;        ///< Integer value or enum value to set.
++    void* ptr;        ///< Pointer to set or pointer to value to set.
++};
++
++//enum value matches enum FfxFrameInterpolationSwapchainConfigureKey
++enum FfxApiConfigureFrameGenerationSwapChainKeyVK
++{
++    FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_WAITCALLBACK = 0,                     ///< Sets FfxWaitCallbackFunc
++    FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_FRAMEPACINGTUNING = 2,                ///< Sets FfxApiSwapchainFramePacingTuning casted from ptr
++};
++
++#define FFX_API_QUERY_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_GPU_MEMORY_USAGE_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x09)
++struct ffxQueryFrameGenerationSwapChainGetGPUMemoryUsageVK
++{
++    ffxQueryDescHeader header;
++    struct FfxApiEffectMemoryUsage* gpuMemoryUsageFrameGenerationSwapchain;  ///< Output pointer. Requires an existing swapchain context.
++};
++
++/// Pre-context GPU memory estimate for a Vulkan frame-generation swapchain.
++/// Does not require an ffxContext. Pass the device and the swapchain configuration the application intends to create.
++#define FFX_API_QUERY_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_GPU_MEMORY_USAGE_VK_V2 FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x0b)
++struct ffxQueryFrameGenerationSwapChainGetGPUMemoryUsageVKV2
++{
++    ffxQueryDescHeader              header;                                  ///< Description header for the pre-context GPU memory query.
++    VkDevice                        device;                                  ///< Logical device used to size images. Required.
++    VkPhysicalDevice                physicalDevice;                          ///< Physical device that owns the logical device. Required. Used to select an external provider.
++    struct FfxApiDimensions2D       displaySize;                             ///< Resolution of rendered and generated frames. Required.
++    uint32_t                        backBufferFormat;                        ///< Backbuffer format. One of the values from FfxApiSurfaceFormat. Required.
++    uint32_t                        backBufferCount;                         ///< Number of application backbuffers, from 1 through 6. Required.
++    struct FfxApiDimensions2D       uiResourceSize;                          ///< UI resource resolution. Required when flags requests internal UI double buffering, otherwise ignored.
++    uint32_t                        uiResourceFormat;                        ///< UI resource format. One of the values from FfxApiSurfaceFormat. Required when flags requests internal UI double buffering.
++    uint32_t                        flags;                                   ///< UI composition flags. Zero or a combination of values from FfxApiUiCompositionFlags.
++    uint32_t                        composeOnGameQueue;                      ///< Nonzero when UI composition runs on the game queue. Adds the composition output image.
++    uint32_t                        reserved;                                ///< Must be zero.
++    struct FfxApiEffectMemoryUsage* gpuMemoryUsageFrameGenerationSwapchain;  ///< Output. totalUsageInBytes is the sum of the swapchain images. aliasableUsageInBytes is zero because those images stay live together.
++};
++
++/// Function to get the number of presents. This is useful when using frame interpolation
++typedef uint64_t(*PFN_getLastPresentCountFFXAPI)(VkSwapchainKHR);
++
++/// FFX API specific functions to create and destroy a swapchain
++typedef VkResult(*PFN_vkCreateSwapchainFFXAPI)(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain, void* pContext);
++typedef void(*PFN_vkDestroySwapchainFFXAPI)(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator, void* pContext);
++
++#define FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x05)
++struct ffxQueryDescSwapchainReplacementFunctionsVK
++{
++    ffxQueryDescHeader header;
++    PFN_vkCreateSwapchainFFXAPI   pOutCreateSwapchainFFXAPI;      ///< Replacement of vkCreateSwapchainKHR. Recreates the swapchain in place (for example on resize or vsync toggle); pContext and the returned handle are the existing frame generation swapchain.
++    PFN_vkDestroySwapchainFFXAPI  pOutDestroySwapchainFFXAPI;     ///< Replacement of vkDestroySwapchainKHR. Must be called after the swapchain context is destroyed; pContext is the frame generation swapchain. The handle is invalid afterwards.
++    PFN_vkGetSwapchainImagesKHR   pOutGetSwapchainImagesKHR;      ///< Replacement of vkGetSwapchainImagesKHR.
++    PFN_vkAcquireNextImageKHR     pOutAcquireNextImageKHR;        ///< Replacement of vkAcquireNextImageKHR.
++    PFN_vkQueuePresentKHR         pOutQueuePresentKHR;            ///< Replacement of vkQueuePresentKHR.
++    PFN_vkSetHdrMetadataEXT       pOutSetHdrMetadataEXT;          ///< Replacement of vkSetHdrMetadataEXT.
++    PFN_getLastPresentCountFFXAPI pOutGetLastPresentCountFFXAPI;  ///< Additional function to get the number of times present has been called since the swapchain creation.
++};
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_MODE_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x10)
++struct ffxCreateContextDescFrameGenerationSwapChainModeVK
++{
++    ffxCreateContextDescHeader header;
++    bool                       composeOnPresentQueue;  ///< flags indicating that composition will happen on the present queue
++};
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_VK FFX_API_MAKE_EFFECT_SUB_ID(FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_VK, 0x0a)
++struct ffxCreateContextDescFrameGenerationSwapChainVersionVK
++{
++    ffxCreateContextDescHeader header;   ///< Description header for frame generation swapchain version context creation.
++    uint32_t                   version;  ///< The API version the application was built against. This must be set to FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION.
++};
 diff --git a/src/fsr4/include/vk/ffx_api_vk.h b/src/fsr4/include/vk/ffx_api_vk.h
 new file mode 100644
 index 00000000..1bbe1d9e
@@ -1825,40 +2370,38 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..09d960cf
+index 00000000..618fec9a
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,240 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
-+#include "common/logging/log.h"
++#include <cstdio>
++
++// LOGF does not reach stdout in this runtime, so the module reports on stderr
++// where the boot log actually shows it.
++#define FSRFG_LOG(...) do { std::fprintf(stderr, __VA_ARGS__); std::fflush(stderr); } while (0)
 +
 +#include <vulkan/vulkan.h>
 +
 +#include <cstdlib>
 +#include <cstring>
 +#include <dlfcn.h>
++#include <string>
++#include <unistd.h>
 +
-+// The FFX frame-generation API. Only the pieces the presenter needs are declared
-+// here, so the runtime does not take a dependency on the whole SDK header set.
++// The FFX frame-generation API, from the SDK headers so the descriptor layouts
++// are the real ones rather than a mirror that drifts.
++#if !defined(_WIN32)
++// ffx_api.h spells the export attribute as __declspec(dllexport); the entry
++// points are already visible here.
++#define __declspec(x)
++#endif
++
 +extern "C" {
-+struct ffxContext;
-+
-+// ffxStructType_t (uint64_t) followed by the pNext chain head; see ffx_api.h.
-+struct ffxApiHeader {
-+	uint64_t             type;
-+	struct ffxApiHeader* pNext;
-+};
-+
-+struct VkQueueInfoFFXAPI_ {
-+    VkQueue  queue;
-+    uint32_t familyIndex;
-+    uint32_t flags;
-+};
-+
-+struct FfxApiDimensions2D_ { uint32_t width, height; };
-+
-+enum { FFX_API_RETURN_OK_ = 0 };
++#include "ffx_api.h"
++#include "ffx_framegeneration.h"
++#include "vk/ffx_api_framegeneration_vk.h"
 +}
 +
 +namespace Libs::Graphics {
@@ -1885,7 +2428,7 @@ index 00000000..09d960cf
 +	void* query  = nullptr;
 +	void* destroy = nullptr;
 +
-+	void*         context   = nullptr;
++	ffxContext    context   = nullptr;
 +	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 +	SwapchainFns  fns {};
 +};
@@ -1921,8 +2464,23 @@ index 00000000..09d960cf
 +	                       ? path
 +	                       : "fsr3/libamd_fidelityfx_framegeneration_vk.so";
 +	state.module = dlopen(file, RTLD_NOW | RTLD_LOCAL);
++	if (state.module == nullptr && path == nullptr) {
++		// The provider lives next to the runtime; the process CWD is not
++		// guaranteed to be that directory.
++		char exe[4096] = {};
++		const ssize_t length = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
++		if (length > 0) {
++			const std::string absolute(exe, static_cast<size_t>(length));
++			const auto slash = absolute.find_last_of('/');
++			if (slash != std::string::npos) {
++				const std::string candidate =
++				    absolute.substr(0, slash + 1) + "fsr3/libamd_fidelityfx_framegeneration_vk.so";
++				state.module = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
++			}
++		}
++	}
 +	if (state.module == nullptr) {
-+		LOGF("FSR-FG: cannot load %s: %s; using the stock presenter\n", file, dlerror());
++		FSRFG_LOG("FSR-FG: cannot load %s: %s; using the stock presenter\n", file, dlerror());
 +		return false;
 +	}
 +
@@ -1930,7 +2488,7 @@ index 00000000..09d960cf
 +	state.query   = dlsym(state.module, "ffxQuery");
 +	state.destroy = dlsym(state.module, "ffxDestroyContext");
 +	if (state.create == nullptr || state.query == nullptr || state.destroy == nullptr) {
-+		LOGF("FSR-FG: %s is missing the FFX entry points; using the stock presenter\n", file);
++		FSRFG_LOG("FSR-FG: %s is missing the FFX entry points; using the stock presenter\n", file);
 +		return false;
 +	}
 +
@@ -1953,73 +2511,53 @@ index 00000000..09d960cf
 +
 +	auto& state = Get();
 +
-+	// The FFX API speaks its own C ABI. The structures below mirror
-+	// ffx_api_framegeneration_vk.h field for field for the two descriptors used.
-+	struct CreateDesc {
-+		ffxApiHeader            header;
-+		VkPhysicalDevice        physical_device;
-+		VkDevice                device;
-+		VkSwapchainKHR*         swapchain;
-+		const VkAllocationCallbacks* allocator;
-+		VkSwapchainCreateInfoKHR    create_info;
-+		VkQueueInfoFFXAPI_      game_queue;
-+		VkQueueInfoFFXAPI_      async_queue;
-+		VkQueueInfoFFXAPI_      present_queue;
-+		VkQueueInfoFFXAPI_      acquire_queue;
-+	};
-+
 +	VkSwapchainKHR wrapped = VK_NULL_HANDLE;
-+	CreateDesc desc {};
-+	desc.header.type   = 0x00040001u;   // FGSWAPCHAIN_VK create desc
-+	desc.physical_device = physical;
-+	desc.device          = device;
-+	desc.swapchain       = &wrapped;
-+	desc.allocator       = nullptr;
-+	desc.create_info     = create_info;
-+	desc.game_queue      = {game_queue, game_queue_family, 0};
-+	desc.present_queue   = {present_queue, present_queue_family, 0};
-+	desc.acquire_queue   = {game_queue, game_queue_family, 0};
++	ffxCreateContextDescFrameGenerationSwapChainVK desc {};
++	desc.header.type      = FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK;
++	desc.physicalDevice   = physical;
++	desc.device           = device;
++	desc.swapchain        = &wrapped;
++	desc.allocator        = nullptr;
++	desc.createInfo       = create_info;
++	desc.gameQueue        = {game_queue, game_queue_family};
++	desc.asyncComputeQueue = {game_queue, game_queue_family};
++	desc.presentQueue     = {present_queue, present_queue_family};
++	desc.imageAcquireQueue = {game_queue, game_queue_family};
 +
-+	using CreateFn = int (*)(void**, ffxApiHeader*, const void*);
++	using CreateFn = ffxReturnCode_t (*)(ffxContext*, ffxCreateContextDescHeader*,
++	                                      const ffxAllocationCallbacks*);
 +	const auto create = reinterpret_cast<CreateFn>(state.create);
-+	if (create(&state.context, &desc.header, nullptr) != FFX_API_RETURN_OK_ ||
++	if (create(&state.context, &desc.header, nullptr) != FFX_API_RETURN_OK ||
 +	    state.context == nullptr) {
-+		LOGF("FSR-FG: ffxCreateContext failed; using the stock presenter\n");
++		FSRFG_LOG("FSR-FG: ffxCreateContext failed; using the stock presenter\n");
 +		state.context = nullptr;
 +		return false;
 +	}
 +	if (wrapped == VK_NULL_HANDLE) {
-+		LOGF("FSR-FG: the provider returned no swapchain; using the stock presenter\n");
++		FSRFG_LOG("FSR-FG: the provider returned no swapchain; using the stock presenter\n");
 +		return false;
 +	}
 +
-+	struct FunctionsDesc {
-+		ffxApiHeader header;
-+		PFN_vkCreateSwapchainKHR       create;
-+		PFN_vkDestroySwapchainKHR      destroy;
-+		PFN_vkGetSwapchainImagesKHR    get_images;
-+		PFN_vkAcquireNextImageKHR      acquire;
-+		PFN_vkQueuePresentKHR          present;
-+		PFN_vkSetHdrMetadataEXT        set_hdr;
-+		uint64_t (*presented_count)(VkSwapchainKHR);
-+	};
++	ffxQueryDescSwapchainReplacementFunctionsVK functions {};
++	functions.header.type = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK;
 +
-+	FunctionsDesc functions {};
-+	functions.header.type = 0x00040005u;   // FGSWAPCHAIN_VK functions query
-+
-+	using QueryFn = int (*)(void*, ffxApiHeader*);
++	using QueryFn = ffxReturnCode_t (*)(ffxContext, ffxQueryDescHeader*);
 +	const auto query = reinterpret_cast<QueryFn>(state.query);
-+	if (query(state.context, &functions.header) != FFX_API_RETURN_OK_) {
-+		LOGF("FSR-FG: cannot query the swapchain replacement functions\n");
++	if (query(state.context, reinterpret_cast<ffxQueryDescHeader*>(&functions)) != FFX_API_RETURN_OK) {
++		FSRFG_LOG("FSR-FG: cannot query the swapchain replacement functions\n");
 +		return false;
 +	}
 +
-+	state.fns = {functions.create, functions.destroy, functions.get_images,
-+	             functions.acquire, functions.present, functions.presented_count};
++	state.fns.create      = reinterpret_cast<PFN_vkCreateSwapchainKHR>(functions.pOutCreateSwapchainFFXAPI);
++	state.fns.destroy     = reinterpret_cast<PFN_vkDestroySwapchainKHR>(functions.pOutDestroySwapchainFFXAPI);
++	state.fns.get_images  = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(functions.pOutGetSwapchainImagesKHR);
++	state.fns.acquire     = reinterpret_cast<PFN_vkAcquireNextImageKHR>(functions.pOutAcquireNextImageKHR);
++	state.fns.present     = reinterpret_cast<PFN_vkQueuePresentKHR>(functions.pOutQueuePresentKHR);
++	state.fns.presented_count = reinterpret_cast<uint64_t (*)(VkSwapchainKHR)>(functions.pOutGetLastPresentCountFFXAPI);
 +	out_swapchain    = wrapped;
 +	state.swapchain  = wrapped;
 +	state.active     = true;
-+	LOGF("FSR-FG: swapchain wrapped; frame generation routing active\n");
++	FSRFG_LOG("FSR-FG: swapchain wrapped; frame generation routing active\n");
 +	return true;
 +}
 +
@@ -2065,7 +2603,7 @@ index 00000000..09d960cf
 +void Shutdown() {
 +	auto& state = Get();
 +	if (state.context != nullptr) {
-+		using DestroyFn = int (*)(void**, const void*);
++		using DestroyFn = ffxReturnCode_t (*)(ffxContext*, const ffxAllocationCallbacks*);
 +		if (state.destroy != nullptr) {
 +			reinterpret_cast<DestroyFn>(state.destroy)(&state.context, nullptr);
 +		}
@@ -2191,25 +2729,27 @@ index 25b4d339..74b407b9 100644
  			m_run_active       = false;
  			m_run_targets_kept = false;
 diff --git a/src/graphics/presentation/window/swapchain.cpp b/src/graphics/presentation/window/swapchain.cpp
-index caa9055e..3f03d903 100644
+index caa9055e..503caaa7 100644
 --- a/src/graphics/presentation/window/swapchain.cpp
 +++ b/src/graphics/presentation/window/swapchain.cpp
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,6 @@
  #include "common/assert.h"
++#include <cstdio>
 +#include "graphics/host_gpu/renderer/fsrFg.h"
  #include "common/common.h"
  #include "common/debugCounters.h"
  #include "common/emulatorConfig.h"
-@@ -425,6 +426,8 @@ vk::SurfaceFormatKHR Swapchain::SelectFormat() {
+@@ -425,6 +427,9 @@ vk::SurfaceFormatKHR Swapchain::SelectFormat() {
  /// Sets m_surface_extent_zero when the early return is due to a zero surface/drawable extent
  /// and WindowContext::minimized is false, so NeedsResize() can poll instead of spinning.
  void Swapchain::Create() {
-+	LOGF("Swapchain::Create(): enter fg_requested=%d fg_active=%d\n", int(FsrFg::Requested()),
-+	     int(FsrFg::Active()));
++	std::fprintf(stderr, "TRACE Swapchain::Create enter fg=%d active=%d\n",
++	             int(FsrFg::Requested()), int(FsrFg::Active()));
++	std::fflush(stderr);
  	auto& graphics = m_window.graphic_ctx;
  	EXIT_IF(graphics.device == nullptr);
  	EXIT_IF(m_window.surface == nullptr);
-@@ -445,6 +448,8 @@ void Swapchain::Create() {
+@@ -445,6 +450,8 @@ void Swapchain::Create() {
  		// Window is genuinely minimized; m_surface_extent_zero is not the cause.
  		m_minimized           = true;
  		m_surface_extent_zero = false;
@@ -2218,7 +2758,7 @@ index caa9055e..3f03d903 100644
  		return;
  	}
  
-@@ -459,6 +464,8 @@ void Swapchain::Create() {
+@@ -459,6 +466,8 @@ void Swapchain::Create() {
  		     "waiting for surface to become ready\n");
  		m_minimized           = true;
  		m_surface_extent_zero = true;
@@ -2227,7 +2767,7 @@ index caa9055e..3f03d903 100644
  		return;
  	}
  
-@@ -476,6 +483,8 @@ void Swapchain::Create() {
+@@ -476,6 +485,8 @@ void Swapchain::Create() {
  		     "waiting for surface to become ready\n");
  		m_minimized           = true;
  		m_surface_extent_zero = true;
@@ -2236,7 +2776,7 @@ index caa9055e..3f03d903 100644
  		return;
  	}
  
-@@ -526,14 +535,37 @@ void Swapchain::Create() {
+@@ -526,14 +537,37 @@ void Swapchain::Create() {
  	}
  	create_info.clipped = VK_TRUE;
  	create_info.pNext   = LowLatency::SwapchainCreateNext(create_info.pNext);
@@ -2276,7 +2816,7 @@ index caa9055e..3f03d903 100644
  		    return graphics.device.getSwapchainImagesKHR(m_handle, count, images);
  	    });
  	EXIT_NOT_IMPLEMENTED(m_images.empty());
-@@ -712,9 +744,16 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
+@@ -712,9 +746,16 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
  		m_frame_ticks[m_frame_index] = 0;
  	}
  	m_image_index     = static_cast<uint32_t>(-1);
@@ -2296,7 +2836,7 @@ index caa9055e..3f03d903 100644
  	switch (result) {
  		case vk::Result::eSuccess: break;
  		case vk::Result::eSuboptimalKHR:
-@@ -1214,7 +1253,11 @@ Swapchain::Status Swapchain::Present() {
+@@ -1214,7 +1255,11 @@ Swapchain::Status Swapchain::Present() {
  		// texture copies: the present never waits for them, nor for a signal not yet submitted.
  		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
  		m_window.graphic_ctx.submission_queue.DrainReadyForPresentLocked();
