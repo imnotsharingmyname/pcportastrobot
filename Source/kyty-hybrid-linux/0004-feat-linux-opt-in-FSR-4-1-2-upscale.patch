@@ -1,4 +1,4 @@
-From 0d248a0df618f8a0fb5a43ee92313c152bbda402 Mon Sep 17 00:00:00 2001
+From f99e9a0a63a80b51e93665a8dfd6d9792eaf5b8a Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -18,8 +18,9 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  src/graphics/host_gpu/renderer/fsrFg.h        |  53 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
+ .../presentation/window/swapchain.cpp         |  47 +-
  .../presentation/window/vulkanWindow.cpp      |  39 ++
- 15 files changed, 2004 insertions(+), 4 deletions(-)
+ 16 files changed, 2045 insertions(+), 10 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_upscale.h
@@ -2165,6 +2166,89 @@ index 25b4d339..74b407b9 100644
  			m_run.valid        = false;
  			m_run_active       = false;
  			m_run_targets_kept = false;
+diff --git a/src/graphics/presentation/window/swapchain.cpp b/src/graphics/presentation/window/swapchain.cpp
+index caa9055e..09531115 100644
+--- a/src/graphics/presentation/window/swapchain.cpp
++++ b/src/graphics/presentation/window/swapchain.cpp
+@@ -1,4 +1,5 @@
+ #include "common/assert.h"
++#include "graphics/host_gpu/renderer/fsrFg.h"
+ #include "common/common.h"
+ #include "common/debugCounters.h"
+ #include "common/emulatorConfig.h"
+@@ -526,14 +527,37 @@ void Swapchain::Create() {
+ 	}
+ 	create_info.clipped = VK_TRUE;
+ 	create_info.pNext   = LowLatency::SwapchainCreateNext(create_info.pNext);
+-	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
+-	                     "vkCreateSwapchainKHR");
++
++	// ASTROHYBRID_FSR_FG=1 (fsrFg.h): frame generation owns the swapchain. When the
++	// provider cannot take it, the stock call below runs exactly as before.
++	VkSwapchainKHR wrapped = VK_NULL_HANDLE;
++	if (FsrFg::Requested() &&
++	    FsrFg::CreateSwapchain(static_cast<VkDevice>(graphics.device),
++	                           static_cast<VkPhysicalDevice>(graphics.physical_device),
++	                           static_cast<VkSwapchainCreateInfoKHR>(create_info),
++	                           static_cast<VkQueue>(graphics.queue), graphics.queue_family,
++	                           static_cast<VkQueue>(graphics.transfer_queue != nullptr
++	                                                    ? graphics.transfer_queue
++	                                                    : graphics.queue),
++	                           graphics.transfer_queue != nullptr ? graphics.transfer_queue_family
++	                                                              : graphics.queue_family,
++	                           wrapped)) {
++		m_handle = vk::SwapchainKHR(wrapped);
++	} else {
++		RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
++		                     "vkCreateSwapchainKHR");
++	}
+ 	EXIT_IF(m_handle == nullptr);
+ 	LowLatency::OnSwapchainCreated(static_cast<VkSwapchainKHR>(m_handle));
+ 	LOGF("Vulkan presentation: %s\n", m_hdr_active ? "HDR10 (PQ)" : "SDR");
+ 
+ 	m_images = EnumerateVulkan<vk::Image>(
+ 	    "vkGetSwapchainImagesKHR", [&](uint32_t* count, vk::Image* images) {
++		    if (FsrFg::Active()) {
++			    return static_cast<vk::Result>(FsrFg::GetSwapchainImages(
++			        static_cast<VkDevice>(graphics.device), static_cast<VkSwapchainKHR>(m_handle),
++			        count, reinterpret_cast<VkImage*>(images)));
++		    }
+ 		    return graphics.device.getSwapchainImagesKHR(m_handle, count, images);
+ 	    });
+ 	EXIT_NOT_IMPLEMENTED(m_images.empty());
+@@ -712,9 +736,16 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
+ 		m_frame_ticks[m_frame_index] = 0;
+ 	}
+ 	m_image_index     = static_cast<uint32_t>(-1);
+-	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
+-	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
+-	    &m_image_index);
++	const auto result =
++	    FsrFg::Active()
++	        ? static_cast<vk::Result>(FsrFg::AcquireNextImage(
++	              static_cast<VkDevice>(m_window.graphic_ctx.device),
++	              static_cast<VkSwapchainKHR>(m_handle), std::numeric_limits<uint64_t>::max(),
++	              static_cast<VkSemaphore>(m_image_acquired[m_frame_index]), VK_NULL_HANDLE,
++	              &m_image_index))
++	        : m_window.graphic_ctx.device.acquireNextImageKHR(
++	              m_handle, std::numeric_limits<uint64_t>::max(),
++	              m_image_acquired[m_frame_index], nullptr, &m_image_index);
+ 	switch (result) {
+ 		case vk::Result::eSuccess: break;
+ 		case vk::Result::eSuboptimalKHR:
+@@ -1214,7 +1245,11 @@ Swapchain::Status Swapchain::Present() {
+ 		// texture copies: the present never waits for them, nor for a signal not yet submitted.
+ 		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
+ 		m_window.graphic_ctx.submission_queue.DrainReadyForPresentLocked();
+-		result = m_window.graphic_ctx.queue.presentKHR(&present);
++		result = FsrFg::Active()
++		             ? static_cast<vk::Result>(FsrFg::Present(
++		                   static_cast<VkQueue>(m_window.graphic_ctx.queue),
++		                   static_cast<VkPresentInfoKHR>(present)))
++		             : m_window.graphic_ctx.queue.presentKHR(&present);
+ 	}
+ 	LowLatency::EndPresent(static_cast<VkSwapchainKHR>(m_handle), latency_id);
+ 	switch (result) {
 diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
 index 21165e69..d0508a20 100644
 --- a/src/graphics/presentation/window/vulkanWindow.cpp
