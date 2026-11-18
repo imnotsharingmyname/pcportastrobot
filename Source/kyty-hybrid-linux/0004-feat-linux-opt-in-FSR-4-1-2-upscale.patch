@@ -1,23 +1,23 @@
-From 2f9ad326b78b0f4f71459df0a6eb78df96eafd84 Mon Sep 17 00:00:00 2001
+From 4da6d925428248a02b24081616f84a95f4237070 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
 
 ---
  CMakeLists.txt                                |   1 +
- src/fsr4/include/ffx_api.h                    | 213 ++++++++
+ src/fsr4/include/ffx_api.h                    | 213 +++++++
  src/fsr4/include/ffx_api_types.h              | 257 +++++++++
  src/fsr4/include/ffx_upscale.h                | 230 ++++++++
- src/fsr4/include/vk/ffx_api_vk.h              | 308 +++++++++++
+ src/fsr4/include/vk/ffx_api_vk.h              | 308 ++++++++++
  .../host_gpu/renderer/cache/textureCache.cpp  |  42 ++
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
- .../host_gpu/renderer/eopTimestamps.cpp       |  31 ++
- src/graphics/host_gpu/renderer/fsr4.cpp       | 507 ++++++++++++++++++
+ .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 538 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/vulkanWindow.cpp      |  39 ++
- 13 files changed, 1673 insertions(+), 4 deletions(-)
+ 13 files changed, 1704 insertions(+), 4 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_upscale.h
@@ -1229,10 +1229,10 @@ index 3b140f69..fd151eff 100644
  }
 diff --git a/src/graphics/host_gpu/renderer/fsr4.cpp b/src/graphics/host_gpu/renderer/fsr4.cpp
 new file mode 100644
-index 00000000..9c1f6aea
+index 00000000..7c7a31da
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsr4.cpp
-@@ -0,0 +1,507 @@
+@@ -0,0 +1,538 @@
 +// Native FSR 4.1.2 through the FidelityFX SDK Vulkan provider.
 +//
 +// The provider is an optional, externally built GPL-3.0 library (the local
@@ -1270,18 +1270,39 @@ index 00000000..9c1f6aea
 +
 +namespace Fsr4 {
 +
-+bool Requested() {
-+	static const bool requested = [] {
-+		const char* value = std::getenv("ASTROHYBRID_FSR4");
-+		return value != nullptr && std::strcmp(value, "1") == 0;
++// Which upscaler to run, if any:
++//   ASTROHYBRID_FSR=fsr4  (or the legacy ASTROHYBRID_FSR4=1) -> FSR 4.1.2
++//   ASTROHYBRID_FSR=fsr3                                    -> FSR 3.1
++// Anything else, or nothing, leaves the game's own upscale in place.
++enum class Provider { None, Fsr3, Fsr4 };
++
++Provider Selected() {
++	static const Provider selected = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR");
++		if (value != nullptr) {
++			if (std::strcmp(value, "fsr3") == 0) return Provider::Fsr3;
++			if (std::strcmp(value, "fsr4") == 0) return Provider::Fsr4;
++			if (std::strcmp(value, "off") == 0) return Provider::None;
++		}
++		const char* legacy = std::getenv("ASTROHYBRID_FSR4");
++		return legacy != nullptr && std::strcmp(legacy, "1") == 0 ? Provider::Fsr4 : Provider::None;
 +	}();
-+	return requested;
++	return selected;
++}
++
++bool Requested() {
++	return Selected() != Provider::None;
 +}
 +
 +void RequiredExtensions(std::vector<const char*>& instance, std::vector<const char*>& device) {
 +	(void)instance;
 +#if !defined(_WIN32)
 +	if (!Requested()) {
++		return;
++	}
++	// FSR 3.1 is plain fp32 compute and needs neither cooperative matrix nor
++	// float8; requesting them would exclude devices that could run it.
++	if (Fsr4::Selected() == Fsr4::Provider::Fsr3) {
 +		return;
 +	}
 +	device.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
@@ -1321,6 +1342,10 @@ index 00000000..9c1f6aea
 +}
 +
 +std::string ProviderDirectory() {
++	if (Fsr4::Selected() == Fsr4::Provider::Fsr3) {
++		const char* value = std::getenv("ASTROHYBRID_FSR3_PATH");
++		return value != nullptr && value[0] != '\0' ? std::string(value) : std::string("fsr3");
++	}
 +	const char* value = std::getenv("ASTROHYBRID_FSR4_PATH");
 +	return value != nullptr && value[0] != '\0' ? std::string(value) : std::string("fsr4");
 +}
@@ -1332,10 +1357,16 @@ index 00000000..9c1f6aea
 +	s.init_tried = true;
 +
 +	const auto  directory = ProviderDirectory();
-+	const auto  loader_path = directory + "/libamd_fidelityfx_loader_vk.so";
-+	const auto  asset_dir = directory + "/assets";
-+	if (std::getenv("FSR4_ASSET_DIR") == nullptr) {
-+		setenv("FSR4_ASSET_DIR", asset_dir.c_str(), 1);
++	// FSR 4.1.2 ships a provider plus the FidelityFX loader; the FSR 3.1 provider
++	// exports the FFX entry points directly and needs no loader.
++	const bool  fsr3 = Fsr4::Selected() == Fsr4::Provider::Fsr3;
++	const auto  loader_path = fsr3 ? directory + "/libamd_fidelityfx_fsr3_vk.so"
++	                               : directory + "/libamd_fidelityfx_loader_vk.so";
++	if (!fsr3) {
++		const auto asset_dir = directory + "/assets";
++		if (std::getenv("FSR4_ASSET_DIR") == nullptr) {
++			setenv("FSR4_ASSET_DIR", asset_dir.c_str(), 1);
++		}
 +	}
 +	s.loader = dlopen(loader_path.c_str(), RTLD_NOW | RTLD_LOCAL);
 +	if (s.loader == nullptr) {
