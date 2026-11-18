@@ -1,4 +1,4 @@
-From 92955ad050c405e0975c4d874fc6d61646bb4921 Mon Sep 17 00:00:00 2001
+From 0d248a0df618f8a0fb5a43ee92313c152bbda402 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -14,16 +14,20 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 538 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 247 ++++++++
+ src/graphics/host_gpu/renderer/fsrFg.h        |  53 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/vulkanWindow.cpp      |  39 ++
- 13 files changed, 1704 insertions(+), 4 deletions(-)
+ 15 files changed, 2004 insertions(+), 4 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_upscale.h
  create mode 100644 src/fsr4/include/vk/ffx_api_vk.h
  create mode 100644 src/graphics/host_gpu/renderer/fsr4.cpp
  create mode 100644 src/graphics/host_gpu/renderer/fsr4.h
+ create mode 100644 src/graphics/host_gpu/renderer/fsrFg.cpp
+ create mode 100644 src/graphics/host_gpu/renderer/fsrFg.h
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index cca6f074..cf515df1 100644
@@ -1794,6 +1798,318 @@ index 00000000..ddf0ae4f
 +} // namespace Libs::Graphics::Fsr4
 +
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
+diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
+new file mode 100644
+index 00000000..09d960cf
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
+@@ -0,0 +1,247 @@
++#include "graphics/host_gpu/renderer/fsrFg.h"
++
++#include "common/logging/log.h"
++
++#include <vulkan/vulkan.h>
++
++#include <cstdlib>
++#include <cstring>
++#include <dlfcn.h>
++
++// The FFX frame-generation API. Only the pieces the presenter needs are declared
++// here, so the runtime does not take a dependency on the whole SDK header set.
++extern "C" {
++struct ffxContext;
++
++// ffxStructType_t (uint64_t) followed by the pNext chain head; see ffx_api.h.
++struct ffxApiHeader {
++	uint64_t             type;
++	struct ffxApiHeader* pNext;
++};
++
++struct VkQueueInfoFFXAPI_ {
++    VkQueue  queue;
++    uint32_t familyIndex;
++    uint32_t flags;
++};
++
++struct FfxApiDimensions2D_ { uint32_t width, height; };
++
++enum { FFX_API_RETURN_OK_ = 0 };
++}
++
++namespace Libs::Graphics {
++namespace FsrFg {
++
++namespace {
++
++struct SwapchainFns {
++	PFN_vkCreateSwapchainKHR  create;
++	PFN_vkDestroySwapchainKHR destroy;
++	PFN_vkGetSwapchainImagesKHR get_images;
++	PFN_vkAcquireNextImageKHR   acquire;
++	PFN_vkQueuePresentKHR       present;
++	uint64_t (*presented_count)(VkSwapchainKHR);
++};
++
++struct State {
++	void*  module = nullptr;
++	bool   tried  = false;
++	bool   ready  = false;
++	bool   active = false;
++
++	void* create = nullptr;
++	void* query  = nullptr;
++	void* destroy = nullptr;
++
++	void*         context   = nullptr;
++	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
++	SwapchainFns  fns {};
++};
++
++State& Get() {
++	static State state;
++	return state;
++}
++
++} // namespace
++
++bool Requested() {
++	static const bool requested = [] {
++		const char* value = std::getenv("ASTROHYBRID_FSR_FG");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	return requested;
++}
++
++bool Prepare() {
++	auto& state = Get();
++	if (state.tried) {
++		return state.ready;
++	}
++	state.tried = true;
++
++	if (!Requested()) {
++		return false;
++	}
++
++	const char* path = std::getenv("ASTROHYBRID_FSR_FG_PATH");
++	const char* file = path != nullptr && path[0] != '\0'
++	                       ? path
++	                       : "fsr3/libamd_fidelityfx_framegeneration_vk.so";
++	state.module = dlopen(file, RTLD_NOW | RTLD_LOCAL);
++	if (state.module == nullptr) {
++		LOGF("FSR-FG: cannot load %s: %s; using the stock presenter\n", file, dlerror());
++		return false;
++	}
++
++	state.create  = dlsym(state.module, "ffxCreateContext");
++	state.query   = dlsym(state.module, "ffxQuery");
++	state.destroy = dlsym(state.module, "ffxDestroyContext");
++	if (state.create == nullptr || state.query == nullptr || state.destroy == nullptr) {
++		LOGF("FSR-FG: %s is missing the FFX entry points; using the stock presenter\n", file);
++		return false;
++	}
++
++	state.ready = true;
++	return true;
++}
++
++bool Active() {
++	return Get().active;
++}
++
++bool CreateSwapchain(VkDevice device, VkPhysicalDevice physical,
++                     const VkSwapchainCreateInfoKHR& create_info,
++                     VkQueue game_queue, uint32_t game_queue_family,
++                     VkQueue present_queue, uint32_t present_queue_family,
++                     VkSwapchainKHR& out_swapchain) {
++	if (!Prepare()) {
++		return false;
++	}
++
++	auto& state = Get();
++
++	// The FFX API speaks its own C ABI. The structures below mirror
++	// ffx_api_framegeneration_vk.h field for field for the two descriptors used.
++	struct CreateDesc {
++		ffxApiHeader            header;
++		VkPhysicalDevice        physical_device;
++		VkDevice                device;
++		VkSwapchainKHR*         swapchain;
++		const VkAllocationCallbacks* allocator;
++		VkSwapchainCreateInfoKHR    create_info;
++		VkQueueInfoFFXAPI_      game_queue;
++		VkQueueInfoFFXAPI_      async_queue;
++		VkQueueInfoFFXAPI_      present_queue;
++		VkQueueInfoFFXAPI_      acquire_queue;
++	};
++
++	VkSwapchainKHR wrapped = VK_NULL_HANDLE;
++	CreateDesc desc {};
++	desc.header.type   = 0x00040001u;   // FGSWAPCHAIN_VK create desc
++	desc.physical_device = physical;
++	desc.device          = device;
++	desc.swapchain       = &wrapped;
++	desc.allocator       = nullptr;
++	desc.create_info     = create_info;
++	desc.game_queue      = {game_queue, game_queue_family, 0};
++	desc.present_queue   = {present_queue, present_queue_family, 0};
++	desc.acquire_queue   = {game_queue, game_queue_family, 0};
++
++	using CreateFn = int (*)(void**, ffxApiHeader*, const void*);
++	const auto create = reinterpret_cast<CreateFn>(state.create);
++	if (create(&state.context, &desc.header, nullptr) != FFX_API_RETURN_OK_ ||
++	    state.context == nullptr) {
++		LOGF("FSR-FG: ffxCreateContext failed; using the stock presenter\n");
++		state.context = nullptr;
++		return false;
++	}
++	if (wrapped == VK_NULL_HANDLE) {
++		LOGF("FSR-FG: the provider returned no swapchain; using the stock presenter\n");
++		return false;
++	}
++
++	struct FunctionsDesc {
++		ffxApiHeader header;
++		PFN_vkCreateSwapchainKHR       create;
++		PFN_vkDestroySwapchainKHR      destroy;
++		PFN_vkGetSwapchainImagesKHR    get_images;
++		PFN_vkAcquireNextImageKHR      acquire;
++		PFN_vkQueuePresentKHR          present;
++		PFN_vkSetHdrMetadataEXT        set_hdr;
++		uint64_t (*presented_count)(VkSwapchainKHR);
++	};
++
++	FunctionsDesc functions {};
++	functions.header.type = 0x00040005u;   // FGSWAPCHAIN_VK functions query
++
++	using QueryFn = int (*)(void*, ffxApiHeader*);
++	const auto query = reinterpret_cast<QueryFn>(state.query);
++	if (query(state.context, &functions.header) != FFX_API_RETURN_OK_) {
++		LOGF("FSR-FG: cannot query the swapchain replacement functions\n");
++		return false;
++	}
++
++	state.fns = {functions.create, functions.destroy, functions.get_images,
++	             functions.acquire, functions.present, functions.presented_count};
++	out_swapchain    = wrapped;
++	state.swapchain  = wrapped;
++	state.active     = true;
++	LOGF("FSR-FG: swapchain wrapped; frame generation routing active\n");
++	return true;
++}
++
++VkResult GetSwapchainImages(VkDevice device, VkSwapchainKHR swapchain,
++                            uint32_t* count, VkImage* images) {
++	// Callers guard on Active(); without a wrapped swapchain there is nothing to
++	// forward to, and the runtime reaches Vulkan through its own function table.
++	auto& state = Get();
++	if (!state.active || state.fns.get_images == nullptr) {
++		return VK_ERROR_INITIALIZATION_FAILED;
++	}
++	return state.fns.get_images(device, swapchain, count, images);
++}
++
++VkResult AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain,
++                          uint64_t timeout, VkSemaphore semaphore,
++                          VkFence fence, uint32_t* index) {
++	auto& state = Get();
++	if (!state.active || state.fns.acquire == nullptr) {
++		return VK_ERROR_INITIALIZATION_FAILED;
++	}
++	return state.fns.acquire(device, swapchain, timeout, semaphore, fence, index);
++}
++
++VkResult Present(VkQueue queue, const VkPresentInfoKHR& info) {
++	auto& state = Get();
++	if (!state.active || state.fns.present == nullptr) {
++		return VK_ERROR_INITIALIZATION_FAILED;
++	}
++	return state.fns.present(queue, &info);
++}
++
++uint64_t PresentedCount() {
++	auto& state = Get();
++	// The provider keys this on its own swapchain; when inactive the caller gets
++	// 0 and knows the figure is unavailable rather than wrong.
++	if (!state.active || state.fns.presented_count == nullptr) {
++		return 0;
++	}
++	return state.fns.presented_count(state.swapchain);
++}
++
++void Shutdown() {
++	auto& state = Get();
++	if (state.context != nullptr) {
++		using DestroyFn = int (*)(void**, const void*);
++		if (state.destroy != nullptr) {
++			reinterpret_cast<DestroyFn>(state.destroy)(&state.context, nullptr);
++		}
++		state.context = nullptr;
++	}
++	state.active = false;
++}
++
++} // namespace FsrFg
++} // namespace Libs::Graphics
+diff --git a/src/graphics/host_gpu/renderer/fsrFg.h b/src/graphics/host_gpu/renderer/fsrFg.h
+new file mode 100644
+index 00000000..95fc4912
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/fsrFg.h
+@@ -0,0 +1,53 @@
++#pragma once
++
++// FSR 3.1 frame generation (ASTROHYBRID_FSR_FG=1).
++//
++// Frame generation is not an upscaler pass: it replaces the swapchain, so the
++// presenter asks this module for the swapchain handle and for the functions that
++// acquire from and present to it. When the module is not requested, or fails to
++// initialise, every call reports false and the caller keeps its stock path.
++
++#include <cstdint>
++
++#include <vulkan/vulkan.h>
++
++namespace Libs::Graphics {
++
++namespace FsrFg {
++
++/// True when ASTROHYBRID_FSR_FG=1.
++bool Requested();
++
++/// Loads Build/RunHybrid/fsr3/libamd_fidelityfx_framegeneration_vk.so and
++/// resolves the FFX entry points. Idempotent; returns false if unavailable.
++bool Prepare();
++
++/// Wraps the game's swapchain. On success `out_swapchain` is the handle the
++/// presenter must use from now on and the replacement functions are available.
++bool CreateSwapchain(VkDevice device, VkPhysicalDevice physical,
++                     const VkSwapchainCreateInfoKHR& create_info,
++                     VkQueue game_queue, uint32_t game_queue_family,
++                     VkQueue present_queue, uint32_t present_queue_family,
++                     VkSwapchainKHR& out_swapchain);
++
++/// True when a wrapped swapchain is in use.
++bool Active();
++
++/// Replacement vkGetSwapchainImagesKHR / vkAcquireNextImageKHR /
++/// vkQueuePresentKHR. Each falls back to the stock call when inactive.
++VkResult GetSwapchainImages(VkDevice device, VkSwapchainKHR swapchain,
++                            uint32_t* count, VkImage* images);
++VkResult AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain,
++                          uint64_t timeout, VkSemaphore semaphore,
++                          VkFence fence, uint32_t* index);
++VkResult Present(VkQueue queue, const VkPresentInfoKHR& info);
++
++/// Presented-frame count from the provider, or 0 when inactive. The direct
++/// measure of "presented ≈ 2× rendered".
++uint64_t PresentedCount();
++
++void Shutdown();
++
++} // namespace FsrFg
++
++} // namespace Libs::Graphics
 diff --git a/src/graphics/host_gpu/renderer/render.h b/src/graphics/host_gpu/renderer/render.h
 index ded9d461..8288605d 100644
 --- a/src/graphics/host_gpu/renderer/render.h
