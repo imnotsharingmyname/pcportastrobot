@@ -1,4 +1,4 @@
-From ddcedb9eccdf42b573fa2f7ec6925af33eb915b1 Mon Sep 17 00:00:00 2001
+From 73a81366553c0beabf8c8184c8608759e2b9f615 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 522 ++++++++++++++++
- src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 529 ++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.h        |  65 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
- .../presentation/window/swapchain.cpp         |  55 +-
+ .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2948 insertions(+), 11 deletions(-)
+ 21 files changed, 2964 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2414,10 +2414,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..34d00eb0
+index 00000000..ddfa2df5
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,529 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2453,9 +2453,12 @@ index 00000000..34d00eb0
 +
 +namespace {
 +
++// The provider's destroy takes its wrapper context as a fourth argument.
++using DestroySwapchainFFXFn = void (*)(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks*, void*);
++
 +struct SwapchainFns {
 +	PFN_vkCreateSwapchainKHR  create;
-+	PFN_vkDestroySwapchainKHR destroy;
++	DestroySwapchainFFXFn       destroy;
 +	PFN_vkGetSwapchainImagesKHR get_images;
 +	PFN_vkAcquireNextImageKHR   acquire;
 +	PFN_vkQueuePresentKHR       present;
@@ -2564,13 +2567,6 @@ index 00000000..34d00eb0
 +	if (!Prepare()) {
 +		return false;
 +	}
-+
-+	// Frame generation is not stable in this runtime yet: the provider's present
-+	// path completes but the runtime then faults, unreproducibly, and wrapping it
-+	// leaves the game presenting the wrapper's images instead of its own. Until that
-+	// is solved the stock presenter is used, so ASTROHYBRID_FSR_FG=1 is a no-op.
-+	FSRFG_LOG("FSR-FG: frame generation is not stable yet; using the stock presenter\n");
-+	return false;
 +
 +	// VkQueueInfoFFXAPI::submitFunc receives no queue argument: it is a *bound*
 +	// submit, so a bare vkQueueSubmit cannot be used there and is left null.
@@ -2748,7 +2744,7 @@ index 00000000..34d00eb0
 +	}
 +
 +	state.fns.create      = reinterpret_cast<PFN_vkCreateSwapchainKHR>(functions.pOutCreateSwapchainFFXAPI);
-+	state.fns.destroy     = reinterpret_cast<PFN_vkDestroySwapchainKHR>(functions.pOutDestroySwapchainFFXAPI);
++	state.fns.destroy     = reinterpret_cast<DestroySwapchainFFXFn>(functions.pOutDestroySwapchainFFXAPI);
 +	state.fns.get_images  = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(functions.pOutGetSwapchainImagesKHR);
 +	state.fns.acquire     = reinterpret_cast<PFN_vkAcquireNextImageKHR>(functions.pOutAcquireNextImageKHR);
 +	state.fns.present     = reinterpret_cast<PFN_vkQueuePresentKHR>(functions.pOutQueuePresentKHR);
@@ -2802,6 +2798,17 @@ index 00000000..34d00eb0
 +	state.swapchain  = wrapped;
 +	state.active     = true;
 +	FSRFG_LOG("FSR-FG: swapchain wrapped; frame generation routing active\n");
++	return true;
++}
++
++bool DestroySwapchain(VkDevice device) {
++	auto& state = Get();
++	if (!state.active || state.fns.destroy == nullptr) {
++		return false;
++	}
++	state.fns.destroy(device, state.swapchain, nullptr, state.context);
++	state.swapchain = VK_NULL_HANDLE;
++	state.active    = false;
 +	return true;
 +}
 +
@@ -2942,10 +2949,10 @@ index 00000000..34d00eb0
 +} // namespace Libs::Graphics
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.h b/src/graphics/host_gpu/renderer/fsrFg.h
 new file mode 100644
-index 00000000..a2b4fc86
+index 00000000..5ceab3d8
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.h
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,65 @@
 +#pragma once
 +
 +// FSR 3.1 frame generation (ASTROHYBRID_FSR_FG=1).
@@ -2984,6 +2991,10 @@ index 00000000..a2b4fc86
 +
 +/// Replacement vkGetSwapchainImagesKHR / vkAcquireNextImageKHR /
 +/// vkQueuePresentKHR. Each falls back to the stock call when inactive.
++/// Destroys the wrapped swapchain through the provider. Returns false when the
++/// module is inactive, so the caller keeps its stock destroy.
++bool DestroySwapchain(VkDevice device);
++
 +VkResult GetSwapchainImages(VkDevice device, VkSwapchainKHR swapchain,
 +                            uint32_t* count, VkImage* images);
 +VkResult AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain,
@@ -3063,7 +3074,7 @@ index 25b4d339..74b407b9 100644
  			m_run_active       = false;
  			m_run_targets_kept = false;
 diff --git a/src/graphics/presentation/window/swapchain.cpp b/src/graphics/presentation/window/swapchain.cpp
-index caa9055e..a89fd91a 100644
+index caa9055e..caad899e 100644
 --- a/src/graphics/presentation/window/swapchain.cpp
 +++ b/src/graphics/presentation/window/swapchain.cpp
 @@ -1,4 +1,6 @@
@@ -3148,7 +3159,20 @@ index caa9055e..a89fd91a 100644
  		    return graphics.device.getSwapchainImagesKHR(m_handle, count, images);
  	    });
  	EXIT_NOT_IMPLEMENTED(m_images.empty());
-@@ -712,9 +744,16 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
+@@ -626,7 +658,11 @@ void Swapchain::Destroy() {
+ 	}
+ 	if (m_handle != nullptr) {
+ 		LowLatency::OnSwapchainDestroyed(static_cast<VkSwapchainKHR>(m_handle));
+-		graphics.device.destroySwapchainKHR(m_handle, nullptr);
++		// The wrapped handle is the provider's own object, not a VkSwapchainKHR, and
++		// vkDestroySwapchainKHR on it goes through a null dispatch entry.
++		if (!FsrFg::DestroySwapchain(static_cast<VkDevice>(graphics.device))) {
++			graphics.device.destroySwapchainKHR(m_handle, nullptr);
++		}
+ 	}
+ 
+ 	m_handle        = nullptr;
+@@ -712,9 +748,16 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
  		m_frame_ticks[m_frame_index] = 0;
  	}
  	m_image_index     = static_cast<uint32_t>(-1);
@@ -3168,7 +3192,7 @@ index caa9055e..a89fd91a 100644
  	switch (result) {
  		case vk::Result::eSuccess: break;
  		case vk::Result::eSuboptimalKHR:
-@@ -1214,7 +1253,11 @@ Swapchain::Status Swapchain::Present() {
+@@ -1214,7 +1257,11 @@ Swapchain::Status Swapchain::Present() {
  		// texture copies: the present never waits for them, nor for a signal not yet submitted.
  		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
  		m_window.graphic_ctx.submission_queue.DrainReadyForPresentLocked();
