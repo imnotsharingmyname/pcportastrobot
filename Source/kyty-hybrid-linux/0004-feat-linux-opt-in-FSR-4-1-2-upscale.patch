@@ -1,4 +1,4 @@
-From 6a86f82859f3fe2246f4603e1e8a26297bd575bb Mon Sep 17 00:00:00 2001
+From c3a820a8bd56ae3e61bfbbd1518d6c8ca2986c88 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -9,7 +9,7 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  src/fsr4/include/ffx_api_types.h              | 257 ++++++++
  src/fsr4/include/ffx_framegeneration.h        | 299 ++++++++++
  .../include/ffx_framegeneration_api_types.h   |  72 +++
- src/fsr4/include/ffx_upscale.h                | 230 ++++++++
+ src/fsr4/include/ffx_upscale.h                | 230 +++++++
  .../include/vk/ffx_api_framegeneration_vk.h   | 150 +++++
  src/fsr4/include/vk/ffx_api_vk.h              | 308 ++++++++++
  src/graphics/host_gpu/graphicContext.h        |   7 +
@@ -17,15 +17,15 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
- src/graphics/host_gpu/renderer/fsr4.cpp       | 552 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 409 +++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 412 +++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2824 insertions(+), 11 deletions(-)
+ 21 files changed, 2838 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -1822,10 +1822,10 @@ index 3b140f69..fd151eff 100644
  }
 diff --git a/src/graphics/host_gpu/renderer/fsr4.cpp b/src/graphics/host_gpu/renderer/fsr4.cpp
 new file mode 100644
-index 00000000..1217fe16
+index 00000000..cd46f6cc
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsr4.cpp
-@@ -0,0 +1,552 @@
+@@ -0,0 +1,563 @@
 +// Native FSR 4.1.2 through the FidelityFX SDK Vulkan provider.
 +//
 +// The provider is an optional, externally built GPL-3.0 library (the local
@@ -2050,6 +2050,7 @@ index 00000000..1217fe16
 +
 +bool RenderExecutor::TryFsr4Upscale(CommandBuffer& buffer, PreparedBindings& pixel, ImageId output) {
 +	if (!Fsr4::Requested() || pixel.runtime == nullptr || !*pixel.runtime) {
++		std::fprintf(stderr, "UPSDBG early return #1\n");
 +		return false;
 +	}
 +	// ASTROHYBRID_FSR4_PASSLOG=1: once a second, list every pixel program that writes a
@@ -2126,10 +2127,12 @@ index 00000000..1217fe16
 +		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0x2936e5eca99d75e7ull;
 +	}();
 +	if (pixel.runtime->program->shader_hash != pass_hash) {
++		std::fprintf(stderr, "UPSDBG early return #2\n");
 +		return false;
 +	}
 +	if (pixel.images.size() < 2 || !output || pixel.buffer_sources.empty() ||
 +	    pixel.buffer_sources[0].address == 0 || pixel.buffer_sources[0].size < 56) {
++		std::fprintf(stderr, "UPSDBG early return #3\n");
 +		return false;
 +	}
 +
@@ -2140,6 +2143,7 @@ index 00000000..1217fe16
 +	uint32_t out_w = cb[4], out_h = cb[5], in_w = cb[6], in_h = cb[7];
 +	const uint32_t frame = cb[11];
 +	if (cb[13] == 0 || in_w == 0 || in_h == 0 || out_w == 0 || out_h == 0) {
++		std::fprintf(stderr, "UPSDBG early return #4\n");
 +		return false;
 +	}
 +	// ASTROHYBRID_FSR4_PASSLOG=3: print every pass of one frame (the staged upscale chain)
@@ -2204,9 +2208,11 @@ index 00000000..1217fe16
 +	constexpr uint32_t kTargetHeight = 2160;
 +	if (out_w != kTargetWidth || out_h != kTargetHeight || in_w > out_w || in_h > out_h ||
 +	    (!allow_1to1 && (in_w >= out_w || in_h >= out_h))) {
++		std::fprintf(stderr, "UPSDBG early return #5\n");
 +		return false;
 +	}
 +	if (s.last_dispatch_frame == frame) {
++		std::fprintf(stderr, "UPSDBG early return #6\n");
 +		return false;
 +	}
 +
@@ -2215,6 +2221,7 @@ index 00000000..1217fe16
 +	const auto color_id   = pixel.images[1].image_id;
 +	const auto depth_id   = DepthForColor(mv_id);
 +	if (!depth_id || cache.m_slot_images.try_get(depth_id) == nullptr) {
++		std::fprintf(stderr, "UPSDBG early return #7\n");
 +		return false;
 +	}
 +	auto& mv    = cache.GetImage(mv_id);
@@ -2234,14 +2241,17 @@ index 00000000..1217fe16
 +	if (!same(mv, in_w, in_h) || !same(color, in_w, in_h) || !same(depth, in_w, in_h) ||
 +	    !same(out, out_w, out_h) || !depth.info.IsDepth() ||
 +	    !(out.backing.usage & vk::ImageUsageFlagBits::eStorage)) {
++		std::fprintf(stderr, "UPSDBG early return #8\n");
 +		return false;
 +	}
 +
 +	if (!LoadProvider(s)) {
++		std::fprintf(stderr, "UPSDBG early return #9\n");
 +		return false;
 +	}
 +	auto& graphics = m_context.GetGraphics();
 +	if (!CreateContext(s, graphics, 3840, 2160, 3840, 2160)) {
++		std::fprintf(stderr, "UPSDBG early return #10\n");
 +		return false;
 +	}
 +
@@ -2349,6 +2359,7 @@ index 00000000..1217fe16
 +			std::printf("FSR4: ffxDispatch failed (0x%x)\n", static_cast<unsigned>(result));
 +			std::fflush(stdout);
 +		}
++		std::fprintf(stderr, "UPSDBG early return #11\n");
 +		return false;
 +	}
 +	// The output now holds FSR4's image: a GPU write of the target, as the replaced draw's
@@ -2403,10 +2414,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..dc43ba76
+index 00000000..168722e6
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,412 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2562,7 +2573,10 @@ index 00000000..dc43ba76
 +	// Acquire and its submits now work (two acquires, six valid submissions logged),
 +	// and the failure moved past them: the game still produces no upscaled frame
 +	// with the wrapper installed. The stock presenter stays until that is fixed.
-+	FSRFG_LOG("FSR-FG: wrapper installs but no frame is produced; stock presenter\n");
++	// With the wrapper installed, TryFsr4Upscale is never entered at all (its early
++	// returns are instrumented and never fire), so the gate at renderDraw.cpp:4180
++	// fails before the upscale. The stock presenter stays until that is understood.
++	FSRFG_LOG("FSR-FG: wrapper installs but the upscale is never reached; stock presenter\n");
 +	return false;
 +
 +	auto& state = Get();
