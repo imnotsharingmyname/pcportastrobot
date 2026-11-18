@@ -1,4 +1,4 @@
-From 4da6d925428248a02b24081616f84a95f4237070 Mon Sep 17 00:00:00 2001
+From 92955ad050c405e0975c4d874fc6d61646bb4921 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
