@@ -82,8 +82,8 @@
                        VerticalAlignment="Center" />
             <ComboBox Grid.Row="4" Grid.Column="1" x:Name="FrameGenBox" Width="400"
                       HorizontalAlignment="Left" IsEnabled="False" />
-            <TextBlock Grid.Row="5" Grid.Column="1" Classes="muted"
-                       Text="DLSS Frame Generation is a Windows-only Streamline feature and is not in this build." />
+            <TextBlock Grid.Row="5" Grid.Column="1" TextWrapping="Wrap"
+                       Text="Frame generation needs a working provider. DLSS-G is a Windows-only Streamline feature; the FSR 3.1 path builds and wraps the swapchain, but the game stops drawing while it owns presentation, so neither is enabled." />
 
             <TextBlock Grid.Row="6" Grid.Column="0" Text="Target FPS" Classes="body"
                        VerticalAlignment="Center" IsVisible="False" />
