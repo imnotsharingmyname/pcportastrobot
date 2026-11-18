@@ -1,4 +1,4 @@
-From 9e603a731984f935209dc1eb4e0e630fe54fefdc Mon Sep 17 00:00:00 2001
+From e6f903868b706207af1967992688f012c7f9b9bc Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 512 ++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 518 ++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2938 insertions(+), 11 deletions(-)
+ 21 files changed, 2944 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -1622,7 +1622,7 @@ index 00000000..1bbe1d9e
 +
 +#endif
 diff --git a/src/graphics/host_gpu/graphicContext.h b/src/graphics/host_gpu/graphicContext.h
-index ed299289..f6fb1b27 100644
+index ed299289..6c41c27e 100644
 --- a/src/graphics/host_gpu/graphicContext.h
 +++ b/src/graphics/host_gpu/graphicContext.h
 @@ -131,6 +131,13 @@ struct GraphicContext {
@@ -1635,7 +1635,7 @@ index ed299289..f6fb1b27 100644
 +	// Frame generation's async / present / acquire queues, from a family that has
 +	// three of them (vulkanWindow.cpp).
 +	uint32_t                           fg_alt_family = static_cast<uint32_t>(-1);
-+	vk::Queue                          fg_alt_queue[3] = {nullptr, nullptr, nullptr};
++	vk::Queue                          fg_alt_queue[4] = {nullptr, nullptr, nullptr, nullptr};
  	// Second queue of queue_family for side-copy readbacks (KYTY_SIDE_QUEUE); null when absent,
  	// then side copies share `queue`. Submissions to it hold side_queue_mutex, not queue_mutex.
  	uint32_t                           side_queue_index = 0;
@@ -2414,10 +2414,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..d55919d0
+index 00000000..d127d60a
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,518 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2604,8 +2604,11 @@ index 00000000..d55919d0
 +	// callback is registered. Presenting through the wrapper still dies in its
 +	// non-interpolated branch, and not reproducibly run to run, so the stock
 +	// presenter stays until that is solved.
-+	FSRFG_LOG("FSR-FG: frame-generation context exists but presenting faults; "
-+	          "using the stock presenter\n");
++	// The provider's present path now runs to completion (present res=0, submit
++	// res=0, semaphore wait done), but the runtime faults immediately afterwards,
++	// in Kyty's own post-present handling of images the wrapper now owns. The stock
++	// presenter stays until that is solved.
++	FSRFG_LOG("FSR-FG: present path completes; post-present faults; stock presenter\n");
 +	return false;
 +
 +	auto& state = Get();
@@ -2651,10 +2654,13 @@ index 00000000..d55919d0
 +	// All four FFX queues from one family: mixing families forces FFX's
 +	// queue-ownership-transfer path, which needs release/acquire barriers this
 +	// runtime does not set up.
-+	desc.gameQueue         = {async_queue, queue_family, nullptr};
-+	desc.asyncComputeQueue = {present_queue, queue_family, nullptr};
-+	desc.presentQueue      = {acquire_queue, queue_family, nullptr};
-+	desc.imageAcquireQueue = {game_queue, game_queue_family, nullptr};
++	// All four from one family: the swapchain's cross-family path submits on the
++	// present queue through a command pool the wrapper builds, and that path faults.
++	// Same family removes the ownership transfer entirely.
++	desc.gameQueue         = {game_queue, game_queue_family, nullptr};
++	desc.asyncComputeQueue = {async_queue, queue_family, nullptr};
++	desc.presentQueue      = {present_queue, queue_family, nullptr};
++	desc.imageAcquireQueue = {acquire_queue, queue_family, nullptr};
 +
 +	// State the composition mode instead of leaving it at NOT_FORCED: with the
 +	// game queue it is a single well-defined path through FFX's presenter, and the
@@ -3053,7 +3059,7 @@ index 25b4d339..74b407b9 100644
  			m_run_active       = false;
  			m_run_targets_kept = false;
 diff --git a/src/graphics/presentation/window/swapchain.cpp b/src/graphics/presentation/window/swapchain.cpp
-index caa9055e..b083b574 100644
+index caa9055e..a89fd91a 100644
 --- a/src/graphics/presentation/window/swapchain.cpp
 +++ b/src/graphics/presentation/window/swapchain.cpp
 @@ -1,4 +1,6 @@
@@ -3118,7 +3124,7 @@ index caa9055e..b083b574 100644
 +	                           static_cast<VkQueue>(graphics.fg_alt_queue[0]),
 +	                           static_cast<VkQueue>(graphics.fg_alt_queue[1]),
 +	                           static_cast<VkQueue>(graphics.fg_alt_queue[2]),
-+	                           graphics.queue_family, wrapped)) {
++	                           graphics.fg_alt_family, wrapped)) {
 +		m_handle = vk::SwapchainKHR(wrapped);
 +	} else {
 +		RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
@@ -3172,7 +3178,7 @@ index caa9055e..b083b574 100644
  	LowLatency::EndPresent(static_cast<VkSwapchainKHR>(m_handle), latency_id);
  	switch (result) {
 diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
-index 21165e69..daac4a33 100644
+index 21165e69..7801f116 100644
 --- a/src/graphics/presentation/window/vulkanWindow.cpp
 +++ b/src/graphics/presentation/window/vulkanWindow.cpp
 @@ -33,6 +33,7 @@
@@ -3223,10 +3229,10 @@ index 21165e69..daac4a33 100644
 +		if (fg_family != static_cast<uint32_t>(-1)) {
 +			auto& fg = queue_create_infos[queue_create_count++];
 +			fg.queueFamilyIndex = fg_family;
-+			fg.queueCount       = 3;
++			fg.queueCount       = 4;
 +			fg.pQueuePriorities = fg_priorities.data();
 +			graphics.fg_alt_family = fg_family;
-+			std::printf("Kyty FSR-FG queues: family %u x3 (graphics family x1)\n", fg_family);
++			std::printf("Kyty FSR-FG queues: family %u x4 (graphics family x1)\n", fg_family);
 +		}
 +	}
 +
@@ -3297,7 +3303,7 @@ index 21165e69..daac4a33 100644
  	CommandRecorder::InstallGuardHooks(graphic_ctx.device);
  	graphic_ctx.device.getQueue(graphic_ctx.queue_family, 0, &graphic_ctx.queue);
 +	if (graphic_ctx.fg_alt_family != static_cast<uint32_t>(-1)) {
-+		for (uint32_t index = 0; index < 3; ++index) {
++		for (uint32_t index = 0; index < 4; ++index) {
 +			graphic_ctx.device.getQueue(graphic_ctx.fg_alt_family, index,
 +			                            &graphic_ctx.fg_alt_queue[index]);
 +		}
