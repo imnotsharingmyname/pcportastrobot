@@ -36,7 +36,7 @@ cmake -S "$ROOT/Tools/fsr3" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DFSR3_SDK="$SDK" \
   -DSHADERS="$SHADERS"
-cmake --build "$BUILD" --parallel
+cmake --build "$BUILD" --target amd_fidelityfx_fsr3_vk --parallel
 
 mkdir -p "$ROOT/Build/fsr3"
 cp "$BUILD/libamd_fidelityfx_fsr3_vk.so" "$ROOT/Build/fsr3/"

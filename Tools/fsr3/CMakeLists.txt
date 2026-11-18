@@ -78,6 +78,19 @@ string(REPLACE "void ConvertUTF16ToUTF8(const wchar_t* inputName, char* outputBu
                VK_BACKEND "${VK_BACKEND}")
 file(WRITE ${SDK_COPY}/backend/vk/ffx_vk.cpp "${VK_BACKEND}")
 
+# FG provider: same MSVC literal problem as the upscaler provider.
+file(READ ${SDK_COPY}/framegeneration/fsr3/internal/ffx_provider_fsr3framegeneration.cpp FG_PROVIDER)
+string(REGEX REPLACE "0x[0-9A-Fa-f]+'[0-9A-Fa-f]+ui64" "0xF3A3F1A9ULL" FG_PROVIDER "${FG_PROVIDER}")
+file(WRITE ${SDK_COPY}/framegeneration/fsr3/internal/ffx_provider_fsr3framegeneration.cpp "${FG_PROVIDER}")
+
+# MSVC backslash includes in the swapchain sources: rewrite to forward slashes.
+file(GLOB FG_VK_HEADERS ${SDK_COPY}/framegeneration/fsr3/vk/*.h)
+foreach(header ${FG_VK_HEADERS})
+  file(READ ${header} HEADER_TEXT)
+  string(REPLACE "\\" "/" HEADER_TEXT "${HEADER_TEXT}")
+  file(WRITE ${header} "${HEADER_TEXT}")
+endforeach()
+
 set(KIT ${SDK_COPY})
 
 add_library(amd_fidelityfx_fsr3_vk SHARED
@@ -121,5 +134,63 @@ target_compile_options(amd_fidelityfx_fsr3_vk PRIVATE
 # The provider is loaded with dlopen; nothing else should be exported.
 target_link_libraries(amd_fidelityfx_fsr3_vk PRIVATE ${CMAKE_DL_LIBS} vulkan z)
 set_target_properties(amd_fidelityfx_fsr3_vk PROPERTIES
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON)
+
+# ---------------------------------------------------------------- frame generation
+#
+# The FG provider wraps the game's swapchain, so it links the same SDK core and
+# Vulkan backend plus the optical-flow, frame-interpolation and swapchain
+# translation units.
+
+file(GLOB FG_TABLES
+  ${SHADERS}/ffx_frameinterpolation_*_permutations.c
+  ${SHADERS}/ffx_opticalflow_*_permutations.c)
+
+add_library(amd_fidelityfx_framegeneration_vk SHARED
+  ${KIT}/api/internal/ffx_api.cpp
+  ${KIT}/api/internal/ffx_assert.cpp
+  ${KIT}/api/internal/ffx_message.cpp
+  ${KIT}/api/internal/ffx_object_management.cpp
+  ${KIT}/api/internal/ffx_query_fallback.cpp
+  ${KIT}/backend/vk/ffx_backends_vk.cpp
+  ${KIT}/backend/vk/ffx_vk.cpp
+  ${KIT}/framegeneration/fsr3/internal/ffx_frameinterpolation.cpp
+  ${KIT}/framegeneration/fsr3/internal/ffx_frameinterpolation_shaderblobs.cpp
+  ${KIT}/framegeneration/fsr3/internal/ffx_opticalflow.cpp
+  ${KIT}/framegeneration/fsr3/internal/ffx_opticalflow_shaderblobs.cpp
+  ${KIT}/framegeneration/fsr3/internal/ffx_provider_fsr3framegeneration.cpp
+  ${KIT}/framegeneration/fsr3/vk/ffx_provider_framegenerationswapchain_vk.cpp
+  ${KIT}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK.cpp
+  ${KIT}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK_Helpers.cpp
+  ${KIT}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK_UiComposition.cpp
+  ${FG_TABLES}
+  src/provider_list_fg.cpp
+)
+
+target_include_directories(amd_fidelityfx_framegeneration_vk PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${KIT}/api/include
+  ${KIT}/api/internal
+  ${KIT}/backend/vk
+  ${KIT}/framegeneration/include
+  ${KIT}/framegeneration/fsr3/include
+  ${KIT}/framegeneration/fsr3/internal
+  ${SHADERS}
+)
+
+target_compile_definitions(amd_fidelityfx_framegeneration_vk PRIVATE
+  FFX_BACKEND_VK=1
+  FFX_USE_VK=1
+  FFX_FRAMEGENERATION=1
+)
+
+target_compile_options(amd_fidelityfx_framegeneration_vk PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-include${CMAKE_CURRENT_SOURCE_DIR}/include/ffx_compat.h>
+  -Wno-unused-parameter
+)
+
+target_link_libraries(amd_fidelityfx_framegeneration_vk PRIVATE ${CMAKE_DL_LIBS} vulkan z)
+set_target_properties(amd_fidelityfx_framegeneration_vk PROPERTIES
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN ON)
