@@ -1,4 +1,4 @@
-From a5499eda971b1242335754ae3c5459deffc29cb2 Mon Sep 17 00:00:00 2001
+From 0a6314232a62d75698a8197953709c2e6c4dbab8 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -18,13 +18,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 538 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 242 ++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 248 ++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  53 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  57 +-
  .../presentation/window/vulkanWindow.cpp      |  39 ++
- 20 files changed, 2578 insertions(+), 10 deletions(-)
+ 20 files changed, 2584 insertions(+), 10 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2370,10 +2370,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..085b5080
+index 00000000..c73b31ed
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,248 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2511,6 +2511,12 @@ index 00000000..085b5080
 +
 +	auto& state = Get();
 +
++	// The FFX wrapper reads the presented image back to interpolate and compose
++	// around it, so the swapchain must be usable as a transfer source as well as a
++	// render target. The game asks only for colour attachment and transfer-dst.
++	VkSwapchainCreateInfoKHR fg_info = create_info;
++	fg_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++
 +	VkSwapchainKHR wrapped = VK_NULL_HANDLE;
 +	ffxCreateContextDescFrameGenerationSwapChainVK desc {};
 +	desc.header.type      = FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK;
@@ -2518,7 +2524,7 @@ index 00000000..085b5080
 +	desc.device           = device;
 +	desc.swapchain        = &wrapped;
 +	desc.allocator        = nullptr;
-+	desc.createInfo       = create_info;
++	desc.createInfo       = fg_info;
 +	desc.gameQueue        = {game_queue, game_queue_family};
 +	desc.asyncComputeQueue = {game_queue, game_queue_family};
 +	desc.presentQueue     = {present_queue, present_queue_family};
