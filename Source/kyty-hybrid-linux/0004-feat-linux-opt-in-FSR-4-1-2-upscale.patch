@@ -1,4 +1,4 @@
-From 030b2a190ba7561f411ebd879f578bae2613662a Mon Sep 17 00:00:00 2001
+From 7cde2e629d29cf223055f3c397326ba9d82e0a3f Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -7,25 +7,25 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  CMakeLists.txt                                |   1 +
  src/fsr4/include/ffx_api.h                    | 213 ++++++
  src/fsr4/include/ffx_api_types.h              | 257 +++++++
- src/fsr4/include/ffx_framegeneration.h        | 299 +++++++++
+ src/fsr4/include/ffx_framegeneration.h        | 299 ++++++++
  .../include/ffx_framegeneration_api_types.h   |  72 ++
  src/fsr4/include/ffx_upscale.h                | 230 +++++++
- .../include/vk/ffx_api_framegeneration_vk.h   | 150 +++++
+ .../include/vk/ffx_api_framegeneration_vk.h   | 150 ++++
  src/fsr4/include/vk/ffx_api_vk.h              | 308 +++++++++
  src/graphics/host_gpu/graphicContext.h        |   7 +
  .../host_gpu/renderer/cache/textureCache.cpp  |  42 ++
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
- src/graphics/host_gpu/renderer/fsr4.cpp       | 562 ++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 562 +++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 635 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 650 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  71 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      | 104 ++-
- 21 files changed, 3087 insertions(+), 12 deletions(-)
+ 21 files changed, 3102 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2413,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..55d61310
+index 00000000..7364b415
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,635 @@
+@@ -0,0 +1,650 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2763,9 +2763,24 @@ index 00000000..55d61310
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	// Generation is off. Its shaders need device features and its recorded work
-+	// assumes resource/queue state this integration does not establish; running it
-+	// hangs the GPU, so it is not exercised by default.
++	// Generation is off. Reading FFX's swapchain shows the intended design and why
++	// this integration does not match it:
++	//
++	//   runInterpolation = interpolationEnabled && (fgCallbackConfigured ||
++	//                                               fgCommandListConfigured)
++	//
++	// `registeredInterpolationCommandLists[]` is only ever cleared, never assigned,
++	// so the command-list route is not the one FFX uses here. Generation is driven
++	// by `frameGenerationCallback` in ffxConfigureDescFrameGeneration, which this
++	// module passes as null. With no callback and no registered list,
++	// runInterpolation is false: the wrapper presents 1:1 (which is what
++	// fg_presented tracking the frame count means) and the work we record into the
++	// queried command buffer is never submitted, so FFX waits on semaphores that
++	// never signal and the device is lost.
++	//
++	// The fix is to supply frameGenerationCallback and let FFX drive generation,
++	// rather than calling ffxDispatch ourselves. Not done: it hangs the GPU, and
++	// that takes the whole desktop down on this machine.
 +	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
