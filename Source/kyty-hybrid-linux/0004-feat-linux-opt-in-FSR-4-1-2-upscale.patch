@@ -1,4 +1,4 @@
-From 7cde2e629d29cf223055f3c397326ba9d82e0a3f Mon Sep 17 00:00:00 2001
+From 5e0a4d4148c05157300ada4ee3210e44e4f7a659 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -9,9 +9,9 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  src/fsr4/include/ffx_api_types.h              | 257 +++++++
  src/fsr4/include/ffx_framegeneration.h        | 299 ++++++++
  .../include/ffx_framegeneration_api_types.h   |  72 ++
- src/fsr4/include/ffx_upscale.h                | 230 +++++++
+ src/fsr4/include/ffx_upscale.h                | 230 ++++++
  .../include/vk/ffx_api_framegeneration_vk.h   | 150 ++++
- src/fsr4/include/vk/ffx_api_vk.h              | 308 +++++++++
+ src/fsr4/include/vk/ffx_api_vk.h              | 308 ++++++++
  src/graphics/host_gpu/graphicContext.h        |   7 +
  .../host_gpu/renderer/cache/textureCache.cpp  |  42 ++
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 562 +++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 650 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 664 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  71 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      | 104 ++-
- 21 files changed, 3102 insertions(+), 12 deletions(-)
+ 21 files changed, 3116 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2413,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..7364b415
+index 00000000..b0cd3ed5
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,650 @@
+@@ -0,0 +1,664 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2708,6 +2708,20 @@ index 00000000..7364b415
 +		return FFX_API_RETURN_OK;
 +	};
 +
++	// FFX drives generation: its swapchain calls this once per frame with the
++	// descriptor it built, and the application is expected to hand it to
++	// ffxDispatch. Without it runInterpolation is false and the wrapper presents
++	// 1:1, so this is what makes generation happen at all.
++	auto generate_callback = [](ffxDispatchDescFrameGeneration* desc, void* user) -> ffxReturnCode_t {
++		auto* inner = static_cast<State*>(user);
++		if (inner == nullptr || inner->dispatch == nullptr || inner->fg_context == nullptr) {
++			return FFX_API_RETURN_ERROR_PARAMETER;
++		}
++		using DispatchFn = ffxReturnCode_t (*)(ffxContext*, ffxDispatchDescHeader*);
++		const auto dispatch_fn = reinterpret_cast<DispatchFn>(inner->dispatch);
++		return dispatch_fn(&inner->fg_context, reinterpret_cast<ffxDispatchDescHeader*>(desc));
++	};
++
 +	// FFX splits presentation from generation: the swapchain context has no
 +	// present callback of its own, and its present path calls one. The callback is
 +	// supplied by a second, frame-generation context and wired to the swapchain
@@ -2761,8 +2775,8 @@ index 00000000..7364b415
 +	configure.swapChain              = reinterpret_cast<void*>(wrapped);
 +	configure.presentCallback        = present_callback;
 +	configure.presentCallbackUserContext = nullptr;
-+	configure.frameGenerationCallback = nullptr;
-+	configure.frameGenerationCallbackUserContext = nullptr;
++	configure.frameGenerationCallback = generate_callback;
++	configure.frameGenerationCallbackUserContext = &state;
 +	// Generation is off. Reading FFX's swapchain shows the intended design and why
 +	// this integration does not match it:
 +	//
