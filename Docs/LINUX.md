@@ -130,17 +130,32 @@ float8 requirements, so it runs on devices FSR 4.1.2 excludes. Build it with
 permutations per pass and stages `Build/fsr3/libamd_fidelityfx_fsr3_vk.so`.
 The launcher exposes both under **Graphics -> Upscaling** when they are staged.
 
-### FSR 3.1 frame generation (incomplete)
+### FSR 3.1 frame generation (not working)
 
-`libamd_fidelityfx_framegeneration_vk.so` builds, both contexts are created and
-configured, and the runtime wraps the swapchain: a 45 s run presents ~3000 frames
-with no fault, and the rate line reports `fg_presented` next to the rendered
-frame number, which tracks 1:1.
+The provider builds, both contexts are created, the swapchain is wrapped, and the
+runtime presents through it without fault: a 45 s run presented ~3000 frames, and
+the rate line reports `fg_presented` next to the rendered frame number.
 
-Nothing is generated yet. `ffxDispatch` returns 1 for every frame, so the
-dispatch descriptor is still missing something the provider validates -- most
-likely the interpolation outputs from the swapchain query rather than the
-wrapper's own images. It is off unless `ASTROHYBRID_FSR_FG=1`.
+Nothing is generated. Reading AMD's swapchain shows why: generation is driven by
+`frameGenerationCallback` in `ffxConfigureDescFrameGeneration`, and with no
+callback (or registered command list) `runInterpolation` is false, so the wrapper
+presents 1:1 above.
+
+What is already established, so it is not re-derived:
+
+- `ffxDispatch` returns 0 for prepare, optical flow and frame interpolation.
+- The interpolation runs on the **game queue** (`presentInfo.interpolationQueue =
+  presentInfo.gameQueue`), so the graphics/compute family split is not a problem
+  for the images handed in.
+- The pipeline capability `ComputeDerivativeGroupLinearKHR` needs the matching
+  device feature, not just the extension; it is now enabled when an FSR provider
+  is selected.
+- The three dispatch resources must carry their `VkImageLayout` in
+  `FfxApiResource::state`, not 0.
+
+A generation callback has been implemented but never exercised: running it can
+hang the GPU, which resets the desktop on this machine, so it stays off until it
+is tested somewhere that can tolerate that.
 
 ## FSR 4.1.2 details
 
