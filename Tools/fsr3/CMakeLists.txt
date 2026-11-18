@@ -83,6 +83,34 @@ file(READ ${SDK_COPY}/framegeneration/fsr3/vk/ffx_provider_framegenerationswapch
 string(REGEX REPLACE "0x[0-9A-Fa-f]+'[0-9A-Fa-f]+ui64" "0xF3A3F1A9ULL" FG_SWAPCHAIN "${FG_SWAPCHAIN}")
 file(WRITE ${SDK_COPY}/framegeneration/fsr3/vk/ffx_provider_framegenerationswapchain_vk.cpp "${FG_SWAPCHAIN}")
 
+# The swapchain declares and handles Win32-only full-screen-exclusive structures
+# unconditionally; Vulkan only defines them with VK_USE_PLATFORM_WIN32_KHR.
+file(READ ${SDK_COPY}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK.cpp FI_SWAPCHAIN)
+string(REPLACE
+  "    VkSurfaceFullScreenExclusiveInfoEXT      surfaceFullScreenExclusive;\n    VkSurfaceFullScreenExclusiveWin32InfoEXT surfaceFullScreenExclusiveWin32;"
+  "#if defined(VK_USE_PLATFORM_WIN32_KHR)\n    VkSurfaceFullScreenExclusiveInfoEXT      surfaceFullScreenExclusive;\n    VkSurfaceFullScreenExclusiveWin32InfoEXT surfaceFullScreenExclusiveWin32;\n#endif"
+  FI_SWAPCHAIN "${FI_SWAPCHAIN}")
+string(REPLACE
+  "        case VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT:"
+  "#if defined(VK_USE_PLATFORM_WIN32_KHR)\n        case VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT:"
+  FI_SWAPCHAIN "${FI_SWAPCHAIN}")
+string(REPLACE
+  "        case VK_STRUCTURE_TYPE_SWAPCHAIN_COUNTER_CREATE_INFO_EXT:"
+  "#endif\n        case VK_STRUCTURE_TYPE_SWAPCHAIN_COUNTER_CREATE_INFO_EXT:"
+  FI_SWAPCHAIN "${FI_SWAPCHAIN}")
+string(REPLACE
+  "        case VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT:"
+  "#if defined(VK_USE_PLATFORM_WIN32_KHR)\n        case VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT:"
+  FI_SWAPCHAIN "${FI_SWAPCHAIN}")
+string(REPLACE
+  "        case VK_STRUCTURE_TYPE_SWAPCHAIN_DISPLAY_NATIVE_HDR_CREATE_INFO_AMD:"
+  "#endif\n        case VK_STRUCTURE_TYPE_SWAPCHAIN_DISPLAY_NATIVE_HDR_CREATE_INFO_AMD:"
+  FI_SWAPCHAIN "${FI_SWAPCHAIN}")
+# void* to a function pointer needs reinterpret_cast; MSVC accepts static_cast.
+string(REPLACE "static_cast<FfxWaitCallbackFunc>" "reinterpret_cast<FfxWaitCallbackFunc>"
+  FI_SWAPCHAIN "${FI_SWAPCHAIN}")
+file(WRITE ${SDK_COPY}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK.cpp "${FI_SWAPCHAIN}")
+
 # FG provider: same MSVC literal problem as the upscaler provider.
 file(READ ${SDK_COPY}/framegeneration/fsr3/internal/ffx_provider_fsr3framegeneration.cpp FG_PROVIDER)
 string(REGEX REPLACE "0x[0-9A-Fa-f]+'[0-9A-Fa-f]+ui64" "0xF3A3F1A9ULL" FG_PROVIDER "${FG_PROVIDER}")
