@@ -1,4 +1,4 @@
-From f6607b6909677f4a1f1bd3a045a0371fa1cb635d Mon Sep 17 00:00:00 2001
+From 852b4219aa14b05342d310bcf309b0acac0926b4 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 424 +++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 431 ++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2850 insertions(+), 11 deletions(-)
+ 21 files changed, 2857 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2414,10 +2414,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..5c8bbddc
+index 00000000..1b1a2eff
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,424 @@
+@@ -0,0 +1,431 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2588,7 +2588,11 @@ index 00000000..5c8bbddc
 +	// Symbols (Build/kyty-dbg, RelWithDebInfo + -g) show the crash is not in this
 +	// module at all: it lands in FaultCost::Measure's page write during Kyty's
 +	// startup benchmark. The stock presenter stays until that is understood.
-+	FSRFG_LOG("FSR-FG: startup benchmark faults with the wrapper; stock presenter\n");
++	// The wrapper gets as far as its non-interpolated present path (interp=0, no
++	// frame-generation callback or command list) and faults in its blit/compose of
++	// the replacement buffer onto the real swapchain images. That path runs even
++	// without interpolation, so the wrapper is not usable here without porting it.
++	FSRFG_LOG("FSR-FG: provider compose path faults; using the stock presenter\n");
 +	return false;
 +
 +	auto& state = Get();
@@ -2631,10 +2635,13 @@ index 00000000..5c8bbddc
 +	desc.swapchain        = &wrapped;
 +	desc.allocator        = nullptr;
 +	desc.createInfo       = fg_info;
-+	desc.gameQueue        = {game_queue, game_queue_family, nullptr};
-+	desc.asyncComputeQueue = {async_queue, queue_family, nullptr};
-+	desc.presentQueue     = {present_queue, queue_family, nullptr};
-+	desc.imageAcquireQueue = {acquire_queue, queue_family, nullptr};
++	// All four FFX queues from one family: mixing families forces FFX's
++	// queue-ownership-transfer path, which needs release/acquire barriers this
++	// runtime does not set up.
++	desc.gameQueue         = {async_queue, queue_family, nullptr};
++	desc.asyncComputeQueue = {present_queue, queue_family, nullptr};
++	desc.presentQueue      = {acquire_queue, queue_family, nullptr};
++	desc.imageAcquireQueue = {game_queue, game_queue_family, nullptr};
 +
 +	// State the composition mode instead of leaving it at NOT_FORCED: with the
 +	// game queue it is a single well-defined path through FFX's presenter, and the
