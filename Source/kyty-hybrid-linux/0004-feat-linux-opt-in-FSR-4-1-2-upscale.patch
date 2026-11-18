@@ -1,4 +1,4 @@
-From 73a81366553c0beabf8c8184c8608759e2b9f615 Mon Sep 17 00:00:00 2001
+From e8f8ea593052ced9a84c5da682aaa48bdcac175b Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -17,15 +17,15 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
- src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 562 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 529 ++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 544 +++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  65 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2964 insertions(+), 12 deletions(-)
+ 21 files changed, 2978 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -1822,10 +1822,10 @@ index 3b140f69..fd151eff 100644
  }
 diff --git a/src/graphics/host_gpu/renderer/fsr4.cpp b/src/graphics/host_gpu/renderer/fsr4.cpp
 new file mode 100644
-index 00000000..cd46f6cc
+index 00000000..0eda03d0
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsr4.cpp
-@@ -0,0 +1,563 @@
+@@ -0,0 +1,562 @@
 +// Native FSR 4.1.2 through the FidelityFX SDK Vulkan provider.
 +//
 +// The provider is an optional, externally built GPL-3.0 library (the local
@@ -2342,10 +2342,9 @@ index 00000000..cd46f6cc
 +	if (const auto now = std::chrono::steady_clock::now();
 +	    now - rate_start >= std::chrono::seconds(1)) {
 +		const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - rate_start).count();
-+		std::printf("FSR4: dispatched %u time(s) in %lld ms (frame=%u %ux%u -> %ux%u color=0x%llx/0x%llx)\n",
++		std::printf("FSR4: dispatched %u time(s) in %lld ms (frame=%u %ux%u -> %ux%u fg_presented=%llu)\n",
 +		            dispatched, static_cast<long long>(elapsed), frame, in_w, in_h, out_w, out_h,
-+		            static_cast<unsigned long long>(color.info.data.address),
-+		            static_cast<unsigned long long>(color.info.data.size));
++		            static_cast<unsigned long long>(FsrFg::PresentedCount()));
 +		std::fflush(stdout);
 +		dispatched = 0;
 +		rate_start = now;
@@ -2414,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..ddfa2df5
+index 00000000..741f0044
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,529 @@
+@@ -0,0 +1,544 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2757,7 +2756,7 @@ index 00000000..ddfa2df5
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	configure.frameGenerationEnabled = false;   // no dispatch yet: present without interpolation
++	configure.frameGenerationEnabled = true;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
 +	                                    static_cast<int32_t>(create_info.imageExtent.width),
@@ -2856,10 +2855,24 @@ index 00000000..ddfa2df5
 +
 +// TEXTURE_2D with a full mip chain; FFX only uses these for the dispatch's
 +// present-colour, depth and motion-vector inputs.
++// FFX indexes resources by its own surface-format enum, not by VkFormat; passing
++// the Vulkan value makes the provider reject the dispatch.
++uint32_t ToFfxFormat(VkFormat format) {
++	switch (format) {
++		case VK_FORMAT_B8G8R8A8_UNORM: return FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM;
++		case VK_FORMAT_R8G8B8A8_UNORM: return FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
++		case VK_FORMAT_R16G16B16A16_SFLOAT: return FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
++		case VK_FORMAT_R32G32B32A32_SFLOAT: return FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT;
++		case VK_FORMAT_R32G32_SFLOAT: return FFX_API_SURFACE_FORMAT_R32G32_FLOAT;
++		case VK_FORMAT_D32_SFLOAT: return FFX_API_SURFACE_FORMAT_R32_FLOAT;
++		default: return FFX_API_SURFACE_FORMAT_UNKNOWN;
++	}
++}
++
 +FfxApiResourceDescription Describe(VkFormat format, uint32_t width, uint32_t height) {
 +	FfxApiResourceDescription description {};
-+	description.type     = 1;   // FFX_API_RESOURCE_TYPE_TEXTURE2D
-+	description.format   = static_cast<uint32_t>(format);
++	description.type     = FFX_API_RESOURCE_TYPE_TEXTURE2D;
++	description.format   = ToFfxFormat(format);
 +	description.width    = width;
 +	description.height   = height;
 +	description.depth    = 1;
@@ -2910,11 +2923,12 @@ index 00000000..ddfa2df5
 +	using DispatchFn = ffxReturnCode_t (*)(ffxContext*, ffxDispatchDescHeader*);
 +	const auto dispatch_fn = reinterpret_cast<DispatchFn>(state.dispatch);
 +	const auto result = dispatch_fn(&state.context, reinterpret_cast<ffxDispatchDescHeader*>(&dispatch));
++	static int dispatch_logs = 0;
++	if (dispatch_logs++ < 3) {
++		FSRFG_LOG("FSR-FG: ffxDispatch result=%d frameID=%llu\n", static_cast<int>(result),
++		          (unsigned long long)dispatch.frameID);
++	}
 +	if (result != FFX_API_RETURN_OK) {
-+		static int logs = 0;
-+		if (logs++ < 3) {
-+			FSRFG_LOG("FSR-FG: ffxDispatch failed code=%d\n", static_cast<int>(result));
-+		}
 +		return false;
 +	}
 +	(void)command_buffer;
