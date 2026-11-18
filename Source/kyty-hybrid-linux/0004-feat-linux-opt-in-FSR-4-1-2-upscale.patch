@@ -1,4 +1,4 @@
-From 1e92a5343e37590dd2066022629961b71af3485f Mon Sep 17 00:00:00 2001
+From 348b89c91a197912779999fda0e4dc606e03dc38 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -6,7 +6,7 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
 ---
  CMakeLists.txt                                |   1 +
  src/fsr4/include/ffx_api.h                    | 213 +++++++
- src/fsr4/include/ffx_api_types.h              | 257 +++++++++
+ src/fsr4/include/ffx_api_types.h              | 257 ++++++++
  src/fsr4/include/ffx_framegeneration.h        | 299 ++++++++++
  .../include/ffx_framegeneration_api_types.h   |  72 +++
  src/fsr4/include/ffx_upscale.h                | 230 ++++++++
@@ -17,15 +17,15 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
- src/graphics/host_gpu/renderer/fsr4.cpp       | 538 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 552 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 355 ++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 385 ++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2756 insertions(+), 11 deletions(-)
+ 21 files changed, 2800 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -1822,10 +1822,10 @@ index 3b140f69..fd151eff 100644
  }
 diff --git a/src/graphics/host_gpu/renderer/fsr4.cpp b/src/graphics/host_gpu/renderer/fsr4.cpp
 new file mode 100644
-index 00000000..7c7a31da
+index 00000000..1217fe16
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsr4.cpp
-@@ -0,0 +1,538 @@
+@@ -0,0 +1,552 @@
 +// Native FSR 4.1.2 through the FidelityFX SDK Vulkan provider.
 +//
 +// The provider is an optional, externally built GPL-3.0 library (the local
@@ -1835,6 +1835,7 @@ index 00000000..7c7a31da
 +// SPDX-License-Identifier: GPL-2.0
 +
 +#include "graphics/host_gpu/renderer/fsr4.h"
++#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include "graphics/host_gpu/renderer/dlss.h"
 +#include "graphics/host_gpu/renderer/image/image.h"
@@ -2356,6 +2357,19 @@ index 00000000..7c7a31da
 +	out.NoteContentWrite();
 +	cache.CommitGpuWrite(out);
 +	s.last_dispatch_frame = frame;
++
++	// ASTROHYBRID_FSR_FG=1 (fsrFg.h): the upscaled output is what frame generation
++	// interpolates from, and this is the one place that has colour, depth and motion
++	// vectors together.
++	if (FsrFg::Active()) {
++		FsrFg::DispatchFrame(VK_NULL_HANDLE,
++		                     static_cast<VkImage>(out.backing.image),
++		                     static_cast<VkFormat>(out.backing.format),
++		                     static_cast<VkImage>(depth.backing.image),
++		                     static_cast<VkFormat>(depth.backing.format),
++		                     static_cast<VkImage>(mv.backing.image),
++		                     static_cast<VkFormat>(mv.backing.format), out_w, out_h);
++	}
 +	s.last_in_w           = in_w;
 +	s.last_in_h           = in_h;
 +	return true;
@@ -2389,10 +2403,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..d13e6ba7
+index 00000000..65f60eea
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,385 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2451,6 +2465,11 @@ index 00000000..d13e6ba7
 +	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 +	SwapchainFns  fns {};
 +	uint64_t      frame_id = 0;
++	VkImage       outputs[4] = {};
++	uint32_t      output_count = 0;
++	VkImage       present_color = VK_NULL_HANDLE;
++	uint32_t      extent_w = 0;
++	uint32_t      extent_h = 0;
 +	void*         dispatch = nullptr;
 +};
 +
@@ -2537,8 +2556,7 @@ index 00000000..d13e6ba7
 +	// a wrapped swapchain whose first present has no interpolation state faults.
 +	// Declining here keeps the stock presenter, which is why ASTROHYBRID_FSR_FG=1
 +	// is a no-op rather than a crash.
-+	FSRFG_LOG("FSR-FG: per-frame dispatch is not implemented; using the stock presenter\n");
-+	return false;
++
 +
 +	auto& state = Get();
 +
@@ -2608,6 +2626,30 @@ index 00000000..d13e6ba7
 +	state.fns.present     = reinterpret_cast<PFN_vkQueuePresentKHR>(functions.pOutQueuePresentKHR);
 +	state.fns.presented_count = reinterpret_cast<uint64_t (*)(VkSwapchainKHR)>(functions.pOutGetLastPresentCountFFXAPI);
 +	FSRFG_LOG("FSR-FG: wrapped handle=%p\n", (void*)wrapped);
++	// FFX's wrapper faults on its first acquire even with the dispatch wired, so
++	// the swapchain is not wrapped: the stock presenter stays in place and the
++	// option is a no-op that says why.
++	FSRFG_LOG("FSR-FG: the provider faults on first acquire; using the stock presenter\n");
++	return false;
++
++	// The dispatch's outputs are the wrapper's own images, not the game's.
++	{
++		uint32_t count = 0;
++		if (state.fns.get_images != nullptr &&
++		    state.fns.get_images(device, wrapped, &count, nullptr) == VK_SUCCESS && count > 0) {
++			VkImage images[4] {};
++			const uint32_t wanted = count < 4 ? count : 4;
++			if (state.fns.get_images(device, wrapped, &count, images) == VK_SUCCESS) {
++				for (uint32_t index = 0; index < wanted; ++index) {
++					state.outputs[index] = images[index];
++				}
++				state.output_count = wanted;
++			}
++		}
++	}
++	state.extent_w = create_info.imageExtent.width;
++	state.extent_h = create_info.imageExtent.height;
++
 +	out_swapchain    = wrapped;
 +	state.swapchain  = wrapped;
 +	state.active     = true;
@@ -2706,7 +2748,9 @@ index 00000000..d13e6ba7
 +	dispatch.generationRect = {0, 0, static_cast<int32_t>(width), static_cast<int32_t>(height)};
 +
 +	dispatch.presentColor = ffxApiGetResourceVK(color, Describe(color_format, width, height), 0);
-+	dispatch.outputs[0]   = ffxApiGetResourceVK(nullptr, Describe(color_format, width, height), 0);
++	// The provider presents into its own images; hand it the first one it gave us.
++	const VkImage output = state.output_count > 0 ? state.outputs[0] : VK_NULL_HANDLE;
++	dispatch.outputs[0]   = ffxApiGetResourceVK(output, Describe(color_format, width, height), 0);
 +
 +	using DispatchFn = ffxReturnCode_t (*)(ffxContext*, ffxDispatchDescHeader*);
 +	const auto dispatch_fn = reinterpret_cast<DispatchFn>(state.dispatch);
