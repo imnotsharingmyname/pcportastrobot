@@ -1,4 +1,4 @@
-From cb2fcbc332a9bf9b9ede7a4637a3e3dadfe26c19 Mon Sep 17 00:00:00 2001
+From 50b52e698aa6aba304099b075bdeb5e443f1e357 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 562 +++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 669 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 672 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  71 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      | 104 ++-
- 21 files changed, 3121 insertions(+), 12 deletions(-)
+ 21 files changed, 3124 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2413,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..c1ba56a4
+index 00000000..2f30117d
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,669 @@
+@@ -0,0 +1,672 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2800,11 +2800,14 @@ index 00000000..c1ba56a4
 +	// that takes the whole desktop down on this machine.
 +	// Generation is off. The callback path was exercised on 2026-11-19 and the
 +	// device was still lost, so it is not exposed: a GPU hang resets the desktop.
++	// Generation is off. Tested again on 2026-11-19 with the corrected backbuffer
++	// format: still ErrorDeviceLost after the first present, so it is not exposed.
 +	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
-+	configure.generationRect         = {0, 0,
-+	                                    static_cast<int32_t>(create_info.imageExtent.width),
-+	                                    static_cast<int32_t>(create_info.imageExtent.height)};
++	// The provider sets interpolationRectSize and colorRectSize from displaySize
++	// (3840x2160), so a generationRect taken from the 1080p swapchain extent
++	// describes a smaller area than the passes compute over.
++	configure.generationRect         = {0, 0, 3840, 2160};
 +	configure.frameID                = 0;
 +
 +	using ConfigureFn = ffxReturnCode_t (*)(ffxContext*, ffxConfigureDescHeader*);
