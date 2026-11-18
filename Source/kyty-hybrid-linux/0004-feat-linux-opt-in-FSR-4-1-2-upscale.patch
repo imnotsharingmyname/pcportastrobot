@@ -1,4 +1,4 @@
-From f4acb55303f3cd838ac7446f5ea3e97915cdc12d Mon Sep 17 00:00:00 2001
+From 251b283b525a602b1ca6649f108bea214f700f9b Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 562 +++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 591 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 594 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  71 +++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 3031 insertions(+), 12 deletions(-)
+ 21 files changed, 3034 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2413,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..a58011c6
+index 00000000..794e91fe
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,591 @@
+@@ -0,0 +1,594 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2728,8 +2728,11 @@ index 00000000..a58011c6
 +		ffxCreateContextDescFrameGeneration generation {};
 +		generation.header.type   = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
 +		generation.header.pNext  = &backend.header;
-+		generation.displaySize   = {create_info.imageExtent.width, create_info.imageExtent.height};
-+		generation.maxRenderSize = {create_info.imageExtent.width, create_info.imageExtent.height};
++		// The colour handed to frame generation is the upscaled output (3840x2160),
++		// not the 1080p swapchain extent, and FFX rejects a colour larger than the
++		// context it was created for.
++		generation.displaySize   = {3840, 2160};
++		generation.maxRenderSize = {3840, 2160};
 +		generation.backBufferFormat = FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM;
 +
 +		using CreateFn2 = ffxReturnCode_t (*)(ffxContext*, ffxCreateContextDescHeader*,
@@ -2757,8 +2760,8 @@ index 00000000..a58011c6
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	// Generation is off: its optical-flow dispatch rejects the colour resource this
-+	// runtime offers it (FFX_ERROR_INVALID_ARGUMENT), so only presentation runs.
++	// Generation is off: its optical flow now runs, but frame interpolation crashes
++	// inside FFX on the resources this runtime hands it. Presentation is stable.
 +	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
