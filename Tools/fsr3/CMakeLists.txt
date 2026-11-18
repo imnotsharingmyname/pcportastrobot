@@ -111,6 +111,16 @@ string(REPLACE "static_cast<FfxWaitCallbackFunc>" "reinterpret_cast<FfxWaitCallb
   FI_SWAPCHAIN "${FI_SWAPCHAIN}")
 file(WRITE ${SDK_COPY}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK.cpp "${FI_SWAPCHAIN}")
 
+# The debug-pacing entry point is declared without C linkage in the swapchain
+# header but defined with FFX_API (= extern "C"), so the call site looks for a
+# mangled symbol that does not exist. Drop the linkage specifier on the
+# definition so both sides agree on the C++ name.
+file(READ ${SDK_COPY}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK_DebugPacing.cpp DEBUG_PACING)
+string(REPLACE "FFX_API FfxErrorCode ffxFrameInterpolationDebugPacing("
+               "FfxErrorCode ffxFrameInterpolationDebugPacing("
+               DEBUG_PACING "${DEBUG_PACING}")
+file(WRITE ${SDK_COPY}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK_DebugPacing.cpp "${DEBUG_PACING}")
+
 # FG provider: same MSVC literal problem as the upscaler provider.
 file(READ ${SDK_COPY}/framegeneration/fsr3/internal/ffx_provider_fsr3framegeneration.cpp FG_PROVIDER)
 string(REGEX REPLACE "0x[0-9A-Fa-f]+'[0-9A-Fa-f]+ui64" "0xF3A3F1A9ULL" FG_PROVIDER "${FG_PROVIDER}")
@@ -197,6 +207,7 @@ add_library(amd_fidelityfx_framegeneration_vk SHARED
   ${KIT}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK.cpp
   ${KIT}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK_Helpers.cpp
   ${KIT}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK_UiComposition.cpp
+  ${KIT}/framegeneration/fsr3/vk/FrameInterpolationSwapchainVK_DebugPacing.cpp
   ${FG_TABLES}
   src/provider_list_fg.cpp
 )
