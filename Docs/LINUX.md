@@ -115,7 +115,31 @@ pw-link -l | grep -A2 AstroBot
 `ASTROHYBRID_FPS_LOG=1` prints the window's per-second `frame=… fps=…` line to stderr, which is useful
 for finding frame-rate drops in a long run.
 
-## FSR 4 (optional, off by default)
+## FSR upscaling (optional, off by default)
+
+Two upscalers are available, both opt-in. They are alternatives: pick one.
+
+| Option | Switch | State |
+|---|---|---|
+| FSR 4.1.2 | `ASTROHYBRID_FSR=fsr4` (or legacy `ASTROHYBRID_FSR4=1`) | works; verified in game |
+| FSR 3.1 | `ASTROHYBRID_FSR=fsr3` | works; verified in game |
+
+FSR 3.1 is the lighter option: plain fp32 compute, no cooperative-matrix or
+float8 requirements, so it runs on devices FSR 4.1.2 excludes. Build it with
+`FSR3_SDK_DIR=... DXC=... Tools/fsr3/build.sh`, which compiles all 64 shader
+permutations per pass and stages `Build/fsr3/libamd_fidelityfx_fsr3_vk.so`.
+The launcher exposes both under **Graphics -> Upscaling** when they are staged.
+
+### FSR 3.1 frame generation (not working)
+
+`libamd_fidelityfx_framegeneration_vk.so` builds and the runtime wraps the
+swapchain with it, but the first present faults and no frames are generated.
+The remaining work is the per-frame `ffxDispatch` (colour, depth, motion vectors,
+frameID) at `renderDraw.cpp` after the upscale, plus UI registration and pacing.
+It is off unless `ASTROHYBRID_FSR_FG=1`, and the stock presenter is used
+whenever it is not.
+
+## FSR 4.1.2 details
 
 The Linux port can replace the game's final temporal upscale with FSR 4.1.2 on
 RADV. It is opt-in and off by default.
