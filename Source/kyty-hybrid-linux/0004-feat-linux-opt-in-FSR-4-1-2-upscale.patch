@@ -1,4 +1,4 @@
-From 852b4219aa14b05342d310bcf309b0acac0926b4 Mon Sep 17 00:00:00 2001
+From 5499f5138fa06a6ee25fde4e2b3102faa32dabf2 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 431 ++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 468 +++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2857 insertions(+), 11 deletions(-)
+ 21 files changed, 2894 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2414,10 +2414,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..1b1a2eff
+index 00000000..ee0a3b4a
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,468 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2482,6 +2482,7 @@ index 00000000..1b1a2eff
 +	uint32_t      extent_w = 0;
 +	uint32_t      extent_h = 0;
 +	void*         dispatch = nullptr;
++	void*         configure = nullptr;
 +};
 +
 +State& Get() {
@@ -2537,6 +2538,7 @@ index 00000000..1b1a2eff
 +
 +	state.create   = dlsym(state.module, "ffxCreateContext");
 +	state.dispatch = dlsym(state.module, "ffxDispatch");
++	state.configure = dlsym(state.module, "ffxConfigure");
 +	state.query   = dlsym(state.module, "ffxQuery");
 +	state.destroy = dlsym(state.module, "ffxDestroyContext");
 +	if (state.create == nullptr || state.query == nullptr || state.destroy == nullptr) {
@@ -2592,7 +2594,13 @@ index 00000000..1b1a2eff
 +	// frame-generation callback or command list) and faults in its blit/compose of
 +	// the replacement buffer onto the real swapchain images. That path runs even
 +	// without interpolation, so the wrapper is not usable here without porting it.
-+	FSRFG_LOG("FSR-FG: provider compose path faults; using the stock presenter\n");
++	// FFX separates presentation from generation: the swapchain context has no
++	// presentCallback of its own, and its non-interpolated path asserts one exists.
++	// The callback is set through a second frame-generation context (or a raw
++	// swapchain configure key), which this module does not create yet, so the
++	// wrapper cannot present. The stock presenter stays.
++	FSRFG_LOG("FSR-FG: needs the frame-generation context for a present callback; "
++	          "using the stock presenter\n");
 +	return false;
 +
 +	auto& state = Get();
@@ -2677,6 +2685,35 @@ index 00000000..1b1a2eff
 +	if (query(&state.context, reinterpret_cast<ffxQueryDescHeader*>(&functions)) != FFX_API_RETURN_OK) {
 +		FSRFG_LOG("FSR-FG: cannot query the swapchain replacement functions\n");
 +		return false;
++	}
++
++	// The wrapper's present path asserts presentCallback != nullptr and calls it to
++	// finalise the frame, so it must be configured before the swapchain is used.
++	auto present_callback = [](ffxCallbackDescFrameGenerationPresent* params, void*) -> ffxReturnCode_t {
++		(void)params;
++		return FFX_API_RETURN_OK;
++	};
++
++	ffxConfigureDescFrameGeneration configure {};
++	configure.header.type            = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
++	configure.swapChain              = reinterpret_cast<void*>(wrapped);
++	configure.presentCallback        = present_callback;
++	configure.presentCallbackUserContext = nullptr;
++	configure.frameGenerationCallback = nullptr;
++	configure.frameGenerationCallbackUserContext = nullptr;
++	configure.frameGenerationEnabled = false;   // no dispatch yet: present without interpolation
++	configure.allowAsyncWorkloads    = false;
++	configure.generationRect         = {0, 0,
++	                                    static_cast<int32_t>(create_info.imageExtent.width),
++	                                    static_cast<int32_t>(create_info.imageExtent.height)};
++	configure.frameID                = 0;
++
++	using ConfigureFn = ffxReturnCode_t (*)(ffxContext*, ffxConfigureDescHeader*);
++	const auto configure_fn = reinterpret_cast<ConfigureFn>(state.configure);
++	if (configure_fn != nullptr) {
++		const auto configured = configure_fn(&state.context,
++		                                     reinterpret_cast<ffxConfigureDescHeader*>(&configure));
++		FSRFG_LOG("FSR-FG: ffxConfigure result=%d\n", static_cast<int>(configured));
 +	}
 +
 +	state.fns.create      = reinterpret_cast<PFN_vkCreateSwapchainKHR>(functions.pOutCreateSwapchainFFXAPI);
