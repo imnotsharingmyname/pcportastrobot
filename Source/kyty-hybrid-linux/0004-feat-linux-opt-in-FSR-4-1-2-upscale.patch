@@ -1,14 +1,14 @@
-From e4182e13dafd4b418bf501544f3f54d6e3b0af01 Mon Sep 17 00:00:00 2001
+From 6b245c6b39125116ac2964b478d66bbb2bf818fd Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
 
 ---
  CMakeLists.txt                                |   1 +
- src/fsr4/include/ffx_api.h                    | 213 +++++++
- src/fsr4/include/ffx_api_types.h              | 257 ++++++++
+ src/fsr4/include/ffx_api.h                    | 213 ++++++
+ src/fsr4/include/ffx_api_types.h              | 257 +++++++
  src/fsr4/include/ffx_framegeneration.h        | 299 +++++++++
- .../include/ffx_framegeneration_api_types.h   |  72 +++
+ .../include/ffx_framegeneration_api_types.h   |  72 ++
  src/fsr4/include/ffx_upscale.h                | 230 +++++++
  .../include/vk/ffx_api_framegeneration_vk.h   | 150 +++++
  src/fsr4/include/vk/ffx_api_vk.h              | 308 +++++++++
@@ -17,15 +17,15 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
- src/graphics/host_gpu/renderer/fsr4.cpp       | 562 +++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 562 ++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 594 ++++++++++++++++++
- src/graphics/host_gpu/renderer/fsrFg.h        |  71 +++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 632 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.h        |  71 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 3034 insertions(+), 12 deletions(-)
+ 21 files changed, 3072 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2413,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..49d06afa
+index 00000000..b6e2a64b
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,594 @@
+@@ -0,0 +1,632 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2486,7 +2486,10 @@ index 00000000..49d06afa
 +	uint32_t      extent_h = 0;
 +	void*         dispatch = nullptr;
 +	void*         configure = nullptr;
-+	void*         command_list = nullptr;
++	void*              command_list = nullptr;
++	FfxApiResource*    interp_texture = nullptr;
++	VkQueue       game_queue = VK_NULL_HANDLE;
++	PFN_vkQueueSubmit submit = nullptr;
 +};
 +
 +State& Get() {
@@ -2760,8 +2763,9 @@ index 00000000..49d06afa
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	// Generation is off: optical flow runs and all 36 frame-interpolation pipelines
-+	// build, but the interpolation dispatch crashes while recording its passes.
++	// Generation is off: the dispatch now returns 0, but the GPU is lost afterwards
++	// (ErrorDeviceLost), so its recorded work is not compatible with this runtime's
++	// resource state yet.
 +	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
@@ -2796,6 +2800,22 @@ index 00000000..49d06afa
 +			}
 +		}
 +	}
++	state.game_queue = game_queue;
++	if (state.submit == nullptr) {
++		static void* vulkan_loader = nullptr;
++		if (vulkan_loader == nullptr) {
++			vulkan_loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
++		}
++		if (vulkan_loader != nullptr) {
++			const auto get_device_proc = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
++			    dlsym(vulkan_loader, "vkGetDeviceProcAddr"));
++			if (get_device_proc != nullptr) {
++				state.submit = reinterpret_cast<PFN_vkQueueSubmit>(
++				    get_device_proc(device, "vkQueueSubmit"));
++			}
++		}
++	}
++
 +	state.extent_w = create_info.imageExtent.width;
 +	state.extent_h = create_info.imageExtent.height;
 +
@@ -2911,6 +2931,16 @@ index 00000000..49d06afa
 +	}
 +	state.command_list = command_list;
 +
++	// The provider's own interpolation target, which the generate dispatch must
++	// write into; our swapchain images are not what FFX composes from.
++	static FfxApiResource interpolation_texture {};
++	ffxQueryDescFrameGenerationSwapChainInterpolationTextureVK texture {};
++	texture.header.type = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_INTERPOLATIONTEXTURE_VK;
++	texture.pOutTexture = &interpolation_texture;
++	if (query(&state.context, reinterpret_cast<ffxQueryDescHeader*>(&texture)) == FFX_API_RETURN_OK) {
++		state.interp_texture = &interpolation_texture;
++	}
++
 +	ffxDispatchDescFrameGenerationPrepareV2 prepare {};
 +	prepare.header.type          = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
 +	prepare.frameID              = frame_id;
@@ -2965,8 +2995,12 @@ index 00000000..49d06afa
 +
 +	dispatch.presentColor = ffxApiGetResourceVK(color, Describe(color_format, width, height), 0);
 +	// The provider presents into its own images; hand it the first one it gave us.
-+	const VkImage output = state.output_count > 0 ? state.outputs[0] : VK_NULL_HANDLE;
-+	dispatch.outputs[0]   = ffxApiGetResourceVK(output, Describe(color_format, width, height), 0);
++	if (state.interp_texture != nullptr && state.interp_texture->resource != nullptr) {
++		dispatch.outputs[0] = *state.interp_texture;
++	} else {
++		const VkImage output = state.output_count > 0 ? state.outputs[0] : VK_NULL_HANDLE;
++		dispatch.outputs[0]   = ffxApiGetResourceVK(output, Describe(color_format, width, height), 0);
++	}
 +
 +	using DispatchFn = ffxReturnCode_t (*)(ffxContext*, ffxDispatchDescHeader*);
 +	const auto dispatch_fn = reinterpret_cast<DispatchFn>(state.dispatch);
@@ -2981,6 +3015,10 @@ index 00000000..49d06afa
 +	if (result != FFX_API_RETURN_OK) {
 +		return false;
 +	}
++
++	// The command list is not submitted here: a bare vkQueueSubmit of the provider's
++	// buffer bypasses Kyty's semaphore and fence ordering and loses the device. FFX's
++	// own present path executes the lists it recorded.
 +	(void)command_buffer;
 +	(void)depth;
 +	(void)motion;
