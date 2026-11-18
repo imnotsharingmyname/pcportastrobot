@@ -112,12 +112,19 @@ public partial class GraphicsView : UserControl, IPageRefresh
         // Upscaling: the Windows row is DLSS, which needs the NVIDIA NGX runtime. On
         // Linux the same slot carries FSR 4.1.2 when the provider has been staged.
         var fsr4Ready = _backend.Fsr4ProviderReady;
-        UpscaleBox.ItemsSource = fsr4Ready
-            ? new[] { "Game's own temporal upscale (default)", "FSR 4.1.2 - FidelityFX (experimental)" }
-            : new[] { "Game's own temporal upscale (default)" };
-        UpscaleBox.SelectedIndex = _settings.Fsr4 && fsr4Ready ? 1 : 0;
-        UpscaleBox.IsEnabled = fsr4Ready;
-        UpscaleNote.Text = fsr4Ready
+        var fsr3Ready = _backend.Fsr3ProviderReady;
+        var options = new List<string> { "Game's own temporal upscale (default)" };
+        if (fsr3Ready) options.Add("FSR 3.1 - FidelityFX (experimental)");
+        if (fsr4Ready) options.Add("FSR 4.1.2 - FidelityFX (experimental)");
+        UpscaleBox.ItemsSource = options;
+        UpscaleBox.SelectedIndex = _settings.Fsr switch
+        {
+            "fsr3" when fsr3Ready => options.IndexOf("FSR 3.1 - FidelityFX (experimental)"),
+            "fsr4" when fsr4Ready => options.IndexOf("FSR 4.1.2 - FidelityFX (experimental)"),
+            _ => 0,
+        };
+        UpscaleBox.IsEnabled = fsr3Ready || fsr4Ready;
+        UpscaleNote.Text = (fsr3Ready || fsr4Ready)
             ? "FSR 4.1.2 replaces the game's final upscale with the FidelityFX provider. The game's dynamic resolution still picks the input size, so the gain depends on the scene."
             : "DLSS needs the NVIDIA NGX runtime, which is Windows-only. Run Tools/fsr4/build.sh to stage the FSR 4.1.2 provider and enable an upscaler here.";
 
@@ -242,7 +249,13 @@ public partial class GraphicsView : UserControl, IPageRefresh
         _settings.VSync = VsyncBox.IsChecked == true;
         _settings.LowLatency = LowLatencyBox.IsChecked == true && LowLatencyBox.IsEnabled;
         _settings.Lighting = RayTracingBox.SelectedIndex == 1 ? 1 : 0;
-        _settings.Fsr4 = UpscaleBox.IsEnabled && UpscaleBox.SelectedIndex == 1;
+        var chosen = UpscaleBox.IsEnabled && UpscaleBox.SelectedIndex > 0
+            ? UpscaleBox.SelectedItem as string
+            : null;
+        _settings.Fsr = chosen is null ? ""
+            : chosen.StartsWith("FSR 3.1") ? "fsr3"
+            : chosen.StartsWith("FSR 4.1.2") ? "fsr4"
+            : "";
         _settings.OverlayMode = OverlayBox.SelectedIndex >= 0 ? OverlayValues[OverlayBox.SelectedIndex] : "";
 
         RayTracingNote.Text = _settings.Lighting == 1

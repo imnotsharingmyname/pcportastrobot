@@ -71,7 +71,7 @@ public partial class HomeView : UserControl, IPageRefresh
             $"{_settings.Width} × {_settings.Height}   ·   " +
             $"{(_settings.Fullscreen ? "Fullscreen" : "Windowed")}   ·   " +
             $"VSync {(_settings.VSync ? "On" : "Off")}   ·   " +
-            $"{(_settings.Fsr4 ? "FSR 4" : "Upscale off")}   ·   " +
+            $"{(_settings.Fsr.Length == 0 ? "Upscale off" : _settings.Fsr.ToUpperInvariant())}   ·   " +
             $"{(_settings.FpsLimit > 0 ? $"{_settings.FpsLimit} FPS" : "No limit")}   ·   " +
             $"Audio {(_settings.DirectAudio ? "direct" : "default")}";
 

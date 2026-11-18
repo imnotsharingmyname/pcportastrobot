@@ -24,7 +24,8 @@ public sealed class AppSettings
     public bool GameSpeed { get; set; } = true;
     public int GameSpeedPercent { get; set; } = 100;
     public bool PadMotion { get; set; }
-    public bool Fsr4 { get; set; }
+    /// <summary>"", "fsr3" or "fsr4".</summary>
+    public string Fsr { get; set; } = "";
     public bool DirectAudio { get; set; } = true;
     public string AudioSink { get; set; } = "";
     public string ExtraEnv { get; set; } = "";
@@ -157,6 +158,10 @@ public sealed class Backend
     /// <summary>True when Tools/fsr4/build.sh staged the FidelityFX provider.</summary>
     public bool Fsr4ProviderReady => Directory.Exists(Path.Combine(HybridDirectory, "fsr4"));
 
+    /// <summary>True when the FSR 3.1 provider has been staged.</summary>
+    public bool Fsr3ProviderReady => File.Exists(
+        Path.Combine(HybridDirectory, "fsr3", "libamd_fidelityfx_fsr3_vk.so"));
+
     public bool GameRunning => _game is { HasExited: false };
 
     public async Task<ProcessResult> CheckAsync(string gamePath, Action<string>? onLine = null,
@@ -250,11 +255,14 @@ public sealed class Backend
                 arguments.Add(settings.GameSpeedPercent.ToString());
             }
         }
-        if (settings.Fsr4 && Fsr4ProviderReady)
+        var fsr = settings.Fsr;
+        if (fsr == "fsr3" && !Fsr3ProviderReady) fsr = "";
+        if (fsr == "fsr4" && !Fsr4ProviderReady) fsr = "";
+        if (fsr.Length != 0)
         {
             arguments.Add("--env");
-            arguments.Add("ASTROHYBRID_FSR4");
-            arguments.Add("1");
+            arguments.Add("ASTROHYBRID_FSR");
+            arguments.Add(fsr);
         }
         if (settings.PadMotion)
         {
