@@ -1,4 +1,4 @@
-From 963061855770a90658aa49cb7fa1c15ae3ac9422 Mon Sep 17 00:00:00 2001
+From 030b2a190ba7561f411ebd879f578bae2613662a Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 562 ++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 634 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 635 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  71 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
- .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 3074 insertions(+), 12 deletions(-)
+ .../presentation/window/vulkanWindow.cpp      | 104 ++-
+ 21 files changed, 3087 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2413,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..70efa9ba
+index 00000000..55d61310
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,634 @@
+@@ -0,0 +1,635 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2763,8 +2763,9 @@ index 00000000..70efa9ba
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	// Generation is off: the dispatch is accepted (result=0) with the resources now
-+	// carrying their real layouts, but the device is still lost afterwards.
++	// Generation is off. Its shaders need device features and its recorded work
++	// assumes resource/queue state this integration does not establish; running it
++	// hangs the GPU, so it is not exercised by default.
 +	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
@@ -3316,7 +3317,7 @@ index caa9055e..caad899e 100644
  	LowLatency::EndPresent(static_cast<VkSwapchainKHR>(m_handle), latency_id);
  	switch (result) {
 diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
-index 21165e69..7801f116 100644
+index 21165e69..650d622d 100644
 --- a/src/graphics/presentation/window/vulkanWindow.cpp
 +++ b/src/graphics/presentation/window/vulkanWindow.cpp
 @@ -33,6 +33,7 @@
@@ -3377,7 +3378,26 @@ index 21165e69..7801f116 100644
  	if (graphics.transfer_queue_family != static_cast<uint32_t>(-1)) {
  		auto& transfer            = queue_create_infos[queue_create_count++];
  		transfer.queueFamilyIndex = graphics.transfer_queue_family;
-@@ -1350,6 +1382,23 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+@@ -754,6 +786,18 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 	features11.pNext                = &depth_clip_control;
+ 	features11.shaderDrawParameters = VK_TRUE;
+ 
++	// FSR's compute shaders declare ComputeDerivativeGroupLinearKHR. The extension
++	// alone is not enough: the feature has to be enabled, or the pipelines are
++	// created against a capability the device does not have and it is lost when they
++	// run. Chained only when an FSR provider is selected.
++	vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR fsr_derivatives {};
++	if (Fsr4::Requested()) {
++		fsr_derivatives.computeDerivativeGroupQuads  = VK_TRUE;
++		fsr_derivatives.computeDerivativeGroupLinear = VK_TRUE;
++		fsr_derivatives.pNext                        = &depth_clip_control;
++		features11.pNext                             = &fsr_derivatives;
++	}
++
+ 	auto features12  = WindowContext::RequiredVulkan12Features();
+ 	features12.pNext = &features11;
+ 	// drawIndirectCount is set below, once the supported features are known.
+@@ -1350,6 +1394,23 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
  	     features13.robustImageAccess == VK_TRUE ? "true" : "false",
  	     robustness2_ext_enabled && robustness2.robustImageAccess2 == VK_TRUE ? "true" : "false");
  
@@ -3401,7 +3421,7 @@ index 21165e69..7801f116 100644
  	vk::DeviceCreateInfo create_info {};
  	vk::PhysicalDeviceMeshShaderFeaturesEXT mesh_features {};
  	mesh_features.pNext                 = &features13;
-@@ -1456,6 +1505,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+@@ -1456,6 +1517,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
  		present_id.pNext     = const_cast<void*>(create_info.pNext);
  		create_info.pNext    = &present_id;
  	}
@@ -3415,7 +3435,7 @@ index 21165e69..7801f116 100644
  	create_info.pQueueCreateInfos       = queue_create_infos.data();
  	create_info.queueCreateInfoCount    = queue_create_count;
  	create_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
-@@ -2200,6 +2256,20 @@ void WindowContext::CreateVulkan() {
+@@ -2200,6 +2268,20 @@ void WindowContext::CreateVulkan() {
  				}
  			}
  		}
@@ -3436,7 +3456,7 @@ index 21165e69..7801f116 100644
  		// ASTROHYBRID_LOW_LATENCY (lowLatency.h): VK_NV_low_latency2 with present IDs.
  		if (LowLatency::WantExtensions(
  		        HasExtension(available_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME),
-@@ -2248,6 +2318,26 @@ void WindowContext::CreateVulkan() {
+@@ -2248,6 +2330,26 @@ void WindowContext::CreateVulkan() {
  	// KYTY_CMD_GUARD command-buffer state hooks wrap both.
  	CommandRecorder::InstallGuardHooks(graphic_ctx.device);
  	graphic_ctx.device.getQueue(graphic_ctx.queue_family, 0, &graphic_ctx.queue);
