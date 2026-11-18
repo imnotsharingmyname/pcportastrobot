@@ -374,6 +374,10 @@ def main() -> int:
     work = out / "spv"
     work.mkdir(exist_ok=True)
 
+    # "all" is the default and the only safe value for a shipping build: the SDK
+    # indexes the indirection table with the key it derives from the context
+    # flags, and an unbuilt key is then read as a blob (garbage descriptor counts,
+    # rejected layouts). A subset is useful only for debugging.
     keys = list(range(64)) if args.keys == "all" else [int(v) for v in args.keys.split(",")]
     selected = args.kits.split(",") if args.kits else list(KITS)
 
