@@ -1,4 +1,4 @@
-From 6b245c6b39125116ac2964b478d66bbb2bf818fd Mon Sep 17 00:00:00 2001
+From 963061855770a90658aa49cb7fa1c15ae3ac9422 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 562 ++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 632 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 634 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  71 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 3072 insertions(+), 12 deletions(-)
+ 21 files changed, 3074 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2413,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..b6e2a64b
+index 00000000..70efa9ba
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,634 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2763,9 +2763,8 @@ index 00000000..b6e2a64b
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	// Generation is off: the dispatch now returns 0, but the GPU is lost afterwards
-+	// (ErrorDeviceLost), so its recorded work is not compatible with this runtime's
-+	// resource state yet.
++	// Generation is off: the dispatch is accepted (result=0) with the resources now
++	// carrying their real layouts, but the device is still lost afterwards.
 +	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
@@ -2955,8 +2954,10 @@ index 00000000..b6e2a64b
 +	prepare.cameraFar            = 1000.0f;
 +	prepare.cameraFovAngleVertical = 1.0472f;
 +	prepare.viewSpaceToMetersFactor = 1.0f;
-+	prepare.depth          = ffxApiGetResourceVK(depth, Describe(depth_format, width, height), 0);
-+	prepare.motionVectors  = ffxApiGetResourceVK(motion, Describe(motion_format, width, height), 0);
++	prepare.depth          = ffxApiGetResourceVK(depth, Describe(depth_format, width, height),
++	                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++	prepare.motionVectors  = ffxApiGetResourceVK(motion, Describe(motion_format, width, height),
++	                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 +
 +	using DispatchFn = ffxReturnCode_t (*)(ffxContext*, ffxDispatchDescHeader*);
 +	const auto dispatch_fn = reinterpret_cast<DispatchFn>(state.dispatch);
@@ -2993,7 +2994,8 @@ index 00000000..b6e2a64b
 +	dispatch.backbufferTransferFunction = 0;   // FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB
 +	dispatch.generationRect = {0, 0, static_cast<int32_t>(width), static_cast<int32_t>(height)};
 +
-+	dispatch.presentColor = ffxApiGetResourceVK(color, Describe(color_format, width, height), 0);
++	dispatch.presentColor = ffxApiGetResourceVK(color, Describe(color_format, width, height),
++	                                            VK_IMAGE_LAYOUT_GENERAL);
 +	// The provider presents into its own images; hand it the first one it gave us.
 +	if (state.interp_texture != nullptr && state.interp_texture->resource != nullptr) {
 +		dispatch.outputs[0] = *state.interp_texture;
