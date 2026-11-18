@@ -1,4 +1,4 @@
-From f99e9a0a63a80b51e93665a8dfd6d9792eaf5b8a Mon Sep 17 00:00:00 2001
+From a9ff8fd4a84fbd6632d90e58bfb037a45c8f7f6d Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -10,6 +10,7 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  src/fsr4/include/ffx_upscale.h                | 230 ++++++++
  src/fsr4/include/vk/ffx_api_vk.h              | 308 ++++++++++
  .../host_gpu/renderer/cache/textureCache.cpp  |  42 ++
+ .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 538 ++++++++++++++++++
@@ -18,9 +19,9 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  src/graphics/host_gpu/renderer/fsrFg.h        |  53 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
- .../presentation/window/swapchain.cpp         |  47 +-
+ .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  39 ++
- 16 files changed, 2045 insertions(+), 10 deletions(-)
+ 17 files changed, 2060 insertions(+), 10 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_upscale.h
@@ -1141,6 +1142,29 @@ index aa95affc..6652efc9 100644
  	ValidateImageDesc(desc);
  	if (desc.info.data.Empty()) {
  		std::scoped_lock lock {m_lock};
+diff --git a/src/graphics/host_gpu/renderer/commandRecorder.cpp b/src/graphics/host_gpu/renderer/commandRecorder.cpp
+index a441c6b8..a3a6cfbf 100644
+--- a/src/graphics/host_gpu/renderer/commandRecorder.cpp
++++ b/src/graphics/host_gpu/renderer/commandRecorder.cpp
+@@ -1,4 +1,5 @@
+ #include "graphics/host_gpu/renderer/commandRecorder.h"
++#include "graphics/host_gpu/renderer/fsrFg.h"
+ 
+ #include "common/assert.h"
+ #include "common/cpuPlacement.h"
+@@ -1377,6 +1378,12 @@ struct GuardQueueScope {
+ 
+ VkResult VKAPI_PTR GuardPresent(VkQueue queue, const VkPresentInfoKHR* info) {
+ 	GuardQueueScope scope(queue, "vkQueuePresentKHR");
++	// ASTROHYBRID_FSR_FG=1 (fsrFg.h): frame generation replaces presentation, so
++	// the wrapped swapchain must see the present. This hook is the live path --
++	// the Swapchain class in presentation/window is not used at startup.
++	if (FsrFg::Active()) {
++		return FsrFg::Present(queue, *info);
++	}
+ 	return g_guard_real_present(queue, info);
+ }
+ 
 diff --git a/src/graphics/host_gpu/renderer/dlss.cpp b/src/graphics/host_gpu/renderer/dlss.cpp
 index 8e956181..b8e5d951 100644
 --- a/src/graphics/host_gpu/renderer/dlss.cpp
@@ -2167,7 +2191,7 @@ index 25b4d339..74b407b9 100644
  			m_run_active       = false;
  			m_run_targets_kept = false;
 diff --git a/src/graphics/presentation/window/swapchain.cpp b/src/graphics/presentation/window/swapchain.cpp
-index caa9055e..09531115 100644
+index caa9055e..3f03d903 100644
 --- a/src/graphics/presentation/window/swapchain.cpp
 +++ b/src/graphics/presentation/window/swapchain.cpp
 @@ -1,4 +1,5 @@
@@ -2176,7 +2200,43 @@ index caa9055e..09531115 100644
  #include "common/common.h"
  #include "common/debugCounters.h"
  #include "common/emulatorConfig.h"
-@@ -526,14 +527,37 @@ void Swapchain::Create() {
+@@ -425,6 +426,8 @@ vk::SurfaceFormatKHR Swapchain::SelectFormat() {
+ /// Sets m_surface_extent_zero when the early return is due to a zero surface/drawable extent
+ /// and WindowContext::minimized is false, so NeedsResize() can poll instead of spinning.
+ void Swapchain::Create() {
++	LOGF("Swapchain::Create(): enter fg_requested=%d fg_active=%d\n", int(FsrFg::Requested()),
++	     int(FsrFg::Active()));
+ 	auto& graphics = m_window.graphic_ctx;
+ 	EXIT_IF(graphics.device == nullptr);
+ 	EXIT_IF(m_window.surface == nullptr);
+@@ -445,6 +448,8 @@ void Swapchain::Create() {
+ 		// Window is genuinely minimized; m_surface_extent_zero is not the cause.
+ 		m_minimized           = true;
+ 		m_surface_extent_zero = false;
++		LOGF("Swapchain::Create(): early return (minimized=%d extent=%ux%u)\n",
++		     int(m_minimized), m_window_extent.width, m_window_extent.height);
+ 		return;
+ 	}
+ 
+@@ -459,6 +464,8 @@ void Swapchain::Create() {
+ 		     "waiting for surface to become ready\n");
+ 		m_minimized           = true;
+ 		m_surface_extent_zero = true;
++		LOGF("Swapchain::Create(): early return (minimized=%d extent=%ux%u)\n",
++		     int(m_minimized), m_window_extent.width, m_window_extent.height);
+ 		return;
+ 	}
+ 
+@@ -476,6 +483,8 @@ void Swapchain::Create() {
+ 		     "waiting for surface to become ready\n");
+ 		m_minimized           = true;
+ 		m_surface_extent_zero = true;
++		LOGF("Swapchain::Create(): early return (minimized=%d extent=%ux%u)\n",
++		     int(m_minimized), m_window_extent.width, m_window_extent.height);
+ 		return;
+ 	}
+ 
+@@ -526,14 +535,37 @@ void Swapchain::Create() {
  	}
  	create_info.clipped = VK_TRUE;
  	create_info.pNext   = LowLatency::SwapchainCreateNext(create_info.pNext);
@@ -2216,7 +2276,7 @@ index caa9055e..09531115 100644
  		    return graphics.device.getSwapchainImagesKHR(m_handle, count, images);
  	    });
  	EXIT_NOT_IMPLEMENTED(m_images.empty());
-@@ -712,9 +736,16 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
+@@ -712,9 +744,16 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
  		m_frame_ticks[m_frame_index] = 0;
  	}
  	m_image_index     = static_cast<uint32_t>(-1);
@@ -2236,7 +2296,7 @@ index caa9055e..09531115 100644
  	switch (result) {
  		case vk::Result::eSuccess: break;
  		case vk::Result::eSuboptimalKHR:
-@@ -1214,7 +1245,11 @@ Swapchain::Status Swapchain::Present() {
+@@ -1214,7 +1253,11 @@ Swapchain::Status Swapchain::Present() {
  		// texture copies: the present never waits for them, nor for a signal not yet submitted.
  		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
  		m_window.graphic_ctx.submission_queue.DrainReadyForPresentLocked();
