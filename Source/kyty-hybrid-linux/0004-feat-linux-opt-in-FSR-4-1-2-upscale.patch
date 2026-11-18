@@ -1,4 +1,4 @@
-From e8f8ea593052ced9a84c5da682aaa48bdcac175b Mon Sep 17 00:00:00 2001
+From b0fba953a26b6668f53864d92095d7a53845a976 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -7,25 +7,25 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  CMakeLists.txt                                |   1 +
  src/fsr4/include/ffx_api.h                    | 213 +++++++
  src/fsr4/include/ffx_api_types.h              | 257 ++++++++
- src/fsr4/include/ffx_framegeneration.h        | 299 ++++++++++
+ src/fsr4/include/ffx_framegeneration.h        | 299 +++++++++
  .../include/ffx_framegeneration_api_types.h   |  72 +++
  src/fsr4/include/ffx_upscale.h                | 230 +++++++
  .../include/vk/ffx_api_framegeneration_vk.h   | 150 +++++
- src/fsr4/include/vk/ffx_api_vk.h              | 308 ++++++++++
+ src/fsr4/include/vk/ffx_api_vk.h              | 308 +++++++++
  src/graphics/host_gpu/graphicContext.h        |   7 +
  .../host_gpu/renderer/cache/textureCache.cpp  |  42 ++
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
- src/graphics/host_gpu/renderer/fsr4.cpp       | 562 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 562 +++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 544 +++++++++++++++++
- src/graphics/host_gpu/renderer/fsrFg.h        |  65 ++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 582 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.h        |  71 +++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2978 insertions(+), 12 deletions(-)
+ 21 files changed, 3022 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2413,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..741f0044
+index 00000000..b5c6ef92
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,544 @@
+@@ -0,0 +1,582 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2756,7 +2756,9 @@ index 00000000..741f0044
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	configure.frameGenerationEnabled = true;
++	// Generation is off: the prepare dispatch the generator needs crashes this
++	// runtime, so the wrapper presents 1:1 and only the presentation path is used.
++	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
 +	                                    static_cast<int32_t>(create_info.imageExtent.width),
@@ -2883,6 +2885,42 @@ index 00000000..741f0044
 +
 +} // namespace
 +
++bool PrepareFrame(VkCommandBuffer command_buffer, VkImage depth, VkFormat depth_format,
++                  VkImage motion, VkFormat motion_format, uint32_t width, uint32_t height,
++                  const float jitter[2], uint32_t frame_id) {
++	auto& state = Get();
++	if (!state.active || state.dispatch == nullptr) {
++		return false;
++	}
++
++	ffxDispatchDescFrameGenerationPrepareV2 prepare {};
++	prepare.header.type          = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
++	prepare.frameID              = frame_id;
++	prepare.commandList          = command_buffer;
++	prepare.renderSize           = {width, height};
++	prepare.jitterOffset         = {jitter[0] * static_cast<float>(width),
++	                                jitter[1] * static_cast<float>(height)};
++	prepare.motionVectorScale    = {static_cast<float>(width), static_cast<float>(height)};
++	prepare.frameTimeDelta       = 16.7f;
++	prepare.reset                = frame_id <= 1;
++	prepare.cameraNear           = 0.1f;
++	prepare.cameraFar            = 1000.0f;
++	prepare.cameraFovAngleVertical = 1.0472f;
++	prepare.viewSpaceToMetersFactor = 1.0f;
++	prepare.depth          = ffxApiGetResourceVK(depth, Describe(depth_format, width, height), 0);
++	prepare.motionVectors  = ffxApiGetResourceVK(motion, Describe(motion_format, width, height), 0);
++
++	using DispatchFn = ffxReturnCode_t (*)(ffxContext*, ffxDispatchDescHeader*);
++	const auto dispatch_fn = reinterpret_cast<DispatchFn>(state.dispatch);
++	const auto result = dispatch_fn(&state.fg_context,
++	                                reinterpret_cast<ffxDispatchDescHeader*>(&prepare));
++	static int prepare_logs = 0;
++	if (prepare_logs++ < 3) {
++		FSRFG_LOG("FSR-FG: prepare result=%d frameID=%u\n", static_cast<int>(result), frame_id);
++	}
++	return result == FFX_API_RETURN_OK;
++}
++
 +bool DispatchFrame(VkCommandBuffer command_buffer, VkImage color, VkFormat color_format,
 +                   VkImage depth, VkFormat depth_format, VkImage motion, VkFormat motion_format,
 +                   uint32_t width, uint32_t height) {
@@ -2922,7 +2960,7 @@ index 00000000..741f0044
 +
 +	using DispatchFn = ffxReturnCode_t (*)(ffxContext*, ffxDispatchDescHeader*);
 +	const auto dispatch_fn = reinterpret_cast<DispatchFn>(state.dispatch);
-+	const auto result = dispatch_fn(&state.context, reinterpret_cast<ffxDispatchDescHeader*>(&dispatch));
++	const auto result = dispatch_fn(&state.fg_context, reinterpret_cast<ffxDispatchDescHeader*>(&dispatch));
 +	static int dispatch_logs = 0;
 +	if (dispatch_logs++ < 3) {
 +		FSRFG_LOG("FSR-FG: ffxDispatch result=%d frameID=%llu\n", static_cast<int>(result),
@@ -2963,10 +3001,10 @@ index 00000000..741f0044
 +} // namespace Libs::Graphics
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.h b/src/graphics/host_gpu/renderer/fsrFg.h
 new file mode 100644
-index 00000000..5ceab3d8
+index 00000000..9d6bee81
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,71 @@
 +#pragma once
 +
 +// FSR 3.1 frame generation (ASTROHYBRID_FSR_FG=1).
@@ -3015,6 +3053,12 @@ index 00000000..5ceab3d8
 +                          uint64_t timeout, VkSemaphore semaphore,
 +                          VkFence fence, uint32_t* index);
 +VkResult Present(VkQueue queue, const VkPresentInfoKHR& info);
++
++/// Records the per-frame prepare dispatch the generator reads before generating:
++/// depth, motion vectors, jitter and the camera parameters.
++bool PrepareFrame(VkCommandBuffer command_buffer, VkImage depth, VkFormat depth_format,
++                  VkImage motion, VkFormat motion_format, uint32_t width, uint32_t height,
++                  const float jitter[2], uint32_t frame_id);
 +
 +/// Issues one frame-generation dispatch. `color`, `depth` and `motion` are the
 +/// images the FSR upscale produced and consumed; `width`/`height` are their
