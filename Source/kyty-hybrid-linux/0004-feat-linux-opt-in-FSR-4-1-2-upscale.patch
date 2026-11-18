@@ -1,4 +1,4 @@
-From 251b283b525a602b1ca6649f108bea214f700f9b Mon Sep 17 00:00:00 2001
+From ec82f46885fba21f01cea45d8a64400c469cfdc7 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -2413,7 +2413,7 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..794e91fe
+index 00000000..19058bb4
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
 @@ -0,0 +1,594 @@
@@ -2760,8 +2760,8 @@ index 00000000..794e91fe
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	// Generation is off: its optical flow now runs, but frame interpolation crashes
-+	// inside FFX on the resources this runtime hands it. Presentation is stable.
++	// Generation is off: optical flow runs, but frame interpolation still crashes
++	// inside FFX when it builds its pipeline states on the first dispatch.
 +	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,

@@ -86,11 +86,14 @@ KITS = {
         ],
         # The 2.4.0 drop calls MotionVectorJitterCancellation() in
         # ffx_frameinterpolation_callbacks_hlsl.h without defining it anywhere, so
-        # every permutation with jittered motion vectors fails to compile. The
-        # option is optional at dispatch time, so those permutations are simply not
-        # built; their indirection entries stay -1 and the dispatch leaves the flag
-        # off. Inventing the function would change image stability with a guess.
-        "forced": {"FFX_FRAMEINTERPOLATION_OPTION_JITTERED_MOTION_VECTORS": 0},
+        # those permutations fail to compile and used to be skipped. Skipping them
+        # leaves -1 in the indirection table, which the provider indexes without a
+        # bounds check -- the same crash the upscaler had. The call sits in the
+        # jittered-motion-vector path and its obvious meaning is the current jitter,
+        # so it is defined as Jitter() and every key is built.
+        "call_macros": {
+            "MotionVectorJitterCancellation()": "Jitter()",
+        },
         # POPULATE_PERMUTATION_KEY writes this member name; the shader define is
         # spelled ..._JITTERED_....
         "key_names": {"FFX_FRAMEINTERPOLATION_OPTION_JITTERED_MOTION_VECTORS":
@@ -336,7 +339,9 @@ def emit_pass(pass_key: str, modules: list[tuple[bytes, str, dict]],
 
 
 def compile_pass(dxc: str, source: pathlib.Path, include: list[pathlib.Path],
-                 defines: dict[str, int], out: pathlib.Path) -> bytes:
+                 defines: dict[str, int], out: pathlib.Path,
+                 call_macros: dict[str, str] | None = None) -> bytes:
+    call_macros = call_macros or {}
     # The FFX Vulkan backend puts every resource class in one descriptor set and
     # builds the layout from these numbers, so the classes must not collide:
     # SRV keeps t0, UAVs start at 128, constant buffers at 256 and samplers at
@@ -350,6 +355,7 @@ def compile_pass(dxc: str, source: pathlib.Path, include: list[pathlib.Path],
                "-fvk-s-shift", "320", "0",
                "-DFFX_GPU=1", "-DFFX_HLSL=1"]
     command += [f"-D{name}={value}" for name, value in defines.items()]
+    command += [f"-D{name}={value}" for name, value in call_macros.items()]
     command += [f"-I{path}" for path in include]
     command += [str(source), "-Fo", str(out)]
     result = subprocess.run(command, capture_output=True, text=True)
@@ -406,7 +412,8 @@ def main() -> int:
                 defines.update(forced)
                 compiled_keys.append(key)
                 blob = compile_pass(dxc, shaders / filename, include, defines,
-                                    work / f"{kit['prefix']}_{pass_key}.{key}.spv")
+                                    work / f"{kit['prefix']}_{pass_key}.{key}.spv",
+                                    kit.get("call_macros"))
                 reflection = reflect(blob)
                 modules.append((blob, "CS", reflection))
                 manifest[f"{kit_name}/{pass_key}@{key}"] = {

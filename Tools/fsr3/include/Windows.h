@@ -39,6 +39,7 @@ struct WinHandle {
     pthread_cond_t  cond;
     int            signaled;
     int            manualReset;
+    int            joined;      // a thread handle must only be joined once
 };
 
 // ---------------------------------------------------------------- critical sections
@@ -104,7 +105,12 @@ static inline BOOL SetEvent(HANDLE handle) {
     if (handle == nullptr || handle->kind != 1) return FALSE;
     pthread_mutex_lock(&handle->mutex);
     handle->signaled = 1;
-    pthread_cond_broadcast(&handle->cond);
+    // Auto-reset events release one waiter; manual-reset release all.
+    if (handle->manualReset) {
+        pthread_cond_broadcast(&handle->cond);
+    } else {
+        pthread_cond_signal(&handle->cond);
+    }
     pthread_mutex_unlock(&handle->mutex);
     return TRUE;
 }
@@ -121,7 +127,10 @@ static inline BOOL ResetEvent(HANDLE handle) {
 static inline DWORD WaitForSingleObject(HANDLE handle, DWORD milliseconds) {
     if (handle == nullptr) return 0xFFFFFFFFu;
     if (handle->kind == 0) {
-        pthread_join(handle->thread, nullptr);
+        if (!handle->joined) {
+            pthread_join(handle->thread, nullptr);
+            handle->joined = 1;
+        }
         return 0;
     }
 
@@ -147,7 +156,10 @@ static inline DWORD WaitForSingleObject(HANDLE handle, DWORD milliseconds) {
 static inline BOOL CloseHandle(HANDLE handle) {
     if (handle == nullptr) return FALSE;
     if (handle->kind == 0) {
-        pthread_join(handle->thread, nullptr);
+        if (!handle->joined) {
+            pthread_join(handle->thread, nullptr);
+            handle->joined = 1;
+        }
     } else {
         pthread_mutex_destroy(&handle->mutex);
         pthread_cond_destroy(&handle->cond);
