@@ -1,4 +1,4 @@
-From 8067bf0c641c60bca450863c9eb9e1ec146ded3a Mon Sep 17 00:00:00 2001
+From df56b68f9f15e71cc4a7247c3c718c7e3d087917 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 552 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 413 +++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 431 ++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2828 insertions(+), 11 deletions(-)
+ 21 files changed, 2846 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2403,10 +2403,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..6c3339f7
+index 00000000..5168fed0
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,413 @@
+@@ -0,0 +1,431 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2559,7 +2559,10 @@ index 00000000..6c3339f7
 +	// and gameBufferCount is 4, so it proceeds to imageAcquireQueue.submit and faults
 +	// there -- the queue object is not usable, not the arguments. Declining keeps the
 +	// stock presenter until that is fixed.
-+	FSRFG_LOG("FSR-FG: the provider's acquire queue faults; using the stock presenter\n");
++	// Acquire is reached and faults inside imageAcquireQueue.submit even with a valid
++	// semaphore, a valid buffer count and a supplied submitFunc, so the fault is in
++	// the provider's queue wrapper itself. Declining keeps the stock presenter.
++	FSRFG_LOG("FSR-FG: the provider faults in its queue submit; using the stock presenter\n");
 +	return false;
 +
 +	// The swapchain can be wrapped, but nothing feeds it yet: the per-frame
@@ -2594,6 +2597,21 @@ index 00000000..6c3339f7
 +	// The FFX wrapper reads the presented image back to interpolate and compose
 +	// around it, so the swapchain must be usable as a transfer source as well as a
 +	// render target. The game asks only for colour attachment and transfer-dst.
++	// VkQueueInfoFFXAPI carries a per-queue submit function that the provider copies
++	// into its VulkanQueue; left null, its first submit calls through a null pointer.
++	static PFN_vkQueueSubmitFFXAPI submit_fn = nullptr;
++	if (submit_fn == nullptr) {
++		void* loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
++		if (loader != nullptr) {
++			const auto get_device_proc = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
++			    dlsym(loader, "vkGetDeviceProcAddr"));
++			if (get_device_proc != nullptr) {
++				submit_fn = reinterpret_cast<PFN_vkQueueSubmitFFXAPI>(
++				    get_device_proc(device, "vkQueueSubmit"));
++			}
++		}
++	}
++
 +	VkSwapchainCreateInfoKHR fg_info = create_info;
 +	fg_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 +	// The game's pNext chain carries its own low-latency structures, whose pointers
@@ -2609,10 +2627,10 @@ index 00000000..6c3339f7
 +	desc.swapchain        = &wrapped;
 +	desc.allocator        = nullptr;
 +	desc.createInfo       = fg_info;
-+	desc.gameQueue        = {game_queue, game_queue_family};
-+	desc.asyncComputeQueue = {async_queue, queue_family};
-+	desc.presentQueue     = {present_queue, queue_family};
-+	desc.imageAcquireQueue = {acquire_queue, queue_family};
++	desc.gameQueue        = {game_queue, game_queue_family, submit_fn};
++	desc.asyncComputeQueue = {async_queue, queue_family, submit_fn};
++	desc.presentQueue     = {present_queue, queue_family, submit_fn};
++	desc.imageAcquireQueue = {acquire_queue, queue_family, submit_fn};
 +
 +	// State the composition mode instead of leaving it at NOT_FORCED: with the
 +	// game queue it is a single well-defined path through FFX's presenter, and the
