@@ -78,6 +78,11 @@ string(REPLACE "void ConvertUTF16ToUTF8(const wchar_t* inputName, char* outputBu
                VK_BACKEND "${VK_BACKEND}")
 file(WRITE ${SDK_COPY}/backend/vk/ffx_vk.cpp "${VK_BACKEND}")
 
+# FG swapchain provider: same MSVC literal problem.
+file(READ ${SDK_COPY}/framegeneration/fsr3/vk/ffx_provider_framegenerationswapchain_vk.cpp FG_SWAPCHAIN)
+string(REGEX REPLACE "0x[0-9A-Fa-f]+'[0-9A-Fa-f]+ui64" "0xF3A3F1A9ULL" FG_SWAPCHAIN "${FG_SWAPCHAIN}")
+file(WRITE ${SDK_COPY}/framegeneration/fsr3/vk/ffx_provider_framegenerationswapchain_vk.cpp "${FG_SWAPCHAIN}")
+
 # FG provider: same MSVC literal problem as the upscaler provider.
 file(READ ${SDK_COPY}/framegeneration/fsr3/internal/ffx_provider_fsr3framegeneration.cpp FG_PROVIDER)
 string(REGEX REPLACE "0x[0-9A-Fa-f]+'[0-9A-Fa-f]+ui64" "0xF3A3F1A9ULL" FG_PROVIDER "${FG_PROVIDER}")
