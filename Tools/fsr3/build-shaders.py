@@ -207,6 +207,7 @@ def emit_pass(pass_key: str, modules: list[tuple[bytes, str, dict]],
                 lines.append(_u32(f"{name}_{cname}Spaces", [0]))
                 lines.append(_str(f"{name}_{cname}Names", [""]))
         lines.append(_u32(f"{name}_rtZero", [0]))
+        lines.append(_str(f"{name}_rtNames", [""]))
 
     entries: list[str] = []
     for key, (blob, entry, reflection) in enumerate(modules):
@@ -222,7 +223,7 @@ def emit_pass(pass_key: str, modules: list[tuple[bytes, str, dict]],
             f"{name}_boundSRVBufferNames, {name}_boundSRVBuffers, {name}_boundSRVBufferCounts, {name}_boundSRVBufferSpaces, "
             f"{name}_boundUAVBufferNames, {name}_boundUAVBuffers, {name}_boundUAVBufferCounts, {name}_boundUAVBufferSpaces, "
             f"{name}_boundSamplerNames, {name}_boundSamplers, {name}_boundSamplerCounts, {name}_boundSamplerSpaces, "
-            f"{name}_rtZero, {name}_rtZero, {name}_rtZero, {name}_rtZero }}")
+            f"{name}_rtNames, {name}_rtZero, {name}_rtZero, {name}_rtZero }}")
 
     lines.append(f"const FfxShaderBlob g_{stem}_PermutationInfo[] = {{")
     lines.append(",\n".join(entries))
