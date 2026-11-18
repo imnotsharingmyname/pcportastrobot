@@ -1,4 +1,4 @@
-From b0fba953a26b6668f53864d92095d7a53845a976 Mon Sep 17 00:00:00 2001
+From d0f89529b1016e75d05de6b374164c34cf6e8da3 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -17,15 +17,15 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
- src/graphics/host_gpu/renderer/fsr4.cpp       | 562 +++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 567 +++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 582 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 589 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  71 +++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 3022 insertions(+), 12 deletions(-)
+ 21 files changed, 3034 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -1822,10 +1822,10 @@ index 3b140f69..fd151eff 100644
  }
 diff --git a/src/graphics/host_gpu/renderer/fsr4.cpp b/src/graphics/host_gpu/renderer/fsr4.cpp
 new file mode 100644
-index 00000000..0eda03d0
+index 00000000..20cf7e54
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsr4.cpp
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,567 @@
 +// Native FSR 4.1.2 through the FidelityFX SDK Vulkan provider.
 +//
 +// The provider is an optional, externally built GPL-3.0 library (the local
@@ -2372,6 +2372,11 @@ index 00000000..0eda03d0
 +	// interpolates from, and this is the one place that has colour, depth and motion
 +	// vectors together.
 +	if (FsrFg::Active()) {
++		FsrFg::PrepareFrame(VK_NULL_HANDLE,
++		                    static_cast<VkImage>(depth.backing.image),
++		                    static_cast<VkFormat>(depth.backing.format),
++		                    static_cast<VkImage>(mv.backing.image),
++		                    static_cast<VkFormat>(mv.backing.format), in_w, in_h, jitter_uv, frame);
 +		FsrFg::DispatchFrame(VK_NULL_HANDLE,
 +		                     static_cast<VkImage>(out.backing.image),
 +		                     static_cast<VkFormat>(out.backing.format),
@@ -2413,10 +2418,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..b5c6ef92
+index 00000000..1cf25272
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,582 @@
+@@ -0,0 +1,589 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2486,6 +2491,7 @@ index 00000000..b5c6ef92
 +	uint32_t      extent_h = 0;
 +	void*         dispatch = nullptr;
 +	void*         configure = nullptr;
++	void*         command_list = nullptr;
 +};
 +
 +State& Get() {
@@ -2756,9 +2762,7 @@ index 00000000..b5c6ef92
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	// Generation is off: the prepare dispatch the generator needs crashes this
-+	// runtime, so the wrapper presents 1:1 and only the presentation path is used.
-+	configure.frameGenerationEnabled = false;
++	configure.frameGenerationEnabled = true;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
 +	                                    static_cast<int32_t>(create_info.imageExtent.width),
@@ -2893,10 +2897,24 @@ index 00000000..b5c6ef92
 +		return false;
 +	}
 +
++	// Both the prepare and the generate dispatch record into the command buffer the
++	// provider hands out; a null one faults inside ffxFrameInterpolationPrepare.
++	ffxQueryDescFrameGenerationSwapChainInterpolationCommandListVK list {};
++	list.header.type     = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_INTERPOLATIONCOMMANDLIST_VK;
++	void* command_list   = nullptr;
++	list.pOutCommandList = &command_list;
++	using QueryFn = ffxReturnCode_t (*)(ffxContext*, ffxQueryDescHeader*);
++	const auto query = reinterpret_cast<QueryFn>(state.query);
++	if (query(&state.context, reinterpret_cast<ffxQueryDescHeader*>(&list)) != FFX_API_RETURN_OK ||
++	    command_list == nullptr) {
++		return false;
++	}
++	state.command_list = command_list;
++
 +	ffxDispatchDescFrameGenerationPrepareV2 prepare {};
 +	prepare.header.type          = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
 +	prepare.frameID              = frame_id;
-+	prepare.commandList          = command_buffer;
++	prepare.commandList          = command_list;
 +	prepare.renderSize           = {width, height};
 +	prepare.jitterOffset         = {jitter[0] * static_cast<float>(width),
 +	                                jitter[1] * static_cast<float>(height)};
@@ -2929,18 +2947,10 @@ index 00000000..b5c6ef92
 +		return false;
 +	}
 +
-+	// The provider owns the command buffer for interpolation; ours is only used
-+	// for the acquire that precedes it.
-+	ffxQueryDescFrameGenerationSwapChainInterpolationCommandListVK list {};
-+	list.header.type       = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_INTERPOLATIONCOMMANDLIST_VK;
-+	list.pOutCommandList   = nullptr;
-+	void* interpolation_list = nullptr;
-+	list.pOutCommandList   = &interpolation_list;
-+
-+	using QueryFn = ffxReturnCode_t (*)(ffxContext*, ffxQueryDescHeader*);
-+	const auto query = reinterpret_cast<QueryFn>(state.query);
-+	if (query(&state.context, reinterpret_cast<ffxQueryDescHeader*>(&list)) != FFX_API_RETURN_OK ||
-+	    interpolation_list == nullptr) {
++	// The prepare dispatch queried the command list for this frame; record the
++	// generation work into the same one.
++	void* interpolation_list = state.command_list;
++	if (interpolation_list == nullptr) {
 +		return false;
 +	}
 +
@@ -2963,8 +2973,10 @@ index 00000000..b5c6ef92
 +	const auto result = dispatch_fn(&state.fg_context, reinterpret_cast<ffxDispatchDescHeader*>(&dispatch));
 +	static int dispatch_logs = 0;
 +	if (dispatch_logs++ < 3) {
-+		FSRFG_LOG("FSR-FG: ffxDispatch result=%d frameID=%llu\n", static_cast<int>(result),
-+		          (unsigned long long)dispatch.frameID);
++		FSRFG_LOG("FSR-FG: ffxDispatch result=%d frameID=%llu present=%p out0=%p outs=%u\n",
++		          static_cast<int>(result), (unsigned long long)dispatch.frameID,
++		          dispatch.presentColor.resource, dispatch.outputs[0].resource,
++		          state.output_count);
 +	}
 +	if (result != FFX_API_RETURN_OK) {
 +		return false;
