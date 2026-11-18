@@ -1,0 +1,37 @@
+From ca48476ae8afd3203eaedbcc6f2c24d12fe3ae04 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Tue, 17 Nov 2026 11:15:29 +0100
+Subject: [PATCH] feat(hybrid): select the Vulkan adapter from KYTY_GPU_INDEX
+
+Kyty already ranks and selects physical devices through Config::GetGpuIndex,
+and its own launcher writes gpu_index from its adapter dropdown. The hybrid
+host builds ConfigOptions itself and never set the field, so the value was
+always -1 (automatic) and an adapter picker had nothing to drive.
+
+Read KYTY_GPU_INDEX in the renderer thread and forward it to Config::Load;
+unset or out-of-range keeps the automatic choice. This is the only channel the
+launcher has into the renderer's configuration in the hybrid launch mode.
+---
+ src/hybrid/kytyGpuBridge.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 7fabbdf4..b37a12f7 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -621,6 +621,12 @@ void RendererThread() {
+ 		options.present_mode  = PresentModeFromEnvironment();
+ 		options.shader_optimization_type = ShaderOptimizationFromEnvironment();
+ 		options.vblank_frequency         = EnvironmentSize("KYTY_GPU_VBLANK_HZ", 60);
++		// KYTY_GPU_INDEX=<n>: use the n-th Vulkan physical device, which is what the launcher's
++		// adapter picker writes. Unset or out of range keeps Kyty's automatic choice.
++		if (const char* gpu_index = std::getenv("KYTY_GPU_INDEX"); gpu_index != nullptr && gpu_index[0] != '\0') {
++			const long value = std::strtol(gpu_index, nullptr, 10);
++			options.gpu_index = value >= 0 && value < 64 ? static_cast<int32_t>(value) : -1;
++		}
+ 		// KYTY_GPU_FULLSCREEN=1: start in desktop fullscreen with the cursor hidden (F11 or Alt+Enter
+ 		// still toggles it).
+ 		if (const char* fullscreen = std::getenv("KYTY_GPU_FULLSCREEN"); fullscreen != nullptr && fullscreen[0] == '1') {
+-- 
+2.56.1
+

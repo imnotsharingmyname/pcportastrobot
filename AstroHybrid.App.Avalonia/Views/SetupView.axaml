@@ -1,0 +1,73 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.SetupView">
+  <ScrollViewer>
+    <StackPanel Margin="0,0,0,20" Spacing="20">
+
+      <!-- Status first, like the WPF Installation page -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Installation Status" Classes="section" />
+          <Grid ColumnDefinitions="180,*" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="8">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Runtime" Classes="label" />
+            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="RuntimeValue" Text="Checking…" Classes="value" />
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Game dump" Classes="label" />
+            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="DumpValue" Text="Checking…" Classes="value" />
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Game folder" Classes="label" />
+            <TextBlock Grid.Row="2" Grid.Column="1" x:Name="GamePathValue" Text="—"
+                       Classes="mono" FontSize="12" TextWrapping="Wrap" />
+
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="Hybrid runtime" Classes="label" />
+            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="HybridPathValue" Text="—"
+                       Classes="mono" FontSize="12" TextWrapping="Wrap" />
+          </Grid>
+          <Button Content="Open logs" Click="OpenLogs" HorizontalAlignment="Left" Margin="0,12,0,0" />
+        </StackPanel>
+      </Border>
+
+      <!-- Game dump -->
+      <Border Classes="card">
+        <StackPanel Spacing="12">
+          <TextBlock Text="Game Dump" Classes="section" />
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+            <TextBox Grid.Column="0" x:Name="GamePathBox" Watermark="…/PPSA21567-app"
+                     LostFocus="OnGamePathLostFocus" />
+            <Button Grid.Column="1" Content="Browse…" Click="Browse" />
+          </Grid>
+          <TextBlock Classes="muted"
+                     Text="Point AstroHybrid at your own extracted PPSA21567 dump. The folder must contain eboot.bin, sce_module and sce_sys. Version 01.019.000 is the tested build. Setup unwraps the SELF containers and relinks the game; it never copies game files into this project." />
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <Button x:Name="CheckButton" Content="Check folder" Click="Check" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- Install -->
+      <Border Classes="card">
+        <StackPanel Spacing="10">
+          <TextBlock Text="Install / Rebuild" Classes="section" />
+          <TextBlock Classes="body"
+                     Text="Builds the base runtime if needed, then lays out the hybrid Kyty runtime. Existing output is rebuilt from your dump; your game files are not modified." />
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <Button x:Name="InstallButton" Theme="{StaticResource PrimaryButton}"
+                    Content="Install / rebuild" Click="Install" />
+          </StackPanel>
+          <ProgressBar x:Name="Progress" IsIndeterminate="True" IsVisible="False" Height="4" />
+        </StackPanel>
+      </Border>
+
+      <!-- Output -->
+      <Border Classes="card">
+        <StackPanel Spacing="6">
+          <TextBlock Text="Output" Classes="section" />
+          <TextBox x:Name="OutputBox" Height="260" IsReadOnly="True"
+                   AcceptsReturn="True" TextWrapping="NoWrap"
+                   FontFamily="{DynamicResource MonoFont}" FontSize="11"
+                   Background="{DynamicResource BackgroundBrush}" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

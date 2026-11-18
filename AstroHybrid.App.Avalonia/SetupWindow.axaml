@@ -1,0 +1,23 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="AstroHybrid.App.Avalonia.SetupWindow"
+        Title="AstroHybrid Setup"
+        Width="720" Height="760" MinWidth="620" MinHeight="560"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource BackgroundBrush}"
+        FontFamily="{DynamicResource AppFont}"
+        FontSize="14">
+  <Grid Margin="40" RowDefinitions="Auto,*,Auto">
+
+    <StackPanel Grid.Row="0" Margin="0,0,0,24">
+      <TextBlock Text="AstroHybrid" FontSize="28" FontWeight="Bold" />
+      <TextBlock Text="Astro Bot Native PC Port Setup" FontSize="20" FontWeight="SemiBold"
+                 Foreground="{DynamicResource TextSecondaryBrush}" />
+    </StackPanel>
+
+    <ContentControl Grid.Row="1" x:Name="Host" />
+
+    <Button Grid.Row="2" Content="Close" MinWidth="100" Margin="0,16,0,0"
+            HorizontalAlignment="Right" Click="Close" />
+  </Grid>
+</Window>

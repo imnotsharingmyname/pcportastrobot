@@ -1,0 +1,181 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.HomeView">
+  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <StackPanel Margin="0,0,0,30">
+
+      <!-- Hero -->
+      <Border Classes="heroCard">
+        <Grid ColumnDefinitions="*,Auto">
+          <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,40,0">
+            <TextBlock Text="ASTRO BOT" Classes="hero" />
+            <TextBlock Text="Native PC Port • AstroHybrid" Classes="heroSub" Margin="0,8,0,0" />
+
+            <WrapPanel Margin="0,20,0,0">
+              <Border Classes="versionBadge">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Path Data="{StaticResource IconPackage}" Width="12" Height="12"
+                        Stretch="Uniform" StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+                        Stroke="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                  <StackPanel>
+                    <TextBlock Text="INSTALLED" Classes="badgeLabel" />
+                    <TextBlock x:Name="GameVersionText" Classes="badgeValue" Text="—" />
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+
+              <Border x:Name="BuildBadge" Classes="versionBadge" Margin="12,0,0,0">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Path Data="{StaticResource IconUpdate}" Width="12" Height="12"
+                        Stretch="Uniform" StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+                        Stroke="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                  <StackPanel>
+                    <TextBlock Text="BUILD" Classes="badgeLabel" />
+                    <TextBlock x:Name="BuildText" Classes="badgeValue" Text="—" />
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+
+              <Border x:Name="AvailableBadge" Classes="versionBadge" Margin="12,0,0,0"
+                      IsVisible="False">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Path Data="{StaticResource IconPackage}" Width="12" Height="12"
+                        Stretch="Uniform" StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+                        Stroke="{DynamicResource AccentBrush}" VerticalAlignment="Center" />
+                  <StackPanel>
+                    <TextBlock Text="AVAILABLE" Classes="badgeLabel" />
+                    <TextBlock x:Name="AvailableText" Classes="badgeValue"
+                               Foreground="{DynamicResource AccentBrush}" Text="—" />
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </WrapPanel>
+
+            <TextBlock x:Name="HeroStatus" Classes="heroStatus" Margin="0,16,0,0"
+                       Text="Checking the runtime…" />
+          </StackPanel>
+
+          <!-- Artwork placeholder: the WPF hero uses the same star, no game art ships. -->
+          <Border Grid.Column="1" Width="280" Height="280" CornerRadius="16"
+                  Background="{DynamicResource SurfaceBrush}"
+                  BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                  VerticalAlignment="Center" HorizontalAlignment="Right">
+            <Grid>
+              <Border Background="{DynamicResource PrimaryBrush}" CornerRadius="16" Opacity="0.15" />
+              <Viewbox Margin="40" Stretch="Uniform">
+                <Path Data="{StaticResource IconStar}" Width="120" Height="120"
+                      Stretch="Uniform" Fill="{DynamicResource PrimaryBrush}" Opacity="0.6" />
+              </Viewbox>
+              <TextBlock Text="ASTRO BOT" FontSize="18" FontWeight="Bold"
+                         Foreground="{DynamicResource TextMutedBrush}"
+                         HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                         Margin="0,0,0,20" />
+            </Grid>
+          </Border>
+        </Grid>
+      </Border>
+
+      <!-- Quick stats -->
+      <Grid Margin="0,0,0,24" ColumnDefinitions="*,*,*,*">
+        <Border Grid.Column="0" Classes="statCard">
+          <StackPanel>
+            <TextBlock Text="GAME VERSION" Classes="statLabel" />
+            <TextBlock x:Name="GameVersionValue" Classes="statValue" FontSize="16" Text="—" />
+            <TextBlock Classes="statDetail"><Run Text="Title ID: " /><Run x:Name="TitleIdRun" Text="—" /></TextBlock>
+          </StackPanel>
+        </Border>
+
+        <Border Grid.Column="1" Classes="statCard" Margin="12,0,0,0">
+          <StackPanel>
+            <TextBlock Text="CPU" Classes="statLabel" />
+            <TextBlock x:Name="CpuValue" Classes="statValue" FontSize="16" Text="—" />
+          </StackPanel>
+        </Border>
+
+        <Border Grid.Column="2" Classes="statCard" Margin="12,0,0,0">
+          <StackPanel>
+            <TextBlock Text="GPU" Classes="statLabel" />
+            <TextBlock x:Name="GpuValue" Classes="statValue" FontSize="16" Text="—" />
+          </StackPanel>
+        </Border>
+
+        <Border Grid.Column="3" Classes="statCard" Margin="12,0,0,0">
+          <StackPanel>
+            <TextBlock Text="RAM / DISPLAY" Classes="statLabel" />
+            <!-- WrapPanel: side by side at 1100, stacked at 900 where the fixed
+                 four-column grid leaves 91 px of inner width. -->
+            <WrapPanel Margin="0,4,0,0">
+              <StackPanel Margin="0,0,16,0">
+                <TextBlock x:Name="RamValue" Classes="statValue" FontSize="18" Text="—" />
+                <TextBlock Text="RAM" Classes="statDetail" />
+              </StackPanel>
+              <StackPanel>
+                <TextBlock x:Name="DisplayValue" Classes="statValue" FontSize="14" Text="—" />
+                <TextBlock Text="Display" Classes="statDetail" />
+              </StackPanel>
+            </WrapPanel>
+          </StackPanel>
+        </Border>
+      </Grid>
+
+      <!-- What's new: only when a newer release with a Linux package exists. -->
+      <Border x:Name="NewsCard" Classes="newsCard" IsVisible="False">
+        <StackPanel>
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <TextBlock Text="WHAT'S NEW IN" Classes="section" Margin="0,0,0,10" />
+            <TextBlock x:Name="NewsVersion" Classes="section" Margin="0,0,0,10"
+                       Foreground="{DynamicResource AccentBrush}" />
+          </StackPanel>
+          <TextBlock x:Name="NewsNotes" Classes="body" TextWrapping="Wrap" Margin="0,4,0,0" />
+          <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Theme="{StaticResource TextButton}" Content="Ignore for Now" Click="DismissUpdate" />
+            <Button x:Name="NewsUpdateButton" Theme="{StaticResource PrimaryButton}"
+                    Content="Update Now" MinWidth="120" MinHeight="36" FontSize="13"
+                    Click="InstallUpdate" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- Current graphics configuration -->
+      <Border Classes="card">
+        <StackPanel>
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Grid.Column="0" Text="CURRENT GRAPHICS CONFIGURATION"
+                       Classes="section" Margin="0,0,0,10" />
+            <Button Grid.Column="1" Theme="{StaticResource TextButton}"
+                    Content="Graphics Settings" FontSize="12" Padding="8,4"
+                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                    Click="OpenGraphics" />
+          </Grid>
+          <TextBlock x:Name="ConfigText" Classes="configText" Text="—" Margin="0,12,0,0" />
+        </StackPanel>
+      </Border>
+
+      <!-- Quick actions -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="QUICK ACTIONS" Classes="section" Margin="0,0,0,10" />
+
+          <!-- Before install the only useful action is setup. -->
+          <StackPanel x:Name="SetupActions" IsVisible="False">
+            <Button Theme="{StaticResource PrimaryButton}" Content="Set Up"
+                    MinWidth="140" HorizontalAlignment="Left" Click="OpenInstallation" />
+            <TextBlock Classes="muted" Margin="0,10,0,0"
+                       Text="No hybrid runtime yet. Setup reads your own game dump and builds the runtime; it never changes the dump." />
+          </StackPanel>
+
+          <WrapPanel x:Name="InstalledActions" IsVisible="False">
+            <Button Content="Graphics Settings" Margin="0,0,12,0" MinWidth="160"
+                    Click="OpenGraphics" />
+            <Button x:Name="RtxButton" Content="RTX: OFF" Margin="0,0,12,0" MinWidth="140"
+                    Click="ToggleRayTracing"
+                    ToolTip.Tip="Toggles Ray Tracing between OFF (Non-RT faster lighting) and ON (Ray Tracing)" />
+            <Button Content="Controller Settings" Margin="0,0,12,0" MinWidth="160"
+                    Click="OpenController" />
+            <Button Content="Installation" MinWidth="140" Click="OpenInstallation" />
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
