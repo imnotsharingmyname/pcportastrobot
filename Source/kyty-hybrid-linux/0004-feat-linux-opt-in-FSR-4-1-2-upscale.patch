@@ -1,4 +1,4 @@
-From d0f89529b1016e75d05de6b374164c34cf6e8da3 Mon Sep 17 00:00:00 2001
+From f4acb55303f3cd838ac7446f5ea3e97915cdc12d Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -17,15 +17,15 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/commandRecorder.cpp     |   7 +
  src/graphics/host_gpu/renderer/dlss.cpp       |  12 +-
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
- src/graphics/host_gpu/renderer/fsr4.cpp       | 567 +++++++++++++++++
+ src/graphics/host_gpu/renderer/fsr4.cpp       | 562 +++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 589 ++++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 591 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  71 +++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  61 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 3034 insertions(+), 12 deletions(-)
+ 21 files changed, 3031 insertions(+), 12 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -1822,10 +1822,10 @@ index 3b140f69..fd151eff 100644
  }
 diff --git a/src/graphics/host_gpu/renderer/fsr4.cpp b/src/graphics/host_gpu/renderer/fsr4.cpp
 new file mode 100644
-index 00000000..20cf7e54
+index 00000000..0eda03d0
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsr4.cpp
-@@ -0,0 +1,567 @@
+@@ -0,0 +1,562 @@
 +// Native FSR 4.1.2 through the FidelityFX SDK Vulkan provider.
 +//
 +// The provider is an optional, externally built GPL-3.0 library (the local
@@ -2372,11 +2372,6 @@ index 00000000..20cf7e54
 +	// interpolates from, and this is the one place that has colour, depth and motion
 +	// vectors together.
 +	if (FsrFg::Active()) {
-+		FsrFg::PrepareFrame(VK_NULL_HANDLE,
-+		                    static_cast<VkImage>(depth.backing.image),
-+		                    static_cast<VkFormat>(depth.backing.format),
-+		                    static_cast<VkImage>(mv.backing.image),
-+		                    static_cast<VkFormat>(mv.backing.format), in_w, in_h, jitter_uv, frame);
 +		FsrFg::DispatchFrame(VK_NULL_HANDLE,
 +		                     static_cast<VkImage>(out.backing.image),
 +		                     static_cast<VkFormat>(out.backing.format),
@@ -2418,10 +2413,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..1cf25272
+index 00000000..a58011c6
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,589 @@
+@@ -0,0 +1,591 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2762,7 +2757,9 @@ index 00000000..1cf25272
 +	configure.presentCallbackUserContext = nullptr;
 +	configure.frameGenerationCallback = nullptr;
 +	configure.frameGenerationCallbackUserContext = nullptr;
-+	configure.frameGenerationEnabled = true;
++	// Generation is off: its optical-flow dispatch rejects the colour resource this
++	// runtime offers it (FFX_ERROR_INVALID_ARGUMENT), so only presentation runs.
++	configure.frameGenerationEnabled = false;
 +	configure.allowAsyncWorkloads    = false;
 +	configure.generationRect         = {0, 0,
 +	                                    static_cast<int32_t>(create_info.imageExtent.width),
