@@ -27,3 +27,14 @@ ffxProvider* GetProvider(ffxStructType_t descType, uint64_t overrideId, void* de
     return GetProvider(descType, overrideId, device, extProviderSlot,
                        std::span<ffxProvider* const>(providers));
 }
+
+// Same contract as GetProvider: the SDK declares these overrides without
+// defining them, so every application that links ffx_api.cpp supplies both.
+uint64_t GetProviderVersions(ffxStructType_t descType, void* device, uint64_t capacity,
+                             uint64_t* versionIds, const char** versionNames,
+                             std::optional<ffxProviderExternal>& extProviderSlot) {
+    const auto providers = Providers();
+    return GetProviderVersions(descType, device, capacity, versionIds, versionNames,
+                               extProviderSlot,
+                               std::span<ffxProvider* const>(providers));
+}

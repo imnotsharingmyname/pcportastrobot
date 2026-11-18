@@ -65,6 +65,19 @@ string(REPLACE "#define FFX_SDK_DEFAULT_CONTEXT_SIZE (1024 * 128)"
                INTERNAL_TYPES "${INTERNAL_TYPES}")
 file(WRITE ${SDK_COPY}/api/internal/ffx_internal_types.h "${INTERNAL_TYPES}")
 
+# ConvertUTF8ToUTF16/ConvertUTF16ToUTF8 unconditionally write to the name buffer,
+# which CreatePipelineVK passes as null when the pipeline has no debug name. The
+# Windows path has the same shape but its callers always supply one; on Linux the
+# unrecognised-name path reaches it and faults. Guard both.
+file(READ ${SDK_COPY}/backend/vk/ffx_vk.cpp VK_BACKEND)
+string(REPLACE "void ConvertUTF8ToUTF16(const char* inputName, wchar_t* outputBuffer, size_t outputLen)\n{\n    memset(outputBuffer, 0, outputLen * sizeof(wchar_t));"
+               "void ConvertUTF8ToUTF16(const char* inputName, wchar_t* outputBuffer, size_t outputLen)\n{\n    if (outputBuffer == nullptr || outputLen == 0 || inputName == nullptr) return;\n    memset(outputBuffer, 0, outputLen * sizeof(wchar_t));"
+               VK_BACKEND "${VK_BACKEND}")
+string(REPLACE "void ConvertUTF16ToUTF8(const wchar_t* inputName, char* outputBuffer, size_t outputLen)\n{\n    memset(outputBuffer, 0, outputLen * sizeof(char));"
+               "void ConvertUTF16ToUTF8(const wchar_t* inputName, char* outputBuffer, size_t outputLen)\n{\n    if (outputBuffer == nullptr || outputLen == 0 || inputName == nullptr) return;\n    memset(outputBuffer, 0, outputLen * sizeof(char));"
+               VK_BACKEND "${VK_BACKEND}")
+file(WRITE ${SDK_COPY}/backend/vk/ffx_vk.cpp "${VK_BACKEND}")
+
 set(KIT ${SDK_COPY})
 
 add_library(amd_fidelityfx_fsr3_vk SHARED
