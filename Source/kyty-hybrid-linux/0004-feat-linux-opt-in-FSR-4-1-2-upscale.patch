@@ -1,4 +1,4 @@
-From c3a820a8bd56ae3e61bfbbd1518d6c8ca2986c88 Mon Sep 17 00:00:00 2001
+From 7f936f322a08a1242dd1a8eed093145ba463a90d Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 412 +++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 416 +++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2838 insertions(+), 11 deletions(-)
+ 21 files changed, 2842 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2414,10 +2414,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..168722e6
+index 00000000..387de7b7
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,412 @@
+@@ -0,0 +1,416 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2576,7 +2576,11 @@ index 00000000..168722e6
 +	// With the wrapper installed, TryFsr4Upscale is never entered at all (its early
 +	// returns are instrumented and never fire), so the gate at renderDraw.cpp:4180
 +	// fails before the upscale. The stock presenter stays until that is understood.
-+	FSRFG_LOG("FSR-FG: wrapper installs but the upscale is never reached; stock presenter\n");
++	// With the wrapper installed the game never reaches its draw path at all: the
++	// gate at renderDraw.cpp is instrumented and never fires, and no upscale runs.
++	// FFX's wrapper takes over presentation before Kyty's first frame, so the stock
++	// presenter stays until that interaction is understood.
++	FSRFG_LOG("FSR-FG: wrapper stops the game drawing; using the stock presenter\n");
 +	return false;
 +
 +	auto& state = Get();
