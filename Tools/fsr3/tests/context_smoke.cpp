@@ -91,13 +91,35 @@ int main() {
 
     VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     application.apiVersion = VK_API_VERSION_1_3;
+    const char* layers[] = {"VK_LAYER_KHRONOS_validation"};
+    const char* extensions[] = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
     VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     instanceInfo.pApplicationInfo = &application;
+    instanceInfo.enabledLayerCount = 1;
+    instanceInfo.ppEnabledLayerNames = layers;
+    instanceInfo.enabledExtensionCount = 1;
+    instanceInfo.ppEnabledExtensionNames = extensions;
 
     VkInstance instance = VK_NULL_HANDLE;
     if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) {
         std::printf("FAIL vkCreateInstance\n");
         return 1;
+    }
+
+    {
+        auto createMessenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+            g_gipa(instance, "vkCreateDebugUtilsMessengerEXT"));
+        if (createMessenger) {
+            VkDebugUtilsMessengerCreateInfoEXT info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+            info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                   VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+            info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                               VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                               VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+            info.pfnUserCallback = OnMessage;
+            VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
+            createMessenger(instance, &info, nullptr, &messenger);
+        }
     }
 
     VkPhysicalDevice physical = VK_NULL_HANDLE;
@@ -131,6 +153,9 @@ int main() {
     ffxCreateContextDescUpscale upscale{};
     upscale.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     upscale.header.pNext = &backend.header;
+    upscale.fpMessage = [](unsigned int type, const wchar_t* message) {
+        std::printf("sdk[%d]: %ls\n", static_cast<int>(type), message ? message : L"");
+    };
     upscale.maxRenderSize = {1920, 1080};
     upscale.maxUpscaleSize = {3840, 2160};
 
