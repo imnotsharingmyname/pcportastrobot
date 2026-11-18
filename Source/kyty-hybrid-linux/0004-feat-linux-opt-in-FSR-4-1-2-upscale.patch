@@ -1,4 +1,4 @@
-From ee37870e7f4dac3d9f63d2bf0c701fbce6b88354 Mon Sep 17 00:00:00 2001
+From 8067bf0c641c60bca450863c9eb9e1ec146ded3a Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 552 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 409 +++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 413 +++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2824 insertions(+), 11 deletions(-)
+ 21 files changed, 2828 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2403,10 +2403,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..e6856d25
+index 00000000..6c3339f7
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,413 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2555,7 +2555,11 @@ index 00000000..e6856d25
 +	// handle and no recreation in between (verified: no "recreated" line before the
 +	// crash). Wrapping it takes the presenter down before a frame is drawn, so the
 +	// module declines and the stock presenter stays in place.
-+	FSRFG_LOG("FSR-FG: the provider faults inside its own acquire; using the stock presenter\n");
++	// Acquire now enters the provider's own acquireNextImage: the semaphore is valid
++	// and gameBufferCount is 4, so it proceeds to imageAcquireQueue.submit and faults
++	// there -- the queue object is not usable, not the arguments. Declining keeps the
++	// stock presenter until that is fixed.
++	FSRFG_LOG("FSR-FG: the provider's acquire queue faults; using the stock presenter\n");
 +	return false;
 +
 +	// The swapchain can be wrapped, but nothing feeds it yet: the per-frame
