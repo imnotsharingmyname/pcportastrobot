@@ -1,4 +1,4 @@
-From eef9612765fec6d837156443ffd12e5208edf4b5 Mon Sep 17 00:00:00 2001
+From 1e92a5343e37590dd2066022629961b71af3485f Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 538 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 283 +++++++++
- src/graphics/host_gpu/renderer/fsrFg.h        |  54 ++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 355 ++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2677 insertions(+), 11 deletions(-)
+ 21 files changed, 2756 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2389,10 +2389,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..e7eb0b7c
+index 00000000..d13e6ba7
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,355 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2450,6 +2450,8 @@ index 00000000..e7eb0b7c
 +	ffxContext    context   = nullptr;
 +	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 +	SwapchainFns  fns {};
++	uint64_t      frame_id = 0;
++	void*         dispatch = nullptr;
 +};
 +
 +State& Get() {
@@ -2503,7 +2505,8 @@ index 00000000..e7eb0b7c
 +		return false;
 +	}
 +
-+	state.create  = dlsym(state.module, "ffxCreateContext");
++	state.create   = dlsym(state.module, "ffxCreateContext");
++	state.dispatch = dlsym(state.module, "ffxDispatch");
 +	state.query   = dlsym(state.module, "ffxQuery");
 +	state.destroy = dlsym(state.module, "ffxDestroyContext");
 +	if (state.create == nullptr || state.query == nullptr || state.destroy == nullptr) {
@@ -2652,6 +2655,75 @@ index 00000000..e7eb0b7c
 +	return state.fns.present(queue, &info);
 +}
 +
++namespace {
++
++// TEXTURE_2D with a full mip chain; FFX only uses these for the dispatch's
++// present-colour, depth and motion-vector inputs.
++FfxApiResourceDescription Describe(VkFormat format, uint32_t width, uint32_t height) {
++	FfxApiResourceDescription description {};
++	description.type     = 1;   // FFX_API_RESOURCE_TYPE_TEXTURE2D
++	description.format   = static_cast<uint32_t>(format);
++	description.width    = width;
++	description.height   = height;
++	description.depth    = 1;
++	description.mipCount = 1;
++	description.flags    = 0;
++	return description;
++}
++
++} // namespace
++
++bool DispatchFrame(VkCommandBuffer command_buffer, VkImage color, VkFormat color_format,
++                   VkImage depth, VkFormat depth_format, VkImage motion, VkFormat motion_format,
++                   uint32_t width, uint32_t height) {
++	auto& state = Get();
++	if (!state.active || state.dispatch == nullptr) {
++		return false;
++	}
++
++	// The provider owns the command buffer for interpolation; ours is only used
++	// for the acquire that precedes it.
++	ffxQueryDescFrameGenerationSwapChainInterpolationCommandListVK list {};
++	list.header.type       = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_INTERPOLATIONCOMMANDLIST_VK;
++	list.pOutCommandList   = nullptr;
++	void* interpolation_list = nullptr;
++	list.pOutCommandList   = &interpolation_list;
++
++	using QueryFn = ffxReturnCode_t (*)(ffxContext*, ffxQueryDescHeader*);
++	const auto query = reinterpret_cast<QueryFn>(state.query);
++	if (query(&state.context, reinterpret_cast<ffxQueryDescHeader*>(&list)) != FFX_API_RETURN_OK ||
++	    interpolation_list == nullptr) {
++		return false;
++	}
++
++	ffxDispatchDescFrameGeneration dispatch {};
++	dispatch.header.type   = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION;
++	dispatch.commandList   = interpolation_list;
++	dispatch.numGeneratedFrames = 1;
++	dispatch.frameID       = ++state.frame_id;
++	dispatch.reset         = state.frame_id <= 1;
++	dispatch.backbufferTransferFunction = 0;   // FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB
++	dispatch.generationRect = {0, 0, static_cast<int32_t>(width), static_cast<int32_t>(height)};
++
++	dispatch.presentColor = ffxApiGetResourceVK(color, Describe(color_format, width, height), 0);
++	dispatch.outputs[0]   = ffxApiGetResourceVK(nullptr, Describe(color_format, width, height), 0);
++
++	using DispatchFn = ffxReturnCode_t (*)(ffxContext*, ffxDispatchDescHeader*);
++	const auto dispatch_fn = reinterpret_cast<DispatchFn>(state.dispatch);
++	const auto result = dispatch_fn(&state.context, reinterpret_cast<ffxDispatchDescHeader*>(&dispatch));
++	if (result != FFX_API_RETURN_OK) {
++		static int logs = 0;
++		if (logs++ < 3) {
++			FSRFG_LOG("FSR-FG: ffxDispatch failed code=%d\n", static_cast<int>(result));
++		}
++		return false;
++	}
++	(void)command_buffer;
++	(void)depth;
++	(void)motion;
++	return true;
++}
++
 +uint64_t PresentedCount() {
 +	auto& state = Get();
 +	// The provider keys this on its own swapchain; when inactive the caller gets
@@ -2678,10 +2750,10 @@ index 00000000..e7eb0b7c
 +} // namespace Libs::Graphics
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.h b/src/graphics/host_gpu/renderer/fsrFg.h
 new file mode 100644
-index 00000000..7b9c43ec
+index 00000000..a2b4fc86
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,61 @@
 +#pragma once
 +
 +// FSR 3.1 frame generation (ASTROHYBRID_FSR_FG=1).
@@ -2726,6 +2798,13 @@ index 00000000..7b9c43ec
 +                          uint64_t timeout, VkSemaphore semaphore,
 +                          VkFence fence, uint32_t* index);
 +VkResult Present(VkQueue queue, const VkPresentInfoKHR& info);
++
++/// Issues one frame-generation dispatch. `color`, `depth` and `motion` are the
++/// images the FSR upscale produced and consumed; `width`/`height` are their
++/// extent. Returns false when the module is inactive or the provider rejects it.
++bool DispatchFrame(VkCommandBuffer command_buffer, VkImage color, VkFormat color_format,
++                   VkImage depth, VkFormat depth_format, VkImage motion, VkFormat motion_format,
++                   uint32_t width, uint32_t height);
 +
 +/// Presented-frame count from the provider, or 0 when inactive. The direct
 +/// measure of "presented ≈ 2× rendered".
