@@ -1,4 +1,4 @@
-From e6f903868b706207af1967992688f012c7f9b9bc Mon Sep 17 00:00:00 2001
+From ddcedb9eccdf42b573fa2f7ec6925af33eb915b1 Mon Sep 17 00:00:00 2001
 From: DieMitchell <mitchell030504@gmail.com>
 Date: Sat, 14 Nov 2026 02:24:53 +0100
 Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
@@ -19,13 +19,13 @@ Subject: [PATCH] feat(linux): add the opt-in FSR 4.1.2 upscale path
  .../host_gpu/renderer/eopTimestamps.cpp       |  31 +
  src/graphics/host_gpu/renderer/fsr4.cpp       | 563 ++++++++++++++++++
  src/graphics/host_gpu/renderer/fsr4.h         |  17 +
- src/graphics/host_gpu/renderer/fsrFg.cpp      | 518 ++++++++++++++++
+ src/graphics/host_gpu/renderer/fsrFg.cpp      | 522 ++++++++++++++++
  src/graphics/host_gpu/renderer/fsrFg.h        |  61 ++
  src/graphics/host_gpu/renderer/render.h       |   5 +
  src/graphics/host_gpu/renderer/renderDraw.cpp |  15 +-
  .../presentation/window/swapchain.cpp         |  55 +-
  .../presentation/window/vulkanWindow.cpp      |  92 ++-
- 21 files changed, 2944 insertions(+), 11 deletions(-)
+ 21 files changed, 2948 insertions(+), 11 deletions(-)
  create mode 100644 src/fsr4/include/ffx_api.h
  create mode 100644 src/fsr4/include/ffx_api_types.h
  create mode 100644 src/fsr4/include/ffx_framegeneration.h
@@ -2414,10 +2414,10 @@ index 00000000..ddf0ae4f
 +#endif // KYTY_GRAPHICS_HOST_GPU_RENDERER_FSR4_H_
 diff --git a/src/graphics/host_gpu/renderer/fsrFg.cpp b/src/graphics/host_gpu/renderer/fsrFg.cpp
 new file mode 100644
-index 00000000..d127d60a
+index 00000000..34d00eb0
 --- /dev/null
 +++ b/src/graphics/host_gpu/renderer/fsrFg.cpp
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,522 @@
 +#include "graphics/host_gpu/renderer/fsrFg.h"
 +
 +#include <cstdio>
@@ -2565,6 +2565,13 @@ index 00000000..d127d60a
 +		return false;
 +	}
 +
++	// Frame generation is not stable in this runtime yet: the provider's present
++	// path completes but the runtime then faults, unreproducibly, and wrapping it
++	// leaves the game presenting the wrapper's images instead of its own. Until that
++	// is solved the stock presenter is used, so ASTROHYBRID_FSR_FG=1 is a no-op.
++	FSRFG_LOG("FSR-FG: frame generation is not stable yet; using the stock presenter\n");
++	return false;
++
 +	// VkQueueInfoFFXAPI::submitFunc receives no queue argument: it is a *bound*
 +	// submit, so a bare vkQueueSubmit cannot be used there and is left null.
 +	//
@@ -2608,9 +2615,6 @@ index 00000000..d127d60a
 +	// res=0, semaphore wait done), but the runtime faults immediately afterwards,
 +	// in Kyty's own post-present handling of images the wrapper now owns. The stock
 +	// presenter stays until that is solved.
-+	FSRFG_LOG("FSR-FG: present path completes; post-present faults; stock presenter\n");
-+	return false;
-+
 +	auto& state = Get();
 +	// A second Swapchain::Create arrives on resize or present-mode change. The
 +	// provider must recreate its own swapchain in place: the handle the presenter
