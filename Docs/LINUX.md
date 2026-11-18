@@ -130,14 +130,17 @@ float8 requirements, so it runs on devices FSR 4.1.2 excludes. Build it with
 permutations per pass and stages `Build/fsr3/libamd_fidelityfx_fsr3_vk.so`.
 The launcher exposes both under **Graphics -> Upscaling** when they are staged.
 
-### FSR 3.1 frame generation (not working)
+### FSR 3.1 frame generation (incomplete)
 
-`libamd_fidelityfx_framegeneration_vk.so` builds and the runtime wraps the
-swapchain with it, but the first present faults and no frames are generated.
-The remaining work is the per-frame `ffxDispatch` (colour, depth, motion vectors,
-frameID) at `renderDraw.cpp` after the upscale, plus UI registration and pacing.
-It is off unless `ASTROHYBRID_FSR_FG=1`, and the stock presenter is used
-whenever it is not.
+`libamd_fidelityfx_framegeneration_vk.so` builds, both contexts are created and
+configured, and the runtime wraps the swapchain: a 45 s run presents ~3000 frames
+with no fault, and the rate line reports `fg_presented` next to the rendered
+frame number, which tracks 1:1.
+
+Nothing is generated yet. `ffxDispatch` returns 1 for every frame, so the
+dispatch descriptor is still missing something the provider validates -- most
+likely the interpolation outputs from the swapchain query rather than the
+wrapper's own images. It is off unless `ASTROHYBRID_FSR_FG=1`.
 
 ## FSR 4.1.2 details
 
