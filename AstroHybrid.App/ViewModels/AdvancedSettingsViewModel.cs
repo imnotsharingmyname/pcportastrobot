@@ -76,6 +76,38 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
+        public bool StabilityMode
+        {
+            get => _mainViewModel.Settings.StabilityMode;
+            set
+            {
+                if (_mainViewModel.Settings.StabilityMode != value)
+                {
+                    _mainViewModel.Settings.StabilityMode = value;
+                    OnPropertyChanged();
+                    OnPropertyChanged(nameof(CommandBuffer24MiB));
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
+        }
+
+        public bool CommandBuffer24MiB
+        {
+            get => _mainViewModel.Settings.CommandBuffer24MiB;
+            set
+            {
+                if (_mainViewModel.Settings.CommandBuffer24MiB != value)
+                {
+                    _mainViewModel.Settings.CommandBuffer24MiB = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
+        }
+
+        public string StabilityModeNote => "Uses conservative renderer scheduling and extra command-buffer/hang diagnostics. This is a compatibility option, not a guaranteed crash fix.";
+        public string CommandBuffer24MiBNote => "Experimental: changes each of the five worker command buffers from 16 MiB to 24 MiB. This uses more graphics memory; leave off unless testing.";
+
         public bool HangWatchdog
         {
             get => _mainViewModel.Settings.HangWatchdog;
@@ -178,35 +210,6 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
-        // Wireless DualSense (Bluetooth HID audio/haptics) - issue #34
-        public bool DualSenseWirelessSpeaker
-        {
-            get => _mainViewModel.Settings.DualSenseWirelessSpeaker;
-            set
-            {
-                if (!Equals(_mainViewModel.Settings.DualSenseWirelessSpeaker, value))
-                {
-                    _mainViewModel.Settings.DualSenseWirelessSpeaker = value;
-                    OnPropertyChanged();
-                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
-                }
-            }
-        }
-
-        public bool DualSenseWirelessHaptics
-        {
-            get => _mainViewModel.Settings.DualSenseWirelessHaptics;
-            set
-            {
-                if (!Equals(_mainViewModel.Settings.DualSenseWirelessHaptics, value))
-                {
-                    _mainViewModel.Settings.DualSenseWirelessHaptics = value;
-                    OnPropertyChanged();
-                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
-                }
-            }
-        }
-
         public bool SkipIntro
         {
             get => _mainViewModel.Settings.SkipIntro;
@@ -240,10 +243,6 @@ namespace AstroHybrid.App.ViewModels
         public string MotionNote => "Enables accelerometer/gyroscope input for shake and tilt moves. Disable if your controller doesn't have motion sensors.";
 
         public string TriggerNote2 => "Enables DualSense trigger effect state reporting. The game ignores L2/R2 without it.";
-
-        public string DualSenseWirelessSpeakerNote => "Routes the DualSense speaker audio over Bluetooth HID. Requires a Bluetooth-connected DualSense; wired controllers use USB audio instead.";
-
-        public string DualSenseWirelessHapticsNote => "Routes DualSense haptic feedback over Bluetooth HID. Requires a Bluetooth-connected DualSense; wired controllers use USB audio instead.";
 
         public string SkipIntroNote => "Skips the opening PlayStation Studios and Team Asobi intro videos (-skipIntro).";
 

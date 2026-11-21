@@ -16,5 +16,7 @@ if not defined ASTROHYBRID_CUDA_HOLE set ASTROHYBRID_CUDA_HOLE=1
 if not defined ASTROHYBRID_DLSS set ASTROHYBRID_DLSS=1
 if not defined ASTROHYBRID_DLSS_PATH set "ASTROHYBRID_DLSS_PATH=%~dp0Build\RunHybrid"
 if not defined ASTROHYBRID_LOW_LATENCY set ASTROHYBRID_LOW_LATENCY=1
+rem Keep game simulation real-time when DLSS lowers the presented frame rate, matching launcher startup.
+if not defined ASTROHYBRID_GAME_SPEED set ASTROHYBRID_GAME_SPEED=1
 call "%~dp0Run-AstroHybrid.bat" %*
 exit /b %ERRORLEVEL%

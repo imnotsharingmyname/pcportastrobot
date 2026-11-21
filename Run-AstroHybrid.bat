@@ -6,17 +6,21 @@ rem   python -I Tools\hybrid\make_run_hybrid.py
 setlocal
 set "ROOT=%~dp0"
 if not exist "%ROOT%Build\RunHybrid\AstroBot.exe" (
-  echo Build\RunHybrid not found. Run: python -I Tools\hybrid\make_run_hybrid.py
+  rem Issue #153: a third-party launcher started the game before AstroHybrid's setup ran.
+  echo The game is not set up yet: Build\RunHybrid\AstroBot.exe was not found next to this script.
+  echo Open AstroHybrid.exe in this folder and run its setup ^(pick your game dump^) first, then start the game again.
+  echo Developers: python -I Tools\hybrid\make_run_hybrid.py builds it from a source checkout.
   exit /b 1
 )
 set APS5_GPU_ENGINE=kyty
-rem Keep commit-epoch fastpath off and buffer-range fixes on so cloth, blankets, and bubbles
+rem Keep writable commit-epoch fastpath off (read-only clean memo fastpath on) and buffer-range fixes on so cloth, blankets, and bubbles
 rem do not corrupt into stray polygons (issues #30, #35).
-set "KYTY_BARRIER_BATCH="
-set "KYTY_DISPATCH_OVERLAP="
-set "KYTY_WAVE64_WARPS="
-set "ASTROHYBRID_COMMIT_EPOCH_FASTPATH=0"
-set "KYTY_BUFFER_RANGE_FIXES=1"
+if not defined ASTROHYBRID_COMMIT_EPOCH_FASTPATH set "ASTROHYBRID_COMMIT_EPOCH_FASTPATH=read"
+if not defined KYTY_BUFFER_RANGE_FIXES set "KYTY_BUFFER_RANGE_FIXES=1"
+if not defined ASTROHYBRID_OPT_1 set "ASTROHYBRID_OPT_1=1"
+if not defined ASTROHYBRID_OPT_2 set "ASTROHYBRID_OPT_2=1"
+if not defined KYTY_SUBMIT_MIN_INTERVAL_US set "KYTY_SUBMIT_MIN_INTERVAL_US=500"
+if not defined KYTY_GFX_SLICE_DRAWS set "KYTY_GFX_SLICE_DRAWS=512"
 rem Hang watchdog (A/B 2026-11-07, OVERNIGHT.md): the preset's KYTY_HANG_WATCHDOG=auto turns it on for
 rem RTX 50 GPUs, where it costs the command processor ~1.8 ms per frame in Sky Garden (CP 33.7 -> 31.9 ms).
 rem It only records diagnostics when the game hangs. ASTROHYBRID_HANG_WATCHDOG=1 (or KYTY_HANG_WATCHDOG
@@ -27,6 +31,27 @@ rem hybrid never opened Kyty's caches and compiled shaders during play (100-117 
 rem late compiles and no frame over 80 ms. ASTROHYBRID_SHADER_CACHE=0 turns it off.
 if not defined ASTROHYBRID_CACHE_TITLE_ID if not "%ASTROHYBRID_SHADER_CACHE%"=="0" set ASTROHYBRID_CACHE_TITLE_ID=PPSA21567
 if exist "%ROOT%Build\RunHybrid\u59-preset.cmd" call "%ROOT%Build\RunHybrid\u59-preset.cmd"
+rem Stability Mode overrides also apply to direct batch-file launches, after the preset is loaded.
+if "%ASTROHYBRID_STABILITY_MODE%"=="1" (
+  set KYTY_BARRIER_BATCH=1
+  set KYTY_DISPATCH_OVERLAP=0
+  set KYTY_DRAW_RUN=0
+  set ASTROHYBRID_OPT_1=0
+  set ASTROHYBRID_OPT_2=0
+  set ASTROHYBRID_COMMIT_EPOCH_FASTPATH=0
+  set ASTROHYBRID_DRAW_PREP_TUNING=0
+  set KYTY_AGC_CB_WATERMARK=1
+  set KYTY_HANG_WATCHDOG=1
+  set ASTROHYBRID_HANG_WATCHDOG=1
+  set KYTY_GFX_SLICE_DRAWS=128
+  set KYTY_SUBMIT_MIN_INTERVAL_US=0
+)
+rem Dump folders setup could not link into app0 (an exFAT, FAT32 or network drive, issue #135): the game
+rem reads them from the dump through AnyPS5's path aliases (APS5_PATH_ALIASES, one line written by setup).
+if not defined APS5_PATH_ALIASES if exist "%ROOT%Build\RunHybrid\app0-aliases.txt" set /p APS5_PATH_ALIASES=<"%ROOT%Build\RunHybrid\app0-aliases.txt"
+rem Mods (#22): a file in the "mods" folder next to AstroHybrid.exe replaces the game file with the same
+rem path below the game folder, e.g. mods\data\prein\levels\...; the game dump itself is never changed.
+if not defined APS5_PATH_OVERLAYS if exist "%ROOT%mods\" set "APS5_PATH_OVERLAYS=/app0=%ROOT%mods"
 rem Prefer the soft-assert NonRT build for the command-buffer overflow path (issue #25).
 rem Callers can still override ASTROHYBRID_EXE explicitly; older runtimes fall back safely.
 if not defined ASTROHYBRID_EXE if exist "%ROOT%Build\RunHybrid\AstroBot-NonRT-SoftAssert.exe" set ASTROHYBRID_EXE=AstroBot-NonRT-SoftAssert.exe

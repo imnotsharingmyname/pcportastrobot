@@ -14,7 +14,7 @@ $name = "AstroBotPC-AstroHybrid-$Version"
 $stage = Join-Path $Out $name
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $run = Join-Path $stage 'Build\RunHybrid'
-New-Item -ItemType Directory -Force $run, (Join-Path $stage 'tools'), (Join-Path $stage 'licenses') | Out-Null
+New-Item -ItemType Directory -Force $run, (Join-Path $stage 'tools'), (Join-Path $stage 'licenses'), (Join-Path $stage 'Logs') | Out-Null
 
 # The app (built with MSBuild, Release) and its libraries.
 $app = Join-Path $root 'AstroHybrid.App\bin\Release'
@@ -24,6 +24,17 @@ $config = Join-Path $root 'AstroHybrid.App\obj\Release\AstroHybrid.exe.config'
 if (-not (Select-String -Path $config -Pattern 'bindingRedirect' -Quiet)) { throw 'generated config has no binding redirects' }
 Copy-Item $config (Join-Path $stage 'AstroHybrid.exe.config')
 Copy-Item (Join-Path $root 'Run-AstroHybrid.bat') $stage
+foreach ($extraBat in 'Run-AstroHybrid-DLSS.bat', 'Run-AstroHybrid-FG.bat') {
+    $batPath = Join-Path $root $extraBat
+    if (Test-Path $batPath) { Copy-Item $batPath $stage }
+}
+# The Linux (Wine) start script the README's Linux section uses (#123, #124), with LF line endings:
+# bash fails on CRLF, which a Windows checkout may have.
+$linuxSh = Join-Path $root 'Run-AstroHybrid-Linux.sh'
+if (Test-Path $linuxSh) {
+    $text = [IO.File]::ReadAllText($linuxSh) -replace "`r`n", "`n"
+    [IO.File]::WriteAllText((Join-Path $stage 'Run-AstroHybrid-Linux.sh'), $text, (New-Object Text.UTF8Encoding $false))
+}
 
 # AnyPS5's relinker (needs only the Universal C runtime that ships with Windows 10/11).
 Copy-Item (Join-Path $root 'Build\anyps5\core\relinker\relinker.exe') (Join-Path $stage 'tools')
@@ -38,9 +49,10 @@ Get-ChildItem (Join-Path $src 'libs') -File | ForEach-Object {
 }
 $runtime = 'kyty_gpu.dll', 'astrohybrid_host.dll', 'u59-preset.cmd', 'u59-preset.json',
            'nvngx_dlss.dll', 'nvngx_dlssg.dll', 'NvLowLatencyVk.dll',
-           'sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll'
+           'sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll',
+           'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll'
 foreach ($f in $runtime) { Copy-Item (Join-Path $src $f) $run }
-foreach ($f in 'nvngx_dlss.license.txt', 'streamline.license.txt', 'reflex.license.txt') {
+foreach ($f in 'nvngx_dlss.license.txt', 'streamline.license.txt', 'reflex.license.txt', 'amd_fsr.license.txt') {
     Copy-Item (Join-Path $src $f) $run
     Copy-Item (Join-Path $src $f) (Join-Path $stage 'licenses')
 }
@@ -63,7 +75,8 @@ AstroHybrid $Version - Astro Bot (PPSA21567) native PC port
 You need your own decrypted PS5 dump of Astro Bot (the folder with eboot.bin, sce_module and sce_sys).
 No game files are included here.
 
-1. Extract this folder somewhere with about 1 GB free (the game itself stays where your dump is).
+1. Extract the zip into a new, empty folder with about 1 GB free (the game itself stays where your
+   dump is). To update an existing install, use the app's Update button or extract over that folder.
 2. Start AstroHybrid.exe. Setup asks for your dump folder, then builds the game for Windows from it
    (about 2 minutes; your dump is only read, never changed).
 3. The app picks the best settings for your PC once; change them on the Graphics and Controller pages.
@@ -81,8 +94,8 @@ Intel processors: setup converts the game's AMD-only instructions for you (updat
 the app offers to convert the game again at its first start).
 Language and VSync: Advanced and Graphics pages.
 
-Not affiliated with Sony Interactive Entertainment, Team ASOBI or NVIDIA. NVIDIA runtime files and the
-Noto fonts (SIL Open Font License) are redistributed under the licences in the licenses folder.
+Not affiliated with Sony Interactive Entertainment, Team ASOBI, NVIDIA or AMD. NVIDIA and AMD FSR runtime
+files and the Noto fonts (SIL Open Font License) are redistributed under the licences in the licenses folder.
 "@ | Set-Content -Encoding UTF8 (Join-Path $stage 'README.txt')
 
 # Guard: nothing from a game dump or a play session.
@@ -96,6 +109,9 @@ if ($bad) { $bad.FullName; throw 'game or session files found in the release' }
 $zip = Join-Path $Out "$name.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $true)
+# Files at the zip's root, no wrapper folder: the launcher's updater (1.2.2 and older) copies the archive's
+# paths as they are into the install, so a wrapper folder put the update in a subfolder and the launcher
+# stayed on the old version.
+[IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
 "{0}: {1:N0} files, {2:N1} MB staged, zip {3:N1} MB" -f $name, (Get-ChildItem $stage -Recurse -File).Count,
     ((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), ((Get-Item $zip).Length / 1MB)

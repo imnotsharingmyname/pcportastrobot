@@ -1,0 +1,2 @@
+# Shell scripts run on Linux: keep LF line endings in every checkout (CRLF breaks bash).
+*.sh text eol=lf
