@@ -341,18 +341,22 @@ namespace AstroHybrid.App.Services
                 }
                 env["ASTROHYBRID_EXE"] = chosen;
 
-                // Apply FSR quality tier-0 internal render resolution (or restore PS5 default 1920x1080 when FSR is not active).
+                // Apply FSR quality tier-0 internal render & output resolution (or restore PS5 default 1920x1080 -> 2432x1368).
                 try
                 {
                     int targetW = 1920;
                     int targetH = 1080;
+                    int outW = 2432;
+                    int outH = 1368;
                     if (settings.Upscale == 2 && settings.FsrQuality >= 0 && settings.FsrQuality < AppSettings.FsrQualityPresets.Length)
                     {
                         var fsrPreset = AppSettings.FsrQualityPresets[settings.FsrQuality];
-                        targetW = fsrPreset.Width;
-                        targetH = fsrPreset.Height;
+                        targetW = fsrPreset.InWidth;
+                        targetH = fsrPreset.InHeight;
+                        outW = fsrPreset.OutWidth;
+                        outH = fsrPreset.OutHeight;
                     }
-                    new GameSetup(_rootDirectory).ApplyRenderResolutionTier0(chosen, targetW, targetH, AppendDebugLog);
+                    new GameSetup(_rootDirectory).ApplyRenderResolutionTier0(chosen, targetW, targetH, outW, outH, AppendDebugLog);
                 }
                 catch (Exception ex)
                 {

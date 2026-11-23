@@ -782,15 +782,24 @@ namespace AstroHybrid.App.Services
         private static readonly string Tier0HeightTableAnchor =
             "58050000580500005007000070080000";
 
+        // Upscale / post-process output target sites (default 2432x1368 when tier < 2).
+        // Site 1: width at +1, height at +38; Site 2: width at +6, height at +16.
+        private static readonly string UpscaleOutputSite1Pattern =
+            "BB????????B970080000488D35????????488DBDC0FEFFFFC5F857C0664489A0B216050041BC????????80B850010000";
+
+        private static readonly string UpscaleOutputSite2Pattern =
+            "B9000F0000BA????????BE70080000BF????????4C8DB3301600000F44D10F44FE";
+
         // Patches Astro Bot's dynamic-resolution tier-0 width/height across both the 3 switch functions
-        // and the 3 .rodata lookup table pairs anchored on tiers 1..4. Idempotent and reversible back
-        // to 1920x1080; touches only the immediate/table bytes in place when a change is needed.
-        public bool ApplyRenderResolutionTier0(string exeName, int width, int height, Action<string>? log = null)
+        // and the 3 .rodata lookup table pairs anchored on tiers 1..4, plus the 2 upscale output target
+        // sites (default 2432x1368). Idempotent and reversible back to 1920x1080 -> 2432x1368.
+        public bool ApplyRenderResolutionTier0(string exeName, int width, int height, int outWidth = 2432, int outHeight = 1368, Action<string>? log = null)
         {
             var logFn = log ?? (_ => { });
-            if (width < 640 || width > 2432 || height < 360 || height > 1368 || (width % 64) != 0 || (height % 8) != 0)
+            if (width < 640 || width > 2432 || height < 360 || height > 1368 || (width % 64) != 0 || (height % 8) != 0 ||
+                outWidth < 1280 || outWidth > 2432 || outHeight < 720 || outHeight > 1368 || (outWidth % 64) != 0 || (outHeight % 8) != 0)
             {
-                logFn($"FSR resolution tier-0: rejected invalid size {width}x{height}");
+                logFn($"FSR resolution tier-0: rejected invalid size {width}x{height} -> {outWidth}x{outHeight}");
                 return false;
             }
 
@@ -806,12 +815,15 @@ namespace AstroHybrid.App.Services
             var jmpOffsets = FindAllMatches(data, Tier0ResolutionJmpPattern);
             var widthTableAnchors = FindAllMatches(data, Tier0WidthTableAnchor);
             var heightTableAnchors = FindAllMatches(data, Tier0HeightTableAnchor);
+            var outSite1 = FindAllMatches(data, UpscaleOutputSite1Pattern);
+            var outSite2 = FindAllMatches(data, UpscaleOutputSite2Pattern);
 
             if (retOffsets.Count != 2 || jmpOffsets.Count != 1 ||
-                widthTableAnchors.Count != 3 || heightTableAnchors.Count != 3)
+                widthTableAnchors.Count != 3 || heightTableAnchors.Count != 3 ||
+                outSite1.Count != 1 || outSite2.Count != 1)
             {
-                logFn($"FSR resolution tier-0: expected 2+1 switch & 3+3 table sites in {exeName}, " +
-                      $"found {retOffsets.Count}+{jmpOffsets.Count} & {widthTableAnchors.Count}+{heightTableAnchors.Count}, skipped");
+                logFn($"FSR resolution tier-0: expected 2+1 switch, 3+3 table & 1+1 output sites in {exeName}, " +
+                      $"found {retOffsets.Count}+{jmpOffsets.Count}, {widthTableAnchors.Count}+{heightTableAnchors.Count}, {outSite1.Count}+{outSite2.Count}, skipped");
                 return false;
             }
 
@@ -838,6 +850,9 @@ namespace AstroHybrid.App.Services
                 heightSlots.Add(anchor - 4);
             }
 
+            var outWidthSlots = new[] { outSite1[0] + 1, outSite2[0] + 6 };
+            var outHeightSlots = new[] { outSite1[0] + 38, outSite2[0] + 16 };
+
             bool changed = false;
             for (int i = 0; i < widthSlots.Count; i++)
             {
@@ -848,15 +863,29 @@ namespace AstroHybrid.App.Services
                     break;
                 }
             }
+            if (!changed)
+            {
+                for (int i = 0; i < outWidthSlots.Length; i++)
+                {
+                    if (BitConverter.ToInt32(data, outWidthSlots[i]) != outWidth ||
+                        BitConverter.ToInt32(data, outHeightSlots[i]) != outHeight)
+                    {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
 
             if (!changed)
             {
-                logFn($"FSR resolution tier-0: {exeName} already set to {width}x{height}");
+                logFn($"FSR resolution tier-0: {exeName} already set to {width}x{height} -> {outWidth}x{outHeight}");
                 return true;
             }
 
             var wBytes = BitConverter.GetBytes(width);
             var hBytes = BitConverter.GetBytes(height);
+            var owBytes = BitConverter.GetBytes(outWidth);
+            var ohBytes = BitConverter.GetBytes(outHeight);
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
                 foreach (int slot in widthSlots)
@@ -869,10 +898,20 @@ namespace AstroHybrid.App.Services
                     fs.Seek(slot, SeekOrigin.Begin);
                     fs.Write(hBytes, 0, 4);
                 }
+                foreach (int slot in outWidthSlots)
+                {
+                    fs.Seek(slot, SeekOrigin.Begin);
+                    fs.Write(owBytes, 0, 4);
+                }
+                foreach (int slot in outHeightSlots)
+                {
+                    fs.Seek(slot, SeekOrigin.Begin);
+                    fs.Write(ohBytes, 0, 4);
+                }
                 fs.Flush(true);
             }
 
-            logFn($"FSR resolution tier-0: patched {exeName} to {width}x{height} (3 switch + 3 table sites)");
+            logFn($"FSR resolution tier-0: patched {exeName} to {width}x{height} -> {outWidth}x{outHeight} (3 switch + 3 table + 2 output sites)");
             return true;
         }
 

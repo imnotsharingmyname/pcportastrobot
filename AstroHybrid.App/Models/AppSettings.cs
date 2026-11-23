@@ -222,14 +222,13 @@ namespace AstroHybrid.App.Models
         [JsonIgnore]
         public bool IsSuperUltrawideSize => GetAspectRatio(Size) == 32;
 
-        public static readonly (string Label, string ShortLabel, int Width, int Height)[] FsrQualityPresets =
+        // Glitch-free AMD FSR render/output presets (all >= 1920x1080 internal so Astro Bot's
+        // grass/occlusion passes stay intact; 1080p Native avoids the 2432x1368 post-process upscale).
+        public static readonly (string Label, string ShortLabel, int InWidth, int InHeight, int OutWidth, int OutHeight)[] FsrQualityPresets =
         {
-            ("Default (PS5 — 1920x1080)",          "Default 1080p",   1920, 1080),
-            ("Native AA (2432x1368 — sharpest)",   "Native AA",       2432, 1368),
-            ("Quality (1664x936 — 1.46x)",         "Quality",         1664, 936),
-            ("Balanced (1408x792 — 1.73x)",        "Balanced",        1408, 792),
-            ("Performance (1280x720 — 1.90x)",     "Performance",     1280, 720),
-            ("Ultra Performance (1024x576 — 2.38x)", "Ultra Perf",    1024, 576),
+            ("Default (PS5 — 1920x1080 → 2432x1368)",          "Default 1080p→1368p", 1920, 1080, 2432, 1368),
+            ("1080p Native (1920x1080 → 1920x1080 — faster)",  "1080p Native",        1920, 1080, 1920, 1080),
+            ("Native AA (2432x1368 → 2432x1368 — sharpest)",   "Native AA 1368p",     2432, 1368, 2432, 1368),
         };
 
         public static readonly string[] FsrVersionValues = { "auto", "4", "3", "2" };
