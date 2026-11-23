@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -339,6 +340,24 @@ namespace AstroHybrid.App.Services
                     }
                 }
                 env["ASTROHYBRID_EXE"] = chosen;
+
+                // Apply FSR quality tier-0 internal render resolution (or restore PS5 default 1920x1080 when FSR is not active).
+                try
+                {
+                    int targetW = 1920;
+                    int targetH = 1080;
+                    if (settings.Upscale == 2 && settings.FsrQuality >= 0 && settings.FsrQuality < AppSettings.FsrQualityPresets.Length)
+                    {
+                        var fsrPreset = AppSettings.FsrQualityPresets[settings.FsrQuality];
+                        targetW = fsrPreset.Width;
+                        targetH = fsrPreset.Height;
+                    }
+                    new GameSetup(_rootDirectory).ApplyRenderResolutionTier0(chosen, targetW, targetH, AppendDebugLog);
+                }
+                catch (Exception ex)
+                {
+                    AppendDebugLog($"FSR resolution tier-0 patch skipped: {ex.Message}");
+                }
             }
 
             // FPS limit
@@ -398,6 +417,11 @@ namespace AstroHybrid.App.Services
             {
                 env["ASTROHYBRID_FSR"] = "1";
                 env["ASTROHYBRID_FSR_PATH"] = Path.Combine(_rootDirectory, "Build", "RunHybrid");
+                double sharp = Math.Max(0, Math.Min(100, settings.FsrSharpness)) / 100.0;
+                env["ASTROHYBRID_FSR_SHARPNESS"] = sharp.ToString("0.00", CultureInfo.InvariantCulture);
+                int verIdx = settings.FsrVersion >= 0 && settings.FsrVersion < AppSettings.FsrVersionValues.Length
+                    ? settings.FsrVersion : 0;
+                env["ASTROHYBRID_FSR_VERSION"] = AppSettings.FsrVersionValues[verIdx];
             }
             if (settings.Upscale == 1)
             {
