@@ -426,6 +426,9 @@ namespace AstroHybrid.App.ViewModels
             Settings.VSync = defaults.VSync;
             Settings.Overlay = defaults.Overlay;
             Settings.DlssQuality = defaults.DlssQuality;
+            Settings.FsrQuality = defaults.FsrQuality;
+            Settings.FsrSharpness = defaults.FsrSharpness;
+            Settings.FsrVersion = defaults.FsrVersion;
             Settings.Gpu = -1;
             HardwareInfo.SelectGpu(-1);
             best = PickBestSettings(HardwareInfo);
