@@ -154,7 +154,7 @@ namespace AstroHybrid.App.Models
         public bool SkipIntro { get; set; } = false;
 
         // Async Vulkan staging via GPU timeline semaphores (KYTY_SUBMIT_WAIT_BEFORE_SIGNAL=1).
-        // Null = automatic (enabled on AMD/Intel GPUs; disabled on NVIDIA where HAGS on RTX 50 can freeze).
+        // Null = automatic (enabled on AMD GPUs; off by default on NVIDIA/other GPUs where RTX 50 HAGS can freeze).
         [JsonPropertyName("asyncVulkanStaging")]
         public bool? AsyncVulkanStaging { get; set; }
 
@@ -162,8 +162,7 @@ namespace AstroHybrid.App.Models
         {
             if (AsyncVulkanStaging.HasValue) return AsyncVulkanStaging.Value;
             var vendor = hardware?.SelectedGpu?.Vendor ?? "";
-            return !string.IsNullOrEmpty(vendor) &&
-                   !string.Equals(vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase);
+            return string.Equals(vendor, "AMD", StringComparison.OrdinalIgnoreCase);
         }
 
         // Set by the setup wizard: the main window picks the best settings for this PC once.

@@ -195,8 +195,8 @@ namespace AstroHybrid.App.ViewModels
         // Experimental Features
         public bool IsExperimentalExpanded { get; set; } = true;
 
-        private bool IsNvidiaSelected =>
-            string.Equals(_mainViewModel.HardwareInfo?.SelectedGpu?.Vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase);
+        private bool IsAmdSelected =>
+            string.Equals(_mainViewModel.HardwareInfo?.SelectedGpu?.Vendor, "AMD", StringComparison.OrdinalIgnoreCase);
 
         public bool AsyncVulkanStaging
         {
@@ -212,9 +212,9 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
-        public string AsyncVulkanStagingNote => IsNvidiaSelected
-            ? "Experimental on NVIDIA (off by default): moves texture/DMA staging waits to Vulkan timeline semaphores (KYTY_SUBMIT_WAIT_BEFORE_SIGNAL=1). Warning: can freeze Windows on RTX 50-series GPUs with Hardware-Accelerated GPU Scheduling (HAGS) enabled."
-            : "Enabled by default on AMD/Intel GPUs. Moves texture/DMA staging waits to Vulkan timeline semaphores (KYTY_SUBMIT_WAIT_BEFORE_SIGNAL=1), eliminating host submit stalls and improving FPS in heavy worlds.";
+        public string AsyncVulkanStagingNote => IsAmdSelected
+            ? "Enabled by default on AMD GPUs. Moves texture/DMA staging waits to Vulkan timeline semaphores (KYTY_SUBMIT_WAIT_BEFORE_SIGNAL=1), eliminating host submit stalls and improving FPS and load times in heavy worlds."
+            : "Experimental (off by default on non-AMD GPUs): moves texture/DMA staging waits to Vulkan timeline semaphores (KYTY_SUBMIT_WAIT_BEFORE_SIGNAL=1). Warning: can freeze Windows on NVIDIA RTX 50-series GPUs with Hardware-Accelerated GPU Scheduling (HAGS) enabled.";
 
         // Info texts
         public string LightingNote => "Faster lighting uses the NonRT renderer (AstroBot-NonRT.exe) which disables GI probes and some lighting shaders for better performance.";
