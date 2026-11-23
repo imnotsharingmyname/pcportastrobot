@@ -767,6 +767,102 @@ namespace AstroHybrid.App.Services
             return true;
         }
 
+        private static readonly string Tier0ResolutionRetPattern =
+            "C707????????C706????????C3C707000D0000C70650070000C3C707000F0000C70670080000";
+
+        private static readonly string Tier0ResolutionJmpPattern =
+            "C707????????C706????????EB1AC707000D0000C70650070000EB0CC707000F0000C70670080000";
+
+        // Patches Astro Bot's dynamic-resolution tier-0 width/height across the 3 switch functions
+        // anchored on tier 3 (3328x1872) and tier 4 (3840x2160). Idempotent and reversible back to
+        // 1920x1080; touches only the 3x8 immediate bytes in place if a change is actually needed.
+        public bool ApplyRenderResolutionTier0(string exeName, int width, int height, Action<string>? log = null)
+        {
+            var logFn = log ?? (_ => { });
+            if (width < 640 || width > 2432 || height < 360 || height > 1368 || (width % 64) != 0 || (height % 8) != 0)
+            {
+                logFn($"FSR resolution tier-0: rejected invalid size {width}x{height}");
+                return false;
+            }
+
+            var path = Path.Combine(_runHybrid, exeName);
+            if (!File.Exists(path))
+            {
+                logFn($"FSR resolution tier-0: {exeName} not found");
+                return false;
+            }
+
+            var data = File.ReadAllBytes(path);
+            var retOffsets = FindAllMatches(data, Tier0ResolutionRetPattern);
+            var jmpOffsets = FindAllMatches(data, Tier0ResolutionJmpPattern);
+            if (retOffsets.Count != 2 || jmpOffsets.Count != 1)
+            {
+                logFn($"FSR resolution tier-0: expected 2+1 sites in {exeName}, found {retOffsets.Count}+{jmpOffsets.Count}, skipped");
+                return false;
+            }
+
+            var offsets = new List<int>(3);
+            offsets.AddRange(retOffsets);
+            offsets.AddRange(jmpOffsets);
+
+            bool changed = false;
+            foreach (int off in offsets)
+            {
+                int curW = BitConverter.ToInt32(data, off + 2);
+                int curH = BitConverter.ToInt32(data, off + 8);
+                if (curW != width || curH != height)
+                {
+                    changed = true;
+                    break;
+                }
+            }
+
+            if (!changed)
+            {
+                logFn($"FSR resolution tier-0: {exeName} already set to {width}x{height}");
+                return true;
+            }
+
+            var wBytes = BitConverter.GetBytes(width);
+            var hBytes = BitConverter.GetBytes(height);
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                foreach (int off in offsets)
+                {
+                    fs.Seek(off + 2, SeekOrigin.Begin);
+                    fs.Write(wBytes, 0, 4);
+                    fs.Seek(off + 8, SeekOrigin.Begin);
+                    fs.Write(hBytes, 0, 4);
+                }
+                fs.Flush(true);
+            }
+
+            logFn($"FSR resolution tier-0: patched {exeName} to {width}x{height} (3 sites)");
+            return true;
+        }
+
+        private static List<int> FindAllMatches(byte[] data, string hexPattern)
+        {
+            var (pattern, anyByte) = HexPattern(hexPattern);
+            var results = new List<int>();
+            int limit = data.Length - pattern.Length;
+            for (int i = 0; i <= limit; i++)
+            {
+                if (!anyByte[0] && data[i] != pattern[0]) continue;
+                bool match = true;
+                for (int j = 1; j < pattern.Length; j++)
+                {
+                    if (!anyByte[j] && data[i + j] != pattern[j]) { match = false; break; }
+                }
+                if (match)
+                {
+                    results.Add(i);
+                    i += pattern.Length - 1;
+                }
+            }
+            return results;
+        }
+
         private void WriteVariant(byte[] data, string name)
         {
             File.WriteAllBytes(Path.Combine(_runHybrid, name + ".exe"), data);
