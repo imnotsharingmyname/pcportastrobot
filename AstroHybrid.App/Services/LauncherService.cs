@@ -114,7 +114,7 @@ namespace AstroHybrid.App.Services
             return await tcs.Task;
         }
 
-        public async Task<ShaderPrep.Result> PrepareShadersAsync(Dictionary<string, string> variables, IProgress<string>? status, CancellationToken ct)
+        public async Task<ShaderPrep.Result> PrepareShadersAsync(Dictionary<string, string> variables, IProgress<ShaderPrep.ProgressUpdate>? progress, CancellationToken ct)
         {
             var runHybridPath = Path.Combine(_rootDirectory, "Build", "RunHybrid");
             var exePath = new[] { "AstroBot-NonRT-SoftAssert.exe", "AstroBot-NonRT.exe", "AstroBot.exe" }
@@ -122,6 +122,11 @@ namespace AstroHybrid.App.Services
                 .FirstOrDefault(File.Exists);
             if (exePath == null || !File.Exists(ShaderPrep.ListPath(runHybridPath)))
                 return ShaderPrep.Result.NoList;
+
+            Directory.CreateDirectory(Path.Combine(runHybridPath, "_PipelineCache"));
+            var logsDir = Path.Combine(_rootDirectory, "Logs");
+            Directory.CreateDirectory(logsDir);
+            var prepLogPath = Path.Combine(logsDir, "shader-prep.log");
 
             var psi = new ProcessStartInfo
             {
@@ -132,46 +137,175 @@ namespace AstroHybrid.App.Services
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+
+            // Start from Kyty's u59-preset.cmd so shader codegen flags (KYTY_PROGRAM_CACHE,
+            // KYTY_UNIFORM_BUFFERS, KYTY_CB_SHADER_MASK_EXPORTS, etc.) match actual gameplay.
+            foreach (var kvp in ShaderPrep.LoadPresetEnv(runHybridPath))
+            {
+                psi.EnvironmentVariables[kvp.Key] = kvp.Value;
+            }
             foreach (var kvp in variables)
             {
                 psi.EnvironmentVariables[kvp.Key] = kvp.Value;
             }
+
             psi.EnvironmentVariables["APS5_GPU_ENGINE"] = "kyty";
             psi.EnvironmentVariables["KYTY_GPU_HOST_MODULE"] = "astrohybrid_host.dll";
             psi.EnvironmentVariables["KYTY_HANG_WATCHDOG"] = "0";
+            var aliasesPath = Path.Combine(runHybridPath, "app0-aliases.txt");
+            if (File.Exists(aliasesPath))
+            {
+                try
+                {
+                    var aliasLine = File.ReadLines(aliasesPath).FirstOrDefault();
+                    if (!string.IsNullOrWhiteSpace(aliasLine))
+                        psi.EnvironmentVariables["APS5_PATH_ALIASES"] = aliasLine.Trim();
+                }
+                catch { }
+            }
+
+            int prepThreads = Math.Max(2, Math.Min(12, Environment.ProcessorCount - 2));
             psi.EnvironmentVariables["KYTY_PIPELINE_LIST"] = "1";
             psi.EnvironmentVariables["KYTY_PIPELINE_LIST_CROSS"] = "1";
             psi.EnvironmentVariables["KYTY_PIPELINE_LIST_PREPARE"] = "1";
+            psi.EnvironmentVariables["KYTY_SHADER_PRECOMPILE_WAIT"] = "1";
+            psi.EnvironmentVariables["KYTY_PIPELINE_JOURNAL_WAIT"] = "1";
+            psi.EnvironmentVariables["KYTY_SHADER_PRECOMPILE_THREADS"] = prepThreads.ToString();
+            psi.EnvironmentVariables["KYTY_PIPELINE_JOURNAL_THREADS"] = prepThreads.ToString();
+            psi.EnvironmentVariables["KYTY_PIPELINE_CACHE_SAVE_INTERVAL_S"] = "15";
+            psi.EnvironmentVariables["KYTY_PIPELINE_CACHE_SAVE_MIN_NEW"] = "25";
+            psi.EnvironmentVariables["KYTY_PIPELINE_CACHE_SAVE_QUIET_S"] = "0";
             psi.EnvironmentVariables["ASTROHYBRID_CACHE_TITLE_ID"] = "PPSA21567";
 
-            using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            // Keep upscalers / frame gen off and avoid opening a fullscreen black window over the popup.
+            psi.EnvironmentVariables["ASTROHYBRID_FSR"] = "0";
+            psi.EnvironmentVariables["ASTROHYBRID_FSRFG"] = "0";
+            psi.EnvironmentVariables["ASTROHYBRID_DLSS"] = "0";
+            psi.EnvironmentVariables["ASTROHYBRID_DLSSG"] = "0";
+            psi.EnvironmentVariables["ASTROHYBRID_LOW_LATENCY"] = "0";
+            psi.EnvironmentVariables["KYTY_GPU_FULLSCREEN"] = "0";
+            psi.EnvironmentVariables["KYTY_GPU_WIDTH"] = "320";
+            psi.EnvironmentVariables["KYTY_GPU_HEIGHT"] = "180";
+
+            using var logWriter = new StreamWriter(prepLogPath, false);
+            var logLock = new object();
+            void WritePrepLog(string prefix, string line)
+            {
+                lock (logLock)
+                {
+                    try { logWriter.WriteLine($"{prefix}{line}"); logWriter.Flush(); } catch { }
+                }
+            }
+
+            // astrohybrid_host.dll aborts if Kyty's start_graphics blocks longer than 120s.
+            // Because KYTY_PIPELINE_CACHE_SAVE_INTERVAL_S=15 persists PPSA21567.bin continuously,
+            // we cleanly recycle passes around 95-108s so each pass gets instant driver-cache hits
+            // on already-compiled pipelines until preparation finishes with zero SIGABRT.
+            const int MaxPasses = 8;
+            const int SoftRecycleSeconds = 95;
+            const int HardRecycleSeconds = 108;
+
             var sawDone = false;
+            var sawReplayDone = false;
             var sawNoList = false;
-            process.OutputDataReceived += (s, e) =>
-            {
-                if (string.IsNullOrEmpty(e.Data)) return;
-                var step = ShaderPrep.Step(e.Data);
-                if (step != null) status?.Report(step);
-                if (ShaderPrep.IsDone(e.Data)) sawDone = true;
-                if (ShaderPrep.IsNoList(e.Data)) sawNoList = true;
-            };
-            process.ErrorDataReceived += (s, e) => { };
+            double highWaterPct = 0.0;
 
-            if (!process.Start()) return ShaderPrep.Result.Failed;
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            for (int pass = 1; pass <= MaxPasses && !ct.IsCancellationRequested; pass++)
+            {
+                WritePrepLog("=== ", $"Shader prep pass {pass}/{MaxPasses} ===");
+                using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                var passClock = Stopwatch.StartNew();
+                var passSawProgress = false;
+                var passRecycled = false;
+                var stopTriggered = 0;
 
-            using (ct.Register(() => { try { if (!process.HasExited) process.Kill(); } catch { } }))
-            {
-                await Task.Run(() => process.WaitForExit());
+                void TriggerStop(int delayMs, bool isRecycle)
+                {
+                    if (Interlocked.Exchange(ref stopTriggered, 1) != 0) return;
+                    if (isRecycle) passRecycled = true;
+                    Task.Run(async () =>
+                    {
+                        if (delayMs > 0) await Task.Delay(delayMs);
+                        try { if (!process.HasExited) process.Kill(); } catch { }
+                    });
+                }
+
+                process.OutputDataReceived += (s, e) =>
+                {
+                    if (string.IsNullOrEmpty(e.Data)) return;
+                    WritePrepLog("", e.Data);
+                    var update = ShaderPrep.ParseProgress(e.Data);
+                    if (update.HasValue)
+                    {
+                        passSawProgress = true;
+                        double pct = update.Value.Percent ?? highWaterPct;
+                        if (pct >= highWaterPct)
+                        {
+                            highWaterPct = pct;
+                            progress?.Report(update.Value);
+                        }
+                    }
+                    if (ShaderPrep.IsDone(e.Data)) sawDone = true;
+                    if (ShaderPrep.IsReplayDone(e.Data)) sawReplayDone = true;
+                    if (ShaderPrep.IsNoList(e.Data)) sawNoList = true;
+
+                    if (!sawReplayDone && !sawDone &&
+                        passClock.Elapsed.TotalSeconds >= SoftRecycleSeconds &&
+                        ShaderPrep.IsCacheSaved(e.Data))
+                    {
+                        WritePrepLog("=== ", $"Recycling prep pass {pass} cleanly after cache save at {passClock.Elapsed.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s ===");
+                        TriggerStop(200, isRecycle: true);
+                    }
+
+                    if (sawReplayDone && ShaderPrep.IsGameStarting(e.Data))
+                    {
+                        TriggerStop(1500, isRecycle: false);
+                    }
+                };
+                process.ErrorDataReceived += (s, e) =>
+                {
+                    if (!string.IsNullOrEmpty(e.Data)) WritePrepLog("[ERR] ", e.Data);
+                };
+
+                if (!process.Start()) return ShaderPrep.Result.Failed;
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                using var hardCapCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(HardRecycleSeconds), hardCapCts.Token);
+                        if (!sawReplayDone && !sawDone)
+                        {
+                            WritePrepLog("=== ", $"Recycling prep pass {pass} at {HardRecycleSeconds}s safety cap ===");
+                            TriggerStop(0, isRecycle: true);
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                });
+
+                using (ct.Register(() => TriggerStop(0, isRecycle: false)))
+                {
+                    await Task.Run(() => process.WaitForExit());
+                }
+                hardCapCts.Cancel();
+
+                if (ct.IsCancellationRequested) return ShaderPrep.Result.Cancelled;
+                if (sawNoList) return ShaderPrep.Result.NoList;
+                if (sawDone || sawReplayDone || process.ExitCode == 0)
+                {
+                    progress?.Report(new ShaderPrep.ProgressUpdate(100.0, "Shader cache ready!"));
+                    ShaderPrep.MarkDone(runHybridPath);
+                    return ShaderPrep.Result.Done;
+                }
+                if (!passRecycled && !passSawProgress)
+                {
+                    return ShaderPrep.Result.Failed;
+                }
             }
-            if (ct.IsCancellationRequested) return ShaderPrep.Result.Cancelled;
-            if (sawNoList) return ShaderPrep.Result.NoList;
-            if (process.ExitCode == 0 || sawDone)
-            {
-                ShaderPrep.MarkDone(runHybridPath);
-                return ShaderPrep.Result.Done;
-            }
+
             return ShaderPrep.Result.Failed;
         }
 
@@ -495,6 +629,17 @@ namespace AstroHybrid.App.Services
             env["ASTROHYBRID_COMMIT_EPOCH_FASTPATH"] = "read";
             env["KYTY_BUFFER_RANGE_FIXES"] = "1";
             env["APS5_SAVEDATA_TRANSFER_FALLBACK"] = "1";
+
+            // Shader/pipeline cache runtime tuning: scale startup replay across CPU cores and
+            // reduce unnecessary periodic cache re-saves mid-gameplay.
+            if (settings.ShaderCache)
+            {
+                int replayThreads = Math.Max(2, Math.Min(8, Environment.ProcessorCount / 2));
+                env["KYTY_SHADER_PRECOMPILE_THREADS"] = replayThreads.ToString();
+                env["KYTY_PIPELINE_JOURNAL_THREADS"] = replayThreads.ToString();
+                env["KYTY_PIPELINE_CACHE_SAVE_INTERVAL_S"] = "300";
+                env["KYTY_PIPELINE_CACHE_SAVE_MIN_NEW"] = "32";
+            }
 
             return env;
         }
