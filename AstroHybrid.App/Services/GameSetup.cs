@@ -773,9 +773,18 @@ namespace AstroHybrid.App.Services
         private static readonly string Tier0ResolutionJmpPattern =
             "C707????????C706????????EB1AC707000D0000C70650070000EB0CC707000F0000C70670080000";
 
-        // Patches Astro Bot's dynamic-resolution tier-0 width/height across the 3 switch functions
-        // anchored on tier 3 (3328x1872) and tier 4 (3840x2160). Idempotent and reversible back to
-        // 1920x1080; touches only the 3x8 immediate bytes in place if a change is actually needed.
+        // Clang-compiled .rodata lookup tables for dynamic-resolution tiers 0..4:
+        //   widths[5]  = { tier0_w, 2432, 2432, 3328, 3840 }  (tier 0 sits at anchor - 4)
+        //   heights[5] = { tier0_h, 1368, 1368, 1872, 2160 }  (tier 0 sits at anchor - 4)
+        private static readonly string Tier0WidthTableAnchor =
+            "8009000080090000000D0000000F0000";
+
+        private static readonly string Tier0HeightTableAnchor =
+            "58050000580500005007000070080000";
+
+        // Patches Astro Bot's dynamic-resolution tier-0 width/height across both the 3 switch functions
+        // and the 3 .rodata lookup table pairs anchored on tiers 1..4. Idempotent and reversible back
+        // to 1920x1080; touches only the immediate/table bytes in place when a change is needed.
         public bool ApplyRenderResolutionTier0(string exeName, int width, int height, Action<string>? log = null)
         {
             var logFn = log ?? (_ => { });
@@ -795,22 +804,45 @@ namespace AstroHybrid.App.Services
             var data = File.ReadAllBytes(path);
             var retOffsets = FindAllMatches(data, Tier0ResolutionRetPattern);
             var jmpOffsets = FindAllMatches(data, Tier0ResolutionJmpPattern);
-            if (retOffsets.Count != 2 || jmpOffsets.Count != 1)
+            var widthTableAnchors = FindAllMatches(data, Tier0WidthTableAnchor);
+            var heightTableAnchors = FindAllMatches(data, Tier0HeightTableAnchor);
+
+            if (retOffsets.Count != 2 || jmpOffsets.Count != 1 ||
+                widthTableAnchors.Count != 3 || heightTableAnchors.Count != 3)
             {
-                logFn($"FSR resolution tier-0: expected 2+1 sites in {exeName}, found {retOffsets.Count}+{jmpOffsets.Count}, skipped");
+                logFn($"FSR resolution tier-0: expected 2+1 switch & 3+3 table sites in {exeName}, " +
+                      $"found {retOffsets.Count}+{jmpOffsets.Count} & {widthTableAnchors.Count}+{heightTableAnchors.Count}, skipped");
                 return false;
             }
 
-            var offsets = new List<int>(3);
-            offsets.AddRange(retOffsets);
-            offsets.AddRange(jmpOffsets);
+            var widthSlots = new List<int>(6);
+            var heightSlots = new List<int>(6);
+            foreach (int off in retOffsets)
+            {
+                widthSlots.Add(off + 2);
+                heightSlots.Add(off + 8);
+            }
+            foreach (int off in jmpOffsets)
+            {
+                widthSlots.Add(off + 2);
+                heightSlots.Add(off + 8);
+            }
+            foreach (int anchor in widthTableAnchors)
+            {
+                if (anchor < 4) return false;
+                widthSlots.Add(anchor - 4);
+            }
+            foreach (int anchor in heightTableAnchors)
+            {
+                if (anchor < 4) return false;
+                heightSlots.Add(anchor - 4);
+            }
 
             bool changed = false;
-            foreach (int off in offsets)
+            for (int i = 0; i < widthSlots.Count; i++)
             {
-                int curW = BitConverter.ToInt32(data, off + 2);
-                int curH = BitConverter.ToInt32(data, off + 8);
-                if (curW != width || curH != height)
+                if (BitConverter.ToInt32(data, widthSlots[i]) != width ||
+                    BitConverter.ToInt32(data, heightSlots[i]) != height)
                 {
                     changed = true;
                     break;
@@ -827,17 +859,20 @@ namespace AstroHybrid.App.Services
             var hBytes = BitConverter.GetBytes(height);
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
-                foreach (int off in offsets)
+                foreach (int slot in widthSlots)
                 {
-                    fs.Seek(off + 2, SeekOrigin.Begin);
+                    fs.Seek(slot, SeekOrigin.Begin);
                     fs.Write(wBytes, 0, 4);
-                    fs.Seek(off + 8, SeekOrigin.Begin);
+                }
+                foreach (int slot in heightSlots)
+                {
+                    fs.Seek(slot, SeekOrigin.Begin);
                     fs.Write(hBytes, 0, 4);
                 }
                 fs.Flush(true);
             }
 
-            logFn($"FSR resolution tier-0: patched {exeName} to {width}x{height} (3 sites)");
+            logFn($"FSR resolution tier-0: patched {exeName} to {width}x{height} (3 switch + 3 table sites)");
             return true;
         }
 
