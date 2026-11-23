@@ -1,0 +1,117 @@
+From acc80ef331413673835e8e21deb766b930995c2a Mon Sep 17 00:00:00 2001
+From: lfmalta96 <lfmalta96@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:39:40 -0300
+Subject: [PATCH] feat(hybrid): lock flip rate to 60 FPS during active video
+ playback
+
+In-game 60 FPS videos such as the PlayStation Studios intro advance one
+frame per sceVideoOut flip while audio plays in real time, causing half-speed
+slow motion below 60 FPS (e.g. the recommended 30 FPS limit) and fast-forward
+A/V desync above 60 FPS or with unlimited FPS.
+
+Export KytyGpuSetVideoPlaybackActive so libSceAvPlayer can signal when a
+video stream is actively playing. PresentThread locks the effective flip
+limit to 60 FPS only while that flag is set, and immediately returns to the
+user's configured preset as soon as video playback stops or finishes.
+---
+ src/graphics/presentation/videoOut.cpp | 28 ++++++++++++++++++--------
+ src/graphics/presentation/videoOut.h   |  1 +
+ src/hybrid/kytyGpuBridge.cpp           |  4 ++++
+ src/hybrid/kyty_gpu.def                |  1 +
+ 4 files changed, 26 insertions(+), 8 deletions(-)
+
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 0fb3ea3..464129c 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -898,6 +898,7 @@ constexpr std::array<const char*, 10> FRAME_LIMIT_LABELS {"30 FPS", "35 FPS", "4
+ constexpr uint32_t    FRAME_LIMIT_CUSTOM = 1000;
+ std::atomic<uint32_t> g_custom_frame_limit {0};
+ char                  g_custom_frame_limit_label[16] {};
++std::atomic<bool>     g_video_playback_active {false};
+ 
+ std::atomic<uint32_t>& FrameLimitChoice() {
+ 	static std::atomic<uint32_t> choice {[] {
+@@ -1018,6 +1019,10 @@ bool CycleFrameLimit() {
+ 	return true;
+ }
+ 
++void SetVideoPlaybackActive(bool active) {
++	g_video_playback_active.store(active, std::memory_order_relaxed);
++}
++
+ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 	// A 120 Hz timer loop that blocks between vblanks; it presents and fires the flip events the
+ 	// guest waits for. Its only spin is the last <= 50 us of a vblank wait (SleepMicro).
+@@ -1074,17 +1079,24 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+ 			Common::SamplePlacement(Common::ThreadRole::Host);
+ 		}
+ 		const auto choice = FrameLimitChoice().load(std::memory_order_relaxed);
+-		if (choice != previous_limit) {
+-			previous_limit = choice;
++		const bool limit_enabled = choice != FRAME_LIMIT_DISABLED;
++		const auto configured_limit = limit_enabled ? (choice == FRAME_LIMIT_CUSTOM
++		                                                   ? g_custom_frame_limit.load(std::memory_order_relaxed)
++		                                                   : FRAME_LIMITS[choice])
++		                                            : 0u;
++		// In-game 60 FPS videos (such as the PlayStation Studios intro) advance one frame per flip
++		// while audio runs in real time. Lock the flip rate to 60 FPS only while libSceAvPlayer
++		// reports active video playback (fixing both sub-60 slow motion and >60/unlimited
++		// fast-forward); all other scenes strictly keep the user's configured preset.
++		const bool video_active = g_video_playback_active.load(std::memory_order_relaxed);
++		const uint32_t limit = video_active ? 60u : configured_limit;
++		if (limit != previous_limit) {
++			previous_limit = limit;
+ 			next_flip = 0;
+ 		}
+-		const bool limit_enabled = choice != FRAME_LIMIT_DISABLED;
+-		const auto limit = limit_enabled ? (choice == FRAME_LIMIT_CUSTOM
+-		                                        ? g_custom_frame_limit.load(std::memory_order_relaxed)
+-		                                        : FRAME_LIMITS[choice])
+-		                                 : 0u;
+ 		const bool absolute = g_present_abs_vblank.On() ||
+-		                      (limit_enabled && Config::GetPresentMode() == Config::PresentMode::Immediate);
++		                      ((limit_enabled || video_active) &&
++		                       Config::GetPresentMode() == Config::PresentMode::Immediate);
+ 		bool       behind      = false; // a vblank deadline was missed: may present a blank frame
+ 		uint64_t   frame_begin = 0;
+ 		uint64_t   period      = 1;
+diff --git a/src/graphics/presentation/videoOut.h b/src/graphics/presentation/videoOut.h
+index 91a78b3..981e3e9 100644
+--- a/src/graphics/presentation/videoOut.h
++++ b/src/graphics/presentation/videoOut.h
+@@ -54,6 +54,7 @@ void                          VideoOutShutdown();
+ 
+ [[nodiscard]] const char* FrameLimitLabel();
+ bool CycleFrameLimit();
++void SetVideoPlaybackActive(bool active);
+ 
+ KYTY_SYSV_ABI int  VideoOutOpen(int user_id, int bus_type, int index, const void* param);
+ KYTY_SYSV_ABI int  VideoOutClose(int handle);
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 52f4f1b..fca1678 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -974,3 +974,7 @@ extern "C" KYTY_GPU_EXPORT uint64_t KytyGpuQueuePadAudio(uint32_t freq, int is_s
+ 	    stream_slot, controller, data, frames, channels, is_float != 0, kUnityVolume,
+ 	    gain * setting_scale, nullptr);
+ }
++
++extern "C" KYTY_GPU_EXPORT void KytyGpuSetVideoPlaybackActive(int active) {
++	Libs::VideoOut::SetVideoPlaybackActive(active != 0);
++}
+diff --git a/src/hybrid/kyty_gpu.def b/src/hybrid/kyty_gpu.def
+index 1aed264..984df1e 100644
+--- a/src/hybrid/kyty_gpu.def
++++ b/src/hybrid/kyty_gpu.def
+@@ -2,6 +2,7 @@ LIBRARY kyty_gpu
+ EXPORTS
+     KytyGpuGetApi
+     KytyGpuQueuePadAudio
++    KytyGpuSetVideoPlaybackActive
+     "+kSrjIVxKFE"=kyty_gpu_nid_0
+     "-HOOCn0JY48"=kyty_gpu_nid_1
+     "-KRzWekV120"=kyty_gpu_nid_2
+-- 
+2.53.0.windows.1
+

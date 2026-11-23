@@ -1,0 +1,160 @@
+From 212d504a400eb2732438fd80e8f8ad8c0dcede1a Mon Sep 17 00:00:00 2001
+From: lfmalta96 <lfmalta96@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:39:41 -0300
+Subject: [PATCH] feat(avplayer): notify kyty_gpu while video playback is
+ active
+
+When libSceAvPlayer actively delivers video frames (such as the 60 FPS
+PlayStation Studios intro), notify kyty_gpu.dll via
+KytyGpuSetVideoPlaybackActive so PresentThread can temporarily lift
+sub-60 FPS limits to 60 FPS and keep video synced with real-time audio.
+
+The active player count is reference-counted and cleared on Stop, Pause,
+EndOfFile, Error, and Player destruction so gameplay and menus always
+immediately return to the user's configured FPS preset. Lookup uses
+GetModuleHandleA/GetProcAddress (matching AudioOut2PadMix.cpp) so
+standalone AnyPS5 builds without kyty_gpu.dll remain unaffected.
+---
+ .../prx/libSceAvPlayer/include/AvPlayer.hpp   |  2 +
+ core/libs/prx/libSceAvPlayer/src/Player.cpp   | 47 ++++++++++++++++++-
+ 2 files changed, 48 insertions(+), 1 deletion(-)
+
+diff --git a/core/libs/prx/libSceAvPlayer/include/AvPlayer.hpp b/core/libs/prx/libSceAvPlayer/include/AvPlayer.hpp
+index d81882a..fb3ab83 100644
+--- a/core/libs/prx/libSceAvPlayer/include/AvPlayer.hpp
++++ b/core/libs/prx/libSceAvPlayer/include/AvPlayer.hpp
+@@ -161,6 +161,7 @@ private:
+     bool readyLocked() const;
+     int startLocked(std::uint64_t startTime = 0);
+     int stopLocked();
++    void setHostVideoActiveLocked(bool active);
+ 
+     AvPlayerFileReplacement file{};
+     AvPlayerMemAllocator memory{};
+@@ -178,6 +179,7 @@ private:
+     std::int32_t speed = NormalSpeed;
+     std::uint32_t syncMode = SyncModeDefault;
+     std::uint32_t demuxVideoBytes = 0;
++    bool hostVideoActive = false;
+ 
+     std::mutex eventMutex;
+     TimedWait::Condition eventCondition;
+diff --git a/core/libs/prx/libSceAvPlayer/src/Player.cpp b/core/libs/prx/libSceAvPlayer/src/Player.cpp
+index 3f928b7..03db26d 100644
+--- a/core/libs/prx/libSceAvPlayer/src/Player.cpp
++++ b/core/libs/prx/libSceAvPlayer/src/Player.cpp
+@@ -2,17 +2,41 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <chrono>
+ #include <cctype>
+ #include <cstring>
+ #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/GuestHeap.hpp"
++#ifdef _WIN32
++#include <windows.h>
++#endif
+ 
+ namespace AvPlayer {
+ 
+ namespace {
+ 
++std::atomic<int> g_activeVideoPlayers{0};
++
++void NotifyHostVideoPlayback(bool active) {
++#ifdef _WIN32
++    using Fn = void (*)(int);
++    static std::atomic<Fn> cached{nullptr};
++    Fn fn = cached.load(std::memory_order_acquire);
++    if (fn == nullptr) {
++        HMODULE mod = GetModuleHandleA("kyty_gpu.dll");
++        if (mod == nullptr) return;
++        fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(mod, "KytyGpuSetVideoPlaybackActive")));
++        if (fn == nullptr) return;
++        cached.store(fn, std::memory_order_release);
++    }
++    fn(active ? 1 : 0);
++#else
++    (void)active;
++#endif
++}
++
+ bool EqualsIgnoreCase(std::string_view left, std::string_view right) {
+     return std::ranges::equal(left, right, [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); });
+ }
+@@ -86,6 +110,7 @@ Player::~Player() {
+         controller.join();
+     }
+     std::lock_guard lock(mutex);
++    setHostVideoActiveLocked(false);
+     source.reset();
+ }
+ 
+@@ -134,6 +159,7 @@ void Player::deliver(const Event& event) {
+         if (source && state != State::Stop) {
+             previous = state;
+             state = State::Error;
++            setHostVideoActiveLocked(false);
+         }
+         return;
+     }
+@@ -183,6 +209,7 @@ void Player::checkEndOfFile() {
+         if (!source || state != State::Play || !source->Finished()) return;
+         previous = state;
+         state = State::EndOfFile;
++        setHostVideoActiveLocked(false);
+     }
+     deliver({EventStateStop, 0, false, false});
+ }
+@@ -285,11 +312,26 @@ int Player::startLocked(std::uint64_t startTime) {
+     return SCE_OK;
+ }
+ 
++void Player::setHostVideoActiveLocked(bool active) {
++    if (hostVideoActive == active) return;
++    hostVideoActive = active;
++    if (active) {
++        if (g_activeVideoPlayers.fetch_add(1, std::memory_order_acq_rel) == 0) {
++            NotifyHostVideoPlayback(true);
++        }
++    } else {
++        if (g_activeVideoPlayers.fetch_sub(1, std::memory_order_acq_rel) == 1) {
++            NotifyHostVideoPlayback(false);
++        }
++    }
++}
++
+ int Player::stopLocked() {
+     if (!source || state == State::Initial || state == State::Ready || state == State::Stop) return SCE_AVPLAYER_ERROR_OPERATION_FAILED;
+     source->Stop();
+     previous = state;
+     state = State::Stop;
++    setHostVideoActiveLocked(false);
+     queue({EventStateStop, 0, false, false});
+     return SCE_OK;
+ }
+@@ -306,6 +348,7 @@ int Player::Pause() {
+     source->Pause();
+     previous = state;
+     state = State::Pause;
++    setHostVideoActiveLocked(false);
+     queue({EventStatePause, 0, false, false});
+     return SCE_OK;
+ }
+@@ -359,7 +402,9 @@ int Player::SetAvSyncMode(std::uint32_t mode) {
+ bool Player::GetVideoData(AvPlayerFrameInfoEx& info) {
+     std::lock_guard lock(mutex);
+     if (!source || (state != State::Play && state != State::Pause)) return false;
+-    return source->GetVideoData(info);
++    const bool ok = source->GetVideoData(info);
++    if (ok && state == State::Play) setHostVideoActiveLocked(true);
++    return ok;
+ }
+ 
+ bool Player::GetVideoData(AvPlayerFrameInfo& info) {
+-- 
+2.53.0.windows.1
+
