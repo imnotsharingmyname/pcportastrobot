@@ -81,6 +81,43 @@
                                Visibility="{Binding ShowFrameGen, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     <TextBlock Text="{Binding FpsLimitNote}" Style="{StaticResource MutedTextStyle}" Margin="0,4,0,0" TextWrapping="Wrap"
                                Visibility="{Binding IsFpsLimitEnabled, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
+                    <!-- AMD FSR upscaling quality, sharpness and version (shown when AMD FSR is active). -->
+                    <StackPanel Margin="0,12,0,0" Visibility="{Binding ShowFsrSettings, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Style="{StaticResource BodyTextStyle}" Text="FSR Quality" VerticalAlignment="Center" Width="150"/>
+                            <ComboBox Grid.Row="0" Grid.Column="1" Margin="0,0,0,10"
+                                      ItemsSource="{Binding FsrQualityLabels}" SelectedIndex="{Binding FsrQualityIndex}"
+                                      ToolTip="Sets Astro Bot's internal render resolution before AMD FSR upscaling (keeps 16:9 / 21:9 / 32:9 aspect ratio intact)."
+                                      Style="{StaticResource ModernComboBoxStyle}" HorizontalAlignment="Left" Width="400"/>
+
+                            <TextBlock Grid.Row="1" Style="{StaticResource BodyTextStyle}" Text="FSR Sharpness" VerticalAlignment="Center" Width="150"/>
+                            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10" VerticalAlignment="Center">
+                                <Slider Minimum="0" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True"
+                                        Value="{Binding FsrSharpness}" Width="310" VerticalAlignment="Center"/>
+                                <TextBlock Text="{Binding FsrSharpnessLabel}" Style="{StaticResource BodyTextStyle}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                            </StackPanel>
+
+                            <TextBlock Grid.Row="2" Style="{StaticResource BodyTextStyle}" Text="FSR Version" VerticalAlignment="Center" Width="150"/>
+                            <ComboBox Grid.Row="2" Grid.Column="1" Margin="0,0,0,4"
+                                      ItemsSource="{Binding FsrVersionLabels}" SelectedIndex="{Binding FsrVersionIndex}"
+                                      ToolTip="Chooses which AMD FSR upscaler runtime version to request (Auto uses FSR 4.1.2 on Radeon RX 9000, else FSR 3.1.6)."
+                                      Style="{StaticResource ModernComboBoxStyle}" HorizontalAlignment="Left" Width="400"/>
+                        </Grid>
+                        <TextBlock Style="{StaticResource MutedTextStyle}" Margin="0,4,0,0" TextWrapping="Wrap"
+                                   Text="FSR Quality adjusts the game's internal dynamic-resolution tier before FSR upscales to output; Ultrawide 21:9 / 32:9 and FSR Frame Generation remain fully compatible."/>
+                    </StackPanel>
+
                     <TextBlock Text="{Binding ActiveSummary}" Style="{StaticResource BodyTextStyle}" Margin="0,12,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
             </Border>

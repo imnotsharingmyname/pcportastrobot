@@ -115,6 +115,8 @@ namespace AstroHybrid.App.ViewModels
                 OnPropertyChanged(nameof(FsrFrameGen));
                 OnPropertyChanged(nameof(IsFsrFrameGenAvailable));
                 OnPropertyChanged(nameof(FsrNote));
+                OnPropertyChanged(nameof(ShowFsrSettings));
+                OnPropertyChanged(nameof(ShowDlssQuality));
                 _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.HardwareInfo));
                 _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
             }
@@ -315,6 +317,8 @@ namespace AstroHybrid.App.ViewModels
                 OnPropertyChanged(nameof(FsrFrameGen));
                 OnPropertyChanged(nameof(IsFsrFrameGenAvailable));
                 OnPropertyChanged(nameof(FsrNote));
+                OnPropertyChanged(nameof(ShowFsrSettings));
+                OnPropertyChanged(nameof(ShowDlssQuality));
                 OnPropertyChanged(nameof(ActiveSummary));
                 _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
             }
@@ -376,6 +380,8 @@ namespace AstroHybrid.App.ViewModels
                 OnPropertyChanged(nameof(FsrFrameGen));
                 OnPropertyChanged(nameof(IsFsrFrameGenAvailable));
                 OnPropertyChanged(nameof(FsrNote));
+                OnPropertyChanged(nameof(ShowFsrSettings));
+                OnPropertyChanged(nameof(ShowDlssQuality));
                 OnPropertyChanged(nameof(IsFrameGenTargetEnabled));
                 OnPropertyChanged(nameof(FrameGenNote));
                 OnPropertyChanged(nameof(IsFpsLimitEnabled));
@@ -450,6 +456,60 @@ namespace AstroHybrid.App.ViewModels
 
         public bool ShowDlssQuality => _mainViewModel.Settings.Upscale == 1 && HasDlss;
 
+        // AMD FSR upscaling controls, shown while AMD FSR is the active upscaler.
+        public bool ShowFsrSettings => _mainViewModel.Settings.Upscale == 2;
+
+        public string[] FsrQualityLabels => AppSettings.FsrQualityPresets.Select(p => p.Label).ToArray();
+
+        public int FsrQualityIndex
+        {
+            get => _mainViewModel.Settings.FsrQuality;
+            set
+            {
+                if (value < 0 || value >= AppSettings.FsrQualityPresets.Length || _mainViewModel.Settings.FsrQuality == value) return;
+                _mainViewModel.Settings.FsrQuality = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(ActiveSummary));
+                _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+            }
+        }
+
+        public int FsrSharpness
+        {
+            get => _mainViewModel.Settings.FsrSharpness;
+            set
+            {
+                int clamped = Math.Max(0, Math.Min(100, value));
+                if (_mainViewModel.Settings.FsrSharpness == clamped) return;
+                _mainViewModel.Settings.FsrSharpness = clamped;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(FsrSharpnessLabel));
+                _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+            }
+        }
+
+        public string FsrSharpnessLabel => FsrSharpness == 0 ? "0% (Off)" : $"{FsrSharpness}%";
+
+        public string[] FsrVersionLabels => new[]
+        {
+            "Auto (newest for card)",
+            "FSR 4 (Radeon RX 9000)",
+            "FSR 3.1",
+            "FSR 2"
+        };
+
+        public int FsrVersionIndex
+        {
+            get => _mainViewModel.Settings.FsrVersion;
+            set
+            {
+                if (value < 0 || value >= AppSettings.FsrVersionValues.Length || _mainViewModel.Settings.FsrVersion == value) return;
+                _mainViewModel.Settings.FsrVersion = value;
+                OnPropertyChanged();
+                _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+            }
+        }
+
         public bool ShowFrameGen => _mainViewModel.HardwareInfo?.SupportsFrameGeneration == true;
         public bool ShowFrameGenUnavailable => !ShowFrameGen;
         public string FrameGenUnavailableNote => "NVIDIA frame generation needs an RTX 40 or newer card, so it is not offered on this graphics card."
@@ -463,7 +523,10 @@ namespace AstroHybrid.App.ViewModels
                 var st = _mainViewModel.Settings;
                 var parts = new List<string>();
                 parts.Add(st.Lighting == 1 ? "ray-traced lighting" : "faster lighting");
-                parts.Add(st.Upscale == 1 ? "DLSS upscaling" : st.Upscale == 2 ? "AMD FSR upscaling" : "the game's own upscaling");
+                string fsrLabel = st.Upscale == 2 && st.FsrQuality >= 0 && st.FsrQuality < AppSettings.FsrQualityPresets.Length
+                    ? $"AMD FSR upscaling ({AppSettings.FsrQualityPresets[st.FsrQuality].ShortLabel})"
+                    : "AMD FSR upscaling";
+                parts.Add(st.Upscale == 1 ? "DLSS upscaling" : st.Upscale == 2 ? fsrLabel : "the game's own upscaling");
                 if (st.FrameGenMode != 0)
                 {
                     var targetValues = new[] { 0, 50, 60, 90, 120, 144, 165 };
