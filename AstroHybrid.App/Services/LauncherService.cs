@@ -489,6 +489,7 @@ namespace AstroHybrid.App.Services
             }
             if (!settings.TriggerState) env["APS5_PAD_TRIGGER_STATE"] = "0";
             if (settings.SkipIntro) env["ASTROHYBRID_SKIP_INTRO"] = "1";
+            if (settings.EffectiveAsyncVulkanStaging(hardware)) env["KYTY_SUBMIT_WAIT_BEFORE_SIGNAL"] = "1";
 
             // Cloth/blanket/bubble stability (#30, #35): the commit epoch fast path only for read-only
             // bindings (writable ones stay on the full check), plus the buffer range fixes.
