@@ -84,6 +84,11 @@
                                   Style="{StaticResource ModernCheckBoxStyle}"/>
                         <TextBlock Text="{Binding HangWatchdogNote}" Style="{StaticResource MutedTextStyle}" Margin="28,4,0,10" TextWrapping="Wrap"/>
 
+                        <CheckBox Content="GPU Fault Diagnostics (breadcrumbs)"
+                                  IsChecked="{Binding GpuFaultDiagnostics}"
+                                  Style="{StaticResource ModernCheckBoxStyle}"/>
+                        <TextBlock Text="{Binding GpuFaultDiagnosticsNote}" Style="{StaticResource MutedTextStyle}" Margin="28,4,0,10" TextWrapping="Wrap"/>
+
                         <CheckBox Content="Persistent Shader Cache (eliminates compile hitches)"
                                   IsChecked="{Binding ShaderCache}"
                                   Style="{StaticResource ModernCheckBoxStyle}"/>

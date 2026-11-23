@@ -21,9 +21,10 @@ static const char* value(const char* key) {
     return v ? v : "<unset>";
 }
 int main(int argc, char** argv) {
-    printf("priority=%s\nspin=%s\ncold=%s\nprocess=%lu\nargs=",
+    printf("priority=%s\nspin=%s\ncold=%s\nfault=%s\nbreadcrumbs=%s\nprocess=%lu\nargs=",
            value("KYTY_DRAW_PREP_PRIORITY"), value("KYTY_DRAW_PREP_SPIN_US"),
            value("KYTY_DRAW_PREP_COLD_SPIN_US"),
+           value("KYTY_DEVICE_FAULT_DIAGNOSTICS"), value("KYTY_GPU_BREADCRUMBS"),
            (unsigned long)GetPriorityClass(GetCurrentProcess()));
     for (int i = 1; i < argc; i++) {
         printf("%s%s", i > 1 ? "," : "", argv[i]);
@@ -42,14 +43,21 @@ for key in ("KYTY_DRAW_PREP_PRIORITY", "KYTY_DRAW_PREP_SPIN_US", "KYTY_DRAW_PREP
             "ASTROHYBRID_SKIP_INTRO"):
     env.pop(key, None)
 cases = [
-    ("default", {}, ("2", "10", "5", "")),
+    ("default", {}, ("2", "10", "5", "<unset>", "<unset>", "")),
     ("explicit-off", {"ASTROHYBRID_DRAW_PREP_TUNING": "0"},
-     ("<unset>", "<unset>", "<unset>", "")),
-    ("enabled", {"ASTROHYBRID_DRAW_PREP_TUNING": "1"}, ("2", "10", "5", "")),
+     ("<unset>", "<unset>", "<unset>", "<unset>", "<unset>", "")),
+    ("enabled", {"ASTROHYBRID_DRAW_PREP_TUNING": "1"},
+     ("2", "10", "5", "<unset>", "<unset>", "")),
     ("overrides", {"ASTROHYBRID_DRAW_PREP_TUNING": "1", "KYTY_DRAW_PREP_PRIORITY": "2",
                    "KYTY_DRAW_PREP_SPIN_US": "25", "KYTY_DRAW_PREP_COLD_SPIN_US": "15"},
-     ("2", "25", "15", "")),
-    ("skip-intro", {"ASTROHYBRID_SKIP_INTRO": "1"}, ("2", "10", "5", "-skipIntro")),
+     ("2", "25", "15", "<unset>", "<unset>", "")),
+    ("gpu-diagnostics", {"ASTROHYBRID_GPU_FAULT_DIAGNOSTICS": "1"},
+     ("2", "10", "5", "1", "1", "")),
+    ("gpu-diagnostics-explicit-off", {"ASTROHYBRID_GPU_FAULT_DIAGNOSTICS": "1",
+                                       "KYTY_GPU_BREADCRUMBS": "0"},
+     ("2", "10", "5", "1", "0", "")),
+    ("skip-intro", {"ASTROHYBRID_SKIP_INTRO": "1"},
+     ("2", "10", "5", "<unset>", "<unset>", "-skipIntro")),
 ]
 for name, values, expected in cases:
     result = subprocess.run(["cmd.exe", "/d", "/c", "Run-AstroHybrid.bat"],
@@ -57,7 +65,7 @@ for name, values, expected in cases:
     assert result.returncode == 0, (name, result.stdout, result.stderr)
     text = (work / "Logs" / "hybrid-run.out.log").read_text()
     actual = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
-    assert tuple(actual[k] for k in ("priority", "spin", "cold", "args")) == expected, (name, actual)
+    assert tuple(actual[k] for k in ("priority", "spin", "cold", "fault", "breadcrumbs", "args")) == expected, (name, actual)
     assert actual["process"] == "32768", (name, actual)
     print(name, "PASS", actual)
 shutil.rmtree(work, ignore_errors=True)

@@ -94,6 +94,11 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("hangWatchdog")]
         public bool HangWatchdog { get; set; } = false;
 
+        // Adds Vulkan device-fault diagnostics and GPU breadcrumbs to crash logs. Keep off for normal play;
+        // these signals are intended for reproducing ErrorDeviceLost/TDR failures.
+        [JsonPropertyName("gpuFaultDiagnostics")]
+        public bool GpuFaultDiagnostics { get; set; } = false;
+
         [JsonPropertyName("shaderCache")]
         public bool ShaderCache { get; set; } = true;
 

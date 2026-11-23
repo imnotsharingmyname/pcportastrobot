@@ -90,6 +90,20 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
+        public bool GpuFaultDiagnostics
+        {
+            get => _mainViewModel.Settings.GpuFaultDiagnostics;
+            set
+            {
+                if (!Equals(_mainViewModel.Settings.GpuFaultDiagnostics, value))
+                {
+                    _mainViewModel.Settings.GpuFaultDiagnostics = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
+        }
+
         public bool ShaderCache
         {
             get => _mainViewModel.Settings.ShaderCache;
@@ -230,6 +244,8 @@ namespace AstroHybrid.App.ViewModels
         public string SpeedNote => "The game runs in real-time regardless of FPS. Lower values slow down the game simulation.";
 
         public string HangWatchdogNote => "Records diagnostics when the game hangs. Turn on when reporting a freeze; it costs about 1.8 ms per frame on RTX 50 cards, so it is off by default.";
+
+        public string GpuFaultDiagnosticsNote => "Adds Vulkan device-fault diagnostics and GPU breadcrumbs to the log. Turn on when reporting ErrorDeviceLost or a GPU driver reset; off by default for normal play.";
 
         public string ShaderCacheNote => "Persistent shader and pipeline caches eliminate late shader compiles (100-117ms hitches). Requires title ID.";
 

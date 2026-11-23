@@ -136,6 +136,21 @@ drives the screen:
 - Input latency with Frame Generation has not been measured. The DLSS jitter sign is set by eye.
 - The game is CPU-limited at about 30-34 FPS on a Ryzen 5 5500 in the heaviest areas.
 
+### Reporting a GPU device loss
+
+If the image freezes and the log ends with `ErrorDeviceLost`, enable **GPU Fault Diagnostics (breadcrumbs)**
+on the Advanced page before reproducing it. This records Vulkan device-fault information and the last GPU
+breadcrumbs in `Logs/hybrid-run.out.log`, which makes the failing pass identifiable. The option is off by
+default because it is intended for diagnosis, not normal play. From a batch file, the equivalent is:
+
+```bat
+set ASTROHYBRID_GPU_FAULT_DIAGNOSTICS=1
+Run-AstroHybrid.bat
+```
+
+Keep the matching `hybrid-run.out.log` and `hybrid-run.err.log` from the same run. A Windows GPU driver reset
+may still terminate the process; this option improves the evidence for that failure but does not prevent a TDR.
+
 ## What is here
 
 | Folder | Contents |

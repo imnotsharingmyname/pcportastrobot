@@ -330,6 +330,7 @@ namespace AstroHybrid.App.Services
 
             // Advanced page: the variables Run-AstroHybrid.bat reads (it keeps its defaults when unset).
             if (settings.HangWatchdog) env["ASTROHYBRID_HANG_WATCHDOG"] = "1";
+            if (settings.GpuFaultDiagnostics) env["ASTROHYBRID_GPU_FAULT_DIAGNOSTICS"] = "1";
             if (!settings.ShaderCache) env["ASTROHYBRID_SHADER_CACHE"] = "0";
             if (!settings.DrawPrepTuning) env["ASTROHYBRID_DRAW_PREP_TUNING"] = "0";
             if (settings.Priority == "normal" || settings.Priority == "abovenormal" || settings.Priority == "high")
