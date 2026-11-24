@@ -164,9 +164,10 @@ namespace AstroHybrid.App.Services
             var basePath = Path.Combine(_runHybrid, "AstroBot.exe");
             var baseBytes = File.ReadAllBytes(basePath);
             bool clothPatched = ApplyClothPhysicsPatches(baseBytes, Log);
+            bool havokPatched = ApplyHavokContactShapeNullGuard(baseBytes, Log);
             bool cmdbufPatched = ApplyCommandBufferPatches(baseBytes, Log);
             bool garlicPatched = ApplyGarlicPoolPatch(baseBytes, Log);
-            if (clothPatched || cmdbufPatched || garlicPatched)
+            if (clothPatched || havokPatched || cmdbufPatched || garlicPatched)
                 File.WriteAllBytes(basePath, baseBytes);
             ApplyVariantPatches(baseBytes, features, overwriteExisting: true, Log);
             // Real-time speed needs the frame-rate block; it is found by its initial values in any version (the
@@ -588,6 +589,87 @@ namespace AstroHybrid.App.Services
         // missing in the executable about to start, once: the names already checked are kept in a marker
         // file next to them, so the large file is read only the first time. Patterns that are not there (a
         // new setup, another game version) leave the file as it is. Returns true when it changed the file.
+        private const string HavokUpgradeMarker = "astrohybrid-upgrades-havok-contact.txt";
+
+        // Guard Physics_ATQT missing contact shape NULL deref (r15 == NULL -> vsubps 0x20(%r9) at +0x890472,
+        // e.g. end of Trunk of Funk). Redirects `vucomiss xmm6, xmm7; jb +0x13a` through two 15-byte INT3
+        // function-padding caves in the same PE section to skip contact resolution when r15 is NULL.
+        private static bool ApplyHavokContactShapeNullGuard(byte[] data, Action<string> log)
+        {
+            byte[] sitePattern = Hex("C5F82EF70F823A010000");
+            int siteOff = FindUnique(data, sitePattern, out int siteCount);
+            if (siteOff < 0)
+            {
+                log($"havok contact shape guard skipped (site matches={siteCount})");
+                return false;
+            }
+            int skipOff = siteOff + 10;
+            int contactOff = skipOff + 0x13a;
+
+            // Find two distinct 15-byte 0xCC padding caves after `ret` (0xC3) at 16-byte-aligned function boundaries.
+            int caveA = -1, caveB = -1;
+            int searchStart = Math.Max(0x1000, siteOff - 0x80000);
+            int searchEnd = Math.Min(data.Length - 17, siteOff + 0x80000);
+            for (int p = (searchStart + 15) & ~15; p <= searchEnd; p += 16)
+            {
+                int c = p + 1;
+                if (data[p] != 0xC3) continue;
+                bool allCc = true;
+                for (int k = 0; k < 15; k++)
+                {
+                    if (data[c + k] != 0xCC) { allCc = false; break; }
+                }
+                if (!allCc || !InSameSection(data, siteOff, c)) continue;
+                if (caveA < 0) { caveA = c; }
+                else { caveB = c; break; }
+            }
+            if (caveA < 0 || caveB < 0)
+            {
+                log($"havok contact shape guard skipped (caves not found near 0x{siteOff:x})");
+                return false;
+            }
+
+            // Cave A (15 bytes): vucomiss xmm6, xmm7; jae skipOff; jmp caveB
+            data[caveA + 0] = 0xC5; data[caveA + 1] = 0xF8; data[caveA + 2] = 0x2E; data[caveA + 3] = 0xF7;
+            data[caveA + 4] = 0x0F; data[caveA + 5] = 0x83;
+            Array.Copy(BitConverter.GetBytes(skipOff - (caveA + 10)), 0, data, caveA + 6, 4);
+            data[caveA + 10] = 0xE9;
+            Array.Copy(BitConverter.GetBytes(caveB - (caveA + 15)), 0, data, caveA + 11, 4);
+
+            // Cave B (14 bytes): test r15, r15; jz skipOff; jmp contactOff
+            data[caveB + 0] = 0x4D; data[caveB + 1] = 0x85; data[caveB + 2] = 0xFF;
+            data[caveB + 3] = 0x0F; data[caveB + 4] = 0x84;
+            Array.Copy(BitConverter.GetBytes(skipOff - (caveB + 9)), 0, data, caveB + 5, 4);
+            data[caveB + 9] = 0xE9;
+            Array.Copy(BitConverter.GetBytes(contactOff - (caveB + 14)), 0, data, caveB + 10, 4);
+
+            // Site (10 bytes): jmp caveA; 5-byte nop
+            data[siteOff + 0] = 0xE9;
+            Array.Copy(BitConverter.GetBytes(caveA - (siteOff + 5)), 0, data, siteOff + 1, 4);
+            data[siteOff + 5] = 0x0F; data[siteOff + 6] = 0x1F; data[siteOff + 7] = 0x44;
+            data[siteOff + 8] = 0x00; data[siteOff + 9] = 0x00;
+
+            log($"havok contact shape NULL guard applied (site=0x{siteOff:x}, caveA=0x{caveA:x}, caveB=0x{caveB:x})");
+            return true;
+        }
+
+        public bool UpgradeHavokContactShapeGuard(string exeName, Action<string>? log = null)
+        {
+            log ??= _ => { };
+            var marker = Path.Combine(_runHybrid, HavokUpgradeMarker);
+            var done = File.Exists(marker)
+                ? new HashSet<string>(File.ReadAllLines(marker), StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (done.Contains(exeName)) return false;
+            var path = Path.Combine(_runHybrid, exeName);
+            if (!File.Exists(path)) return false;
+            var bytes = File.ReadAllBytes(path);
+            bool patched = ApplyHavokContactShapeNullGuard(bytes, log);
+            if (patched) File.WriteAllBytes(path, bytes);
+            File.AppendAllLines(marker, new[] { exeName });
+            return patched;
+        }
+
         public bool UpgradeCommandBufferTable(string exeName, Action<string>? log = null)
         {
             log ??= _ => { };

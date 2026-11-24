@@ -358,7 +358,10 @@ namespace AstroHybrid.App.Services
             {
                 var setup = new GameSetup(_rootDirectory);
                 foreach (var candidate in candidates.Concat(new[] { "AstroBot.exe" }).Distinct())
+                {
                     setup.UpgradeCommandBufferTable(candidate);
+                    setup.UpgradeHavokContactShapeGuard(candidate);
+                }
             }
             catch (Exception ex)
             {
