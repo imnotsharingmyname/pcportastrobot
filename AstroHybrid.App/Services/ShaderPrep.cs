@@ -51,8 +51,9 @@ namespace AstroHybrid.App.Services
         {
             var dll = new FileInfo(Path.Combine(runHybrid, "kyty_gpu.dll"));
             var list = new FileInfo(ListPath(runHybrid));
+            var preset = new FileInfo(Path.Combine(runHybrid, "u59-preset.json"));
             string Stamp(FileInfo f) => f.Exists ? $"{f.Length}:{f.LastWriteTimeUtc.Ticks}" : "none";
-            return $"renderer {Stamp(dll)} | list {Stamp(list)} | drivers {Drivers()}";
+            return $"renderer {Stamp(dll)} | list {Stamp(list)} | preset {Stamp(preset)} | drivers {Drivers()}";
         }
 
         private static string Drivers()

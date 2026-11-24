@@ -132,6 +132,35 @@ namespace AstroHybrid.App.Services
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+            // Apply the same runtime preset as Run-AstroHybrid.bat (u59-preset.json) so precompiled
+            // shaders and pipelines match the gameplay SPIR-V codegen hash (issue #254).
+            var presetPath = Path.Combine(runHybridPath, "u59-preset.json");
+            if (File.Exists(presetPath))
+            {
+                try
+                {
+                    var preset = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(presetPath));
+                    if (preset != null)
+                    {
+                        foreach (var kvp in preset)
+                        {
+                            if (!psi.EnvironmentVariables.ContainsKey(kvp.Key))
+                                psi.EnvironmentVariables[kvp.Key] = kvp.Value;
+                        }
+                    }
+                }
+                catch { }
+            }
+            var aliasesPath = Path.Combine(runHybridPath, "app0-aliases.txt");
+            if (!psi.EnvironmentVariables.ContainsKey("APS5_PATH_ALIASES") && File.Exists(aliasesPath))
+            {
+                try
+                {
+                    var aliases = File.ReadAllText(aliasesPath).Trim();
+                    if (!string.IsNullOrEmpty(aliases)) psi.EnvironmentVariables["APS5_PATH_ALIASES"] = aliases;
+                }
+                catch { }
+            }
             foreach (var kvp in variables)
             {
                 psi.EnvironmentVariables[kvp.Key] = kvp.Value;
@@ -167,7 +196,7 @@ namespace AstroHybrid.App.Services
             }
             if (ct.IsCancellationRequested) return ShaderPrep.Result.Cancelled;
             if (sawNoList) return ShaderPrep.Result.NoList;
-            if (process.ExitCode == 0 || sawDone)
+            if (sawDone)
             {
                 ShaderPrep.MarkDone(runHybridPath);
                 return ShaderPrep.Result.Done;
