@@ -1,0 +1,86 @@
+﻿From c5987900063c8996beb3ba0a31d4d670a7475c33 Mon Sep 17 00:00:00 2001
+From: imnotsharingmyname <imnotsharingmyname@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 13:04:35 +0000
+Subject: [PATCH] feat(apr): resolve and read files from app0.zar archive
+ (#250, #245)
+
+---
+ core/libs/prx/libkernel/Apr/src/Apr.cpp | 35 ++++++++++++++++++++++---
+ 1 file changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/core/libs/prx/libkernel/Apr/src/Apr.cpp b/core/libs/prx/libkernel/Apr/src/Apr.cpp
+index 0ba7bbafeb..5f6d5375af 100644
+--- a/core/libs/prx/libkernel/Apr/src/Apr.cpp
++++ b/core/libs/prx/libkernel/Apr/src/Apr.cpp
+@@ -7,6 +7,7 @@
+ #include <cstdint>
+ #include <cstddef>
+ #include "SceTypes.hpp"
++#include "prx/libc/include/AppArchive.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/FilesystemError.hpp"
+ #include "prx/libc/include/PreciseWait.hpp"
+@@ -46,6 +47,8 @@ constexpr int GUEST_EINVAL = 22;
+ struct AprFile {
+     std::filesystem::path path;
+     std::uint64_t size;
++    bool archived = false;
++    std::uint32_t archiveHandle = 0;
+ };
+ 
+ std::mutex& g_filesLock = *new std::mutex();
+@@ -117,15 +120,23 @@ int _fail(int guestErrno) {
+ bool _resolve(const char* guestPath, std::uint32_t* id, std::uint64_t* size) {
+     if (!guestPath) return false;
+     std::filesystem::path hostPath;
+-    if (ResolvePathError_nid_no_patch(guestPath, hostPath) != 0) return false;
++    if (ResolvePathError_nid_no_patch(guestPath, hostPath, false, true) != 0) return false;
+     std::uint64_t bytes = 0;
+-    if (!_fileSize(hostPath, bytes)) return false;
++    bool archived = false;
++    std::uint32_t archiveHandle = 0;
++    if (!_fileSize(hostPath, bytes)) {
++        AppArchiveNode node{};
++        if (!AppArchiveLookup_nid_no_patch(hostPath, &node) || node.Directory) return false;
++        bytes = node.Size;
++        archived = true;
++        archiveHandle = node.Handle;
++    }
+     std::lock_guard lock(g_filesLock);
+     const auto key = hostPath.string();
+     auto found = g_idsByPath.find(key);
+     if (found == g_idsByPath.end()) {
+         found = g_idsByPath.emplace(key, static_cast<std::uint32_t>(g_files.size())).first;
+-        g_files.push_back({std::move(hostPath), bytes});
++        g_files.push_back({std::move(hostPath), bytes, archived, archiveHandle});
+     }
+     if (id) *id = found->second;
+     if (size) *size = bytes;
+@@ -160,7 +171,23 @@ int _resolveForEach(const char* prefix, const char** paths, uint32_t count, uint
+ void _readFile(const Apr::ReadFileCommand& command) {
+     const auto file = _file(command.fileId);
+     static const bool trace = std::getenv("APS5_TRACE_APR") != nullptr;
+-    if (trace) std::fprintf(stderr, "[apr] read %s offset=0x%llx size=0x%llx -> 0x%llx\n", file.path.string().c_str(), static_cast<unsigned long long>(command.offset), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(command.destination));
++    if (trace) std::fprintf(stderr, "[apr] read %s%s offset=0x%llx size=0x%llx -> 0x%llx\n", file.path.string().c_str(), file.archived ? " (app0.zar)" : "", static_cast<unsigned long long>(command.offset), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(command.destination));
++    if (file.archived) {
++        const GuestArena::HostWrite destination(reinterpret_cast<void*>(command.destination), command.size);
++        if (!destination.Open()) throw std::runtime_error("APR: the read destination of " + file.path.string() + " is not writable guest memory");
++        std::vector<char> staging(static_cast<std::size_t>(std::min<std::uint64_t>(command.size, 64u * 1024u)));
++        std::uint64_t read = 0;
++        while (read < command.size) {
++            const auto wanted = std::min<std::uint64_t>(command.size - read, staging.size());
++            const auto obtained = AppArchiveRead_nid_no_patch(file.archiveHandle, command.offset + read, staging.data(), wanted);
++            if (obtained != 0) std::memcpy(reinterpret_cast<char*>(command.destination) + read, staging.data(), static_cast<std::size_t>(obtained));
++            read += obtained;
++            if (obtained != wanted) break;
++        }
++        if (read != command.size && command.offset + read < file.size) throw std::runtime_error("APR: read of " + file.path.string() + " in app0.zar at offset " + std::to_string(command.offset) + " returned " + std::to_string(read) + " of " + std::to_string(command.size) + " bytes");
++        if (read != command.size) std::memset(reinterpret_cast<char*>(command.destination) + read, 0, static_cast<std::size_t>(command.size - read));
++        return;
++    }
+     std::ifstream stream(file.path, std::ios::binary);
+     if (!stream) throw std::runtime_error("APR: cannot open " + file.path.string());
+     stream.seekg(static_cast<std::streamoff>(command.offset));
+-- 
+2.55.0.windows.5
+
