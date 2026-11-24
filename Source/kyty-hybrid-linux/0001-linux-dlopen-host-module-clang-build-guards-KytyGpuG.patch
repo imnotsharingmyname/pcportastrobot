@@ -1,0 +1,365 @@
+From 5758372cdc80c97d5b697a2cb8c22ca9759ed0a6 Mon Sep 17 00:00:00 2001
+From: Local Build <local@invalid>
+Date: Tue, 24 Nov 2026 21:31:54 +0000
+Subject: [PATCH] linux: dlopen host module, clang build guards, KytyGpuGetNid,
+ and fps log
+
+---
+ .../host_gpu/renderer/cache/bufferCache.cpp   |   4 +
+ src/graphics/host_gpu/renderer/dlss.cpp       |   6 ++
+ src/graphics/host_gpu/renderer/frameGen.cpp   |   2 +
+ src/graphics/host_gpu/renderer/fsr.cpp        |   2 +
+ src/graphics/presentation/videoOut.cpp        |   2 +
+ src/graphics/presentation/window/window.cpp   |   7 ++
+ src/hybrid/kytyGpuBridge.cpp                  | 102 +++++++++++++++++-
+ src/kernel/memoryAddressSpace.inc             |   9 ++
+ 8 files changed, 130 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+index 13dabc7b..79c55fdd 100644
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -38,7 +38,11 @@
+ 
+ #include <algorithm>
+ #include <bit>
++#if defined(_WIN32)
+ #include <intrin.h>
++#else
++#include <x86intrin.h>
++#endif
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+diff --git a/src/graphics/host_gpu/renderer/dlss.cpp b/src/graphics/host_gpu/renderer/dlss.cpp
+index 2bcd6f3c..acd6267e 100644
+--- a/src/graphics/host_gpu/renderer/dlss.cpp
++++ b/src/graphics/host_gpu/renderer/dlss.cpp
+@@ -25,6 +25,7 @@
+ #include <nvsdk_ngx_vk.h>
+ #endif
+ 
++#if defined(_WIN32)
+ #ifndef NOMINMAX
+ #define NOMINMAX
+ #endif
+@@ -32,6 +33,7 @@
+ #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
++#endif
+ 
+ #include <algorithm>
+ #include <array>
+@@ -106,6 +108,9 @@ void RequiredExtensions(std::vector<const char*>& instance, std::vector<const ch
+ // ASTROHYBRID_DLSS_PROBE=1 (diagnostic): a throwaway device with only VK_NVX_binary_import,
+ // created through vulkan-1.dll directly; prints whether the driver accepts it at this point.
+ void ProbeBinaryImport(const char* when) {
++#if !defined(_WIN32)
++	(void)when;
++#else
+ 	const char* value = std::getenv("ASTROHYBRID_DLSS_PROBE");
+ 	if (value == nullptr || std::strcmp(value, "1") != 0) {
+ 		return;
+@@ -185,6 +190,7 @@ void ProbeBinaryImport(const char* when) {
+ 		destroy_device(device, nullptr);
+ 	}
+ 	destroy_instance(instance, nullptr);
++#endif
+ }
+ 
+ } // namespace Dlss
+diff --git a/src/graphics/host_gpu/renderer/frameGen.cpp b/src/graphics/host_gpu/renderer/frameGen.cpp
+index 7ec3462d..210ba620 100644
+--- a/src/graphics/host_gpu/renderer/frameGen.cpp
++++ b/src/graphics/host_gpu/renderer/frameGen.cpp
+@@ -13,6 +13,7 @@
+ #include <mutex>
+ #include <string>
+ 
++#if defined(_WIN32)
+ #ifndef NOMINMAX
+ #define NOMINMAX
+ #endif
+@@ -20,6 +21,7 @@
+ #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
++#endif
+ 
+ #if KYTY_STREAMLINE
+ #include <sl.h>
+diff --git a/src/graphics/host_gpu/renderer/fsr.cpp b/src/graphics/host_gpu/renderer/fsr.cpp
+index b1246a7f..b8e8b993 100644
+--- a/src/graphics/host_gpu/renderer/fsr.cpp
++++ b/src/graphics/host_gpu/renderer/fsr.cpp
+@@ -15,6 +15,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#if defined(_WIN32)
+ #ifndef NOMINMAX
+ #define NOMINMAX
+ #endif
+@@ -22,6 +23,7 @@
+ #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
++#endif
+ 
+ #if KYTY_FFX
+ // AMD FSR SDK 2.4 (KYTY_FFX_SDK_DIR: api/include and framegeneration/include).
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 4298995a..12d503ff 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -954,6 +954,7 @@ void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t l
+ 	if (!step.ready) {
+ 		const char* custom = std::getenv("ASTROHYBRID_GAME_STEP_ADDR");
+ 		const auto  addr   = custom != nullptr ? std::strtoull(custom, nullptr, 0) : 0x93F0040ull;
++#if defined(_WIN32)
+ 		MEMORY_BASIC_INFORMATION info {};
+ 		if (VirtualQuery(reinterpret_cast<void*>(addr), &info, sizeof(info)) != sizeof(info) ||
+ 		    info.State != MEM_COMMIT || (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) == 0) {
+@@ -961,6 +962,7 @@ void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t l
+ 			std::printf("Game speed: no frame-rate block at 0x%llx, switch ignored\n", static_cast<unsigned long long>(addr));
+ 			return;
+ 		}
++#endif
+ 		auto* fps = reinterpret_cast<double*>(addr);
+ 		auto* dt  = reinterpret_cast<float*>(addr + 8);
+ 		if (!(*fps >= 10.0 && *fps <= 240.0) || std::abs(*dt * *fps - 1.0) > 1e-3) {
+diff --git a/src/graphics/presentation/window/window.cpp b/src/graphics/presentation/window/window.cpp
+index 52631708..333889a7 100644
+--- a/src/graphics/presentation/window/window.cpp
++++ b/src/graphics/presentation/window/window.cpp
+@@ -1077,6 +1077,13 @@ void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
+ 	}
+ 
+ 	SDL_SetWindowTitle(window, text.c_str());
++
++	static const bool fps_log = std::getenv("ASTROHYBRID_FPS_LOG") != nullptr;
++	if (fps_log) {
++		std::fprintf(stderr, "[fps] frame=%llu fps=%.1f\n",
++		             static_cast<unsigned long long>(frame_num), current_fps);
++		std::fflush(stderr);
++	}
+ }
+ 
+ } // namespace Libs::Graphics
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+index 8a77c88f..bb8bc131 100644
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -54,6 +54,8 @@
+ 
+ #if defined(_WIN32)
+ #include <windows.h>
++#else
++#include <dlfcn.h>
+ #endif
+ 
+ namespace Libs {
+@@ -86,6 +88,9 @@ KytyGpuNidInfo        g_info[g_row_count];
+ KytyGpuHostCallbacks  g_host {};
+ std::atomic<State>    g_state {State::Loaded};
+ std::mutex            g_lifecycle;
++#if !defined(_WIN32)
++void*                 g_host_module = nullptr;
++#endif
+ 
+ void Log(int level, const char* format, ...) {
+ 	char text[1024];
+@@ -105,7 +110,7 @@ void Log(int level, const char* format, ...) {
+ extern "C" {
+ 
+ // One slot per export; the thunks read them with a RIP-relative indirect jump.
+-__attribute__((used)) void* g_kyty_gpu_slots[g_row_count];
++__attribute__((used, visibility("hidden"))) void* g_kyty_gpu_slots[g_row_count];
+ 
+ [[noreturn]] void KytyGpuUnboundNid(uint32_t index) {
+ 	const char* nid      = index < g_row_count ? g_rows[index].nid : "?";
+@@ -129,6 +134,12 @@ void* KytyGpuLazyResolve(uint32_t index);
+ // Microsoft x64 resolver with a 16-byte aligned stack and its shadow space, restores the
+ // registers and jumps to the bound implementation, so the call proceeds as if it had gone there
+ // directly. The resolver starts Kyty on first use or stops the process with the NID's name.
++#if defined(_WIN32)
++#define KYTY_GPU_TRAP_INDEX_REGISTER "movl %r11d, %ecx\n\t"
++#else
++#define KYTY_GPU_TRAP_INDEX_REGISTER "movl %r11d, %edi\n\t"
++#endif
++
+ __attribute__((naked)) void KytyGpuUnboundTrap() {
+ 	__asm__ volatile("pushq %rdi\n\t"
+ 	                 "pushq %rsi\n\t"
+@@ -146,7 +157,7 @@ __attribute__((naked)) void KytyGpuUnboundTrap() {
+ 	                 "movdqu %xmm5, 112(%rsp)\n\t"
+ 	                 "movdqu %xmm6, 128(%rsp)\n\t"
+ 	                 "movdqu %xmm7, 144(%rsp)\n\t"
+-	                 "movl %r11d, %ecx\n\t"
++	                 KYTY_GPU_TRAP_INDEX_REGISTER
+ 	                 "callq KytyGpuLazyResolve\n\t"
+ 	                 "movq %rax, %r11\n\t"
+ 	                 "movdqu 32(%rsp), %xmm0\n\t"
+@@ -556,6 +567,7 @@ bool BridgeGuestAccessFault(const Common::HostException::ExceptionInfo& info) {
+ 		return true;
+ 	}();
+ 	bool guest_code = false;
++#if defined(_WIN32)
+ 	if (guest_loads && access == GpuAccess::Read) {
+ 		static const HMODULE game = GetModuleHandleW(nullptr);
+ 		HMODULE              module = nullptr;
+@@ -563,6 +575,9 @@ bool BridgeGuestAccessFault(const Common::HostException::ExceptionInfo& info) {
+ 		                                reinterpret_cast<LPCWSTR>(info.exception_address), &module) != 0 &&
+ 		             module == game;
+ 	}
++#else
++	(void)guest_loads;
++#endif
+ 	const GuestLoad::FaultScope guest_load(guest_code ? info.native_context : nullptr);
+ 	return Libs::LibKernel::Memory::HandleGpuFault(access, info.access_violation_vaddr);
+ }
+@@ -710,10 +725,17 @@ int ApiStartGraphics() {
+ 	if (g_host.publish_pad != nullptr) {
+ 		g_relay = std::thread(Relay);
+ 	}
++#if defined(_WIN32)
+ 	if (!Common::HostException::InstallFirstAccessHandler(BridgeGuestAccessFault)) {
+ 		Log(2, "start_graphics: Kyty's guest memory fault handler could not be installed");
+ 		return KYTY_GPU_E_STATE;
+ 	}
++#else
++	if (!Common::HostException::InstallHandler(BridgeGuestAccessFault)) {
++		Log(2, "start_graphics: Kyty's guest memory fault handler could not be installed");
++		return KYTY_GPU_E_STATE;
++	}
++#endif
+ 	g_state.store(State::Graphics);
+ 	Log(0, "start_graphics: Kyty renderer running (%lld ms)",
+ 	    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+@@ -822,14 +844,38 @@ const KytyGpuNidInfo* ApiFindNid(const char* nid) {
+ std::mutex g_lazy;
+ 
+ const KytyGpuHostCallbacks* FindHost() {
+-	const char* name   = std::getenv("KYTY_GPU_HOST_MODULE");
+-	HMODULE     module = LoadLibraryA(name != nullptr ? name : KYTY_GPU_HOST_MODULE_DEFAULT);
++	const char* name = std::getenv("KYTY_GPU_HOST_MODULE");
++#if defined(_WIN32)
++	HMODULE module = LoadLibraryA(name != nullptr ? name : KYTY_GPU_HOST_MODULE_DEFAULT);
+ 	if (module == nullptr) {
+ 		return nullptr;
+ 	}
+ 	const auto entry = reinterpret_cast<KytyGpuHostEntryFn>(
+ 	    reinterpret_cast<void*>(GetProcAddress(module, KYTY_GPU_HOST_ENTRY)));
+ 	return entry != nullptr ? entry() : nullptr;
++#else
++	const char* candidates[] = {
++	    name,
++	    KYTY_GPU_HOST_MODULE_DEFAULT,
++	    "libs/" KYTY_GPU_HOST_MODULE_DEFAULT,
++	    "./libs/" KYTY_GPU_HOST_MODULE_DEFAULT,
++	    "astrohybrid_host.so",
++	    "libs/astrohybrid_host.so",
++	    "./libs/astrohybrid_host.so",
++	    nullptr,
++	};
++	void* module = nullptr;
++	for (const char** candidate = candidates; *candidate != nullptr && module == nullptr; ++candidate) {
++		if (**candidate == '\0') continue;
++		module = dlopen(*candidate, RTLD_NOW | RTLD_LOCAL);
++	}
++	if (module == nullptr) {
++		return nullptr;
++	}
++	g_host_module = module;
++	const auto entry = reinterpret_cast<KytyGpuHostEntryFn>(dlsym(module, KYTY_GPU_HOST_ENTRY));
++	return entry != nullptr ? entry() : nullptr;
++#endif
+ }
+ 
+ struct Tables {
+@@ -851,6 +897,36 @@ const KytyGpuApi g_api = {
+ 
+ } // namespace
+ 
++#if !defined(_WIN32)
++// The two libSceAgcDriver exports that are AnyPS5 host calls instead of Kyty implementations.
++// kyty_gpu.so is installed as libSceAgcDriver.prx, so it must export them too.
++extern "C" void KytyGpuAstroHdr(void* status) {
++	if (g_host_module == nullptr) {
++		(void)FindHost();
++	}
++	if (g_host_module == nullptr) {
++		return;
++	}
++	using Fn = void (*)(void*);
++	if (auto fn = reinterpret_cast<Fn>(dlsym(g_host_module, "AstroHybridHostHdr_nid_no_patch"))) {
++		fn(status);
++	}
++}
++
++extern "C" void KytyGpuAstroToneMapPeak(float nits) {
++	if (g_host_module == nullptr) {
++		(void)FindHost();
++	}
++	if (g_host_module == nullptr) {
++		return;
++	}
++	using Fn = void (*)(float);
++	if (auto fn = reinterpret_cast<Fn>(dlsym(g_host_module, "AstroHybridNoteReportedToneMapPeak_nid_no_patch"))) {
++		fn(nits);
++	}
++}
++#endif
++
+ // Game code reached an export no host has bound yet: AstroBot.exe loads the shims and calls
+ // straight in. Find the host module, bind the exports and start the renderer, once.
+ extern "C" __attribute__((used)) void* KytyGpuLazyResolve(uint32_t index) {
+@@ -882,6 +958,24 @@ extern "C" __attribute__((used)) void* KytyGpuLazyResolve(uint32_t index) {
+ 	return g_kyty_gpu_slots[index];
+ }
+ 
++// A normal-name entry point for the host's libkernel: unlike the NID exports it does not put
++// the kernel memory NIDs into the ELF global scope (where they would shadow libkernel's own
++// symbols), and it binds the slot first if this is the first game call.
++extern "C" KYTY_GPU_EXPORT void* KytyGpuGetNid(const char* nid) {
++	if (nid == nullptr) {
++		return nullptr;
++	}
++	for (uint32_t i = 0; i < g_row_count; ++i) {
++		if (std::strcmp(g_rows[i].nid, nid) == 0) {
++			if (g_info[i].bound == 0) {
++				(void)KytyGpuLazyResolve(i);
++			}
++			return g_kyty_gpu_slots[i];
++		}
++	}
++	return nullptr;
++}
++
+ extern "C" KYTY_GPU_EXPORT const KytyGpuApi* KytyGpuGetApi(uint32_t abi_version) {
+ 	return (abi_version >> 16u) == KYTY_GPU_ABI_VERSION_MAJOR ? &g_api : nullptr;
+ }
+diff --git a/src/kernel/memoryAddressSpace.inc b/src/kernel/memoryAddressSpace.inc
+index 24f538d2..249b7668 100644
+--- a/src/kernel/memoryAddressSpace.inc
++++ b/src/kernel/memoryAddressSpace.inc
+@@ -1931,6 +1931,15 @@ private:
+ 		    {HOST_USER_MIN, HOST_USER_MAX + 1u},
+ 		}};
+ 
++		// AstroHybrid: ranges the host's guest arena already holds as PROT_NONE reservations.
++		// Adopting them as free lets Kyty's mprotect/mmap use them without reserving them first.
++		for (const auto& [start, size]: g_host_placeholders) {
++			EXIT_IF(size == 0);
++			AddFreeUnlocked(start, size);
++			m_owned.emplace_back(start, size);
++			m_adopted.emplace_back(start, size);
++		}
++
+ #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+ 		std::vector<std::pair<uint64_t, uint64_t>> occupied;
+ 		FILE*                                      maps = fopen("/proc/self/maps", "r");
+-- 
+2.55.0.windows.5
+

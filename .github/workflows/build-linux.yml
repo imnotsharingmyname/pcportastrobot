@@ -1,0 +1,125 @@
+name: Build Native Linux x64 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional GitHub Release tag to attach the Linux tarball to (e.g. v1.2.25)"
+        required: false
+        default: ""
+      version:
+        description: "Package version string (e.g. 1.2.25)"
+        required: false
+        default: "1.2.25"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space on runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install native Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld cmake ninja-build pkg-config python3 \
+            libvulkan-dev glslang-tools \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxfixes-dev \
+            libwayland-dev libxkbcommon-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libdbus-1-dev libudev-dev libgl-dev libdrm-dev libgbm-dev \
+            libusb-1.0-0-dev libhidapi-dev libssl-dev zlib1g-dev \
+            patchelf file
+
+      - name: Prepare and build patched AnyPS5 (relinker + system .prx libs)
+        run: |
+          chmod +x Tools/linux/*.sh Tools/linux/*.py
+          Tools/linux/prepare-anyps5.sh patched
+          Tools/linux/build-anyps5.sh Build/anyps5-hybrid
+
+      - name: Prepare and build patched GPU runtime (kyty_gpu.so, Release -O3)
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          Tools/linux/prepare-kyty.sh patched
+          Tools/linux/build-kyty.sh
+
+      - name: Publish self-contained Avalonia Linux GUI
+        run: |
+          Tools/linux/publish-gui.sh
+
+      - name: Verify built Linux binaries
+        run: |
+          set -euo pipefail
+          ls -lh dist/astrohybrid-gui/AstroHybrid \
+                 Build/kyty-gpu/kyty_gpu.so \
+                 Build/anyps5-hybrid/core/relinker/relinker \
+                 Build/anyps5-hybrid/core/libs/libs/libkernel.prx \
+                 Build/anyps5-hybrid/core/libs/libs/libc.prx \
+                 Build/anyps5-hybrid/core/libs/libs/libAstroHybridHost.prx
+          file dist/astrohybrid-gui/AstroHybrid Build/kyty-gpu/kyty_gpu.so Build/anyps5-hybrid/core/relinker/relinker
+          nm -D Build/kyty-gpu/kyty_gpu.so | grep -E "KytyGpuGetApi|KytyGpuGetNid|KytyGpuAstroHdr" | head -n 10
+
+      - name: Package AstroBotPC-AstroHybrid Linux x64 archive
+        env:
+          VER: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          STAGE="dist/stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Build/kyty-gpu" \
+                   "$STAGE/Build/anyps5-hybrid/core/relinker" \
+                   "$STAGE/Build/anyps5-hybrid/core/libs/libs" \
+                   "$STAGE/Tools/linux" \
+                   "$STAGE/Docs"
+
+          cp -a dist/astrohybrid-gui/. "$STAGE/"
+          cp -a Build/kyty-gpu/kyty_gpu.so "$STAGE/Build/kyty-gpu/"
+          cp -a Build/anyps5-hybrid/core/relinker/relinker "$STAGE/Build/anyps5-hybrid/core/relinker/"
+          cp -a Build/anyps5-hybrid/core/libs/libs/*.prx "$STAGE/Build/anyps5-hybrid/core/libs/libs/"
+          cp -a Tools/linux/. "$STAGE/Tools/linux/"
+          cp -a Docs/LINUX.md "$STAGE/Docs/"
+          cp -a recomplauncher.json "$STAGE/"
+          [ -f NOTICE ] && cp -a NOTICE "$STAGE/" || true
+          [ -d licenses ] && cp -a licenses "$STAGE/" || true
+          [ -d fonts ] && cp -a fonts "$STAGE/" || true
+
+          OUT="AstroBotPC-AstroHybrid-${VER}-Linux-x64.tar.gz"
+          tar -C "$STAGE" -czf "$OUT" .
+          ls -lh "$OUT"
+          sha256sum "$OUT" | tee "${OUT}.sha256"
+          echo "ARCHIVE_NAME=$OUT" >> "$GITHUB_ENV"
+
+      - name: Upload Linux x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: |
+            ${{ env.ARCHIVE_NAME }}
+            ${{ env.ARCHIVE_NAME }}.sha256
+
+      - name: Attach to GitHub Release (if release_tag specified)
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
