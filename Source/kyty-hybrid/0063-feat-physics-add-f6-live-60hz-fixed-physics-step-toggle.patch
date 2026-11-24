@@ -1,4 +1,4 @@
-﻿From eeba7ce8a117df28270bdd44877643fe12a456f1 Mon Sep 17 00:00:00 2001
+From eeba7ce8a117df28270bdd44877643fe12a456f1 Mon Sep 17 00:00:00 2001
 From: Local Build <local@invalid>
 Date: Tue, 24 Nov 2026 15:29:30 +0000
 Subject: [PATCH] feat(physics): add F6 live 60Hz fixed physics step toggle for

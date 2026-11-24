@@ -1,4 +1,4 @@
-﻿From e0d5536bbf8cc42d15fe5a3a9acf6407d814dd9d Mon Sep 17 00:00:00 2001
+From e0d5536bbf8cc42d15fe5a3a9acf6407d814dd9d Mon Sep 17 00:00:00 2001
 From: Local Build <local@invalid>
 Date: Tue, 24 Nov 2026 19:16:59 +0000
 Subject: [PATCH] fix(physics): clamp minimum UpdateGameStep rate to 30Hz (max

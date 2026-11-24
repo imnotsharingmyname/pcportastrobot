@@ -1,4 +1,4 @@
-﻿From 9b8f8ed58c05dcca6068d425608e541dc1edec84 Mon Sep 17 00:00:00 2001
+From 9b8f8ed58c05dcca6068d425608e541dc1edec84 Mon Sep 17 00:00:00 2001
 From: Local Build <local@invalid>
 Date: Tue, 24 Nov 2026 12:57:29 +0000
 Subject: [PATCH] fix(overlay): log VkResult and ignore non-fatal Vulkan
