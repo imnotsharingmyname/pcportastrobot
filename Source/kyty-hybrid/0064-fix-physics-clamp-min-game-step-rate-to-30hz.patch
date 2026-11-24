@@ -1,0 +1,28 @@
+﻿From e0d5536bbf8cc42d15fe5a3a9acf6407d814dd9d Mon Sep 17 00:00:00 2001
+From: Local Build <local@invalid>
+Date: Tue, 24 Nov 2026 19:16:59 +0000
+Subject: [PATCH] fix(physics): clamp minimum UpdateGameStep rate to 30Hz (max
+ dt 1/30s) to prevent disappearing bridges/scarecrows (#188, #227)
+
+---
+ src/graphics/presentation/videoOut.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index e81c9da6..4298995a 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -999,7 +999,9 @@ void UpdateGameStep(GameStep& step, uint64_t now, uint64_t frequency, uint32_t l
+ 	if (limit != 0 && std::abs(rate - limit) <= limit * 0.06) {
+ 		rate = limit;
+ 	}
+-	rate = std::clamp(rate, 20.0, 120.0) / step.scale;
++	// Cap max physics/gameplay dt at 1/30 s (min rate 30 Hz) so heavy laptop/FG drops to 20-28 FPS
++	// do not break spawners, disappearing bridges/scarecrows (#188, #227), or collision triggers.
++	rate = std::clamp(rate, 30.0, 120.0) / step.scale;
+ 	if (std::abs(rate - *step.fps) < 0.75) {
+ 		return;
+ 	}
+-- 
+2.55.0.windows.5
+
