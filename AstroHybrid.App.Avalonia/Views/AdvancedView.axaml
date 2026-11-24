@@ -1,0 +1,167 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.AdvancedView">
+  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <StackPanel Margin="0,0,0,20">
+
+      <!-- Renderer -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Renderer" Classes="section" Margin="0,0,0,10" />
+          <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto" RowSpacing="8">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Lighting" Classes="body" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="LightingBox" Width="400"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Classes="muted"
+                       Text="The faster-lighting variant is the game's own non-tiled renderer; the original keeps ray-traced lighting." />
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Game speed -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Game Speed" Classes="section" Margin="0,0,0,10" />
+          <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto" RowSpacing="8">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Speed" Classes="body" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="SpeedBox" Width="400"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Classes="muted"
+                       Text="Below 100% the game's simulation runs slower, which keeps a low frame rate from feeling slow-motion. Real-time speed needs the frame-rate block found at setup." />
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Language -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Language" Classes="section" Margin="0,0,0,10" />
+          <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto" RowSpacing="8">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Game language" Classes="body" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="LanguageBox" Width="400"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Classes="muted"
+                       Text="The language the game shows its text in. Auto follows your desktop language when the game has it." />
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Runtime options -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Runtime Options" Classes="section" Margin="0,0,0,10" />
+
+          <CheckBox x:Name="HangWatchdogBox" Content="Hang Watchdog (record diagnostics on freeze)"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="30,4,0,10"
+                     Text="Samples the game's stacks into Logs when it produces no output for two minutes." />
+
+          <CheckBox x:Name="ShaderCacheBox" Content="Persistent Shader Cache (eliminates compile hitches)"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="30,4,0,10"
+                     Text="On keeps Kyty's _PipelineCache between runs; off clears it and disables the background save, so shaders compile again on the next launch." />
+
+          <CheckBox x:Name="DrawPrepBox" Content="Draw Prep Tuning (reduces CP spin with background apps)"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="30,4,0,10"
+                     Text="On uses Kyty's parallel draw preparation; off reverts to no preparation." />
+
+          <CheckBox x:Name="MotionBox" Content="Motion Controls (accelerometer/gyroscope)"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="30,4,0,10"
+                     Text="Relays the pad's motion samples to the game." />
+
+          <CheckBox x:Name="TriggerBox" Content="Trigger State (DualSense adaptive triggers)"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="30,4,0,10"
+                     Text="Forwards the game's adaptive trigger state to the pad." />
+
+          <CheckBox x:Name="DsSpeakerBox" Content="DualSense Wireless Speaker (Bluetooth HID audio)"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="30,4,0,10"
+                     Text="Sends the game's controller speaker channel over Bluetooth." />
+
+          <CheckBox x:Name="DsHapticsBox" Content="DualSense Wireless Haptics (Bluetooth HID haptics)"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="30,4,0,10"
+                     Text="Sends the game's haptic channel over Bluetooth." />
+
+          <CheckBox x:Name="SkipIntroBox" Content="Skip Intro Videos (-skipIntro)"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="30,4,0,10"
+                     Text="Finishes the boot logo videos immediately. Only sessions started in the first 45 seconds are affected, so story cutscenes still play." />
+        </StackPanel>
+      </Border>
+
+      <!-- Priority -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Process Priority" Classes="section" Margin="0,0,0,10" />
+          <Grid ColumnDefinitions="200,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="10">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Process Priority" Classes="body" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="PriorityBox" Width="200"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Command Processor Priority" Classes="body"
+                       VerticalAlignment="Center" />
+            <ComboBox Grid.Row="1" Grid.Column="1" x:Name="CpPriorityBox" Width="150"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+
+            <TextBlock Grid.Row="2" Grid.Column="1" Classes="muted"
+                       Text="Raising the game above normal needs privileges; without them it continues at the normal level." />
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Audio routing -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Audio" Classes="section" Margin="0,0,0,10" />
+          <CheckBox x:Name="DirectAudioBox" Content="Route game audio directly to the default sink"
+                    IsCheckedChanged="OnCheckCommitted" />
+          <TextBlock Classes="muted" Margin="0,8,0,0"
+                     Text="Bypasses desktop filter chains such as JamesDSP or virtual surround, which can add a lot of latency. The sink below is optional; empty uses the current default sink." />
+          <TextBox x:Name="AudioSinkBox" Margin="0,8,0,0" Watermark="alsa_output.… (optional)"
+                   LostFocus="OnAudioSinkLostFocus" />
+        </StackPanel>
+      </Border>
+
+      <!-- Experimental -->
+      <Border Classes="card">
+        <Expander Header="Experimental Features" HorizontalAlignment="Stretch">
+          <StackPanel Margin="0,10,0,0">
+            <TextBlock Classes="error" TextWrapping="Wrap"
+                       Text="These options can break rendering or stability. Leave them off unless you are testing." />
+            <TextBlock Classes="muted" Margin="0,10,0,0"
+                       Text="Additional experimental options are added here as they are validated." />
+          </StackPanel>
+        </Expander>
+      </Border>
+
+      <!-- Game output -->
+      <Border Classes="card">
+        <Expander x:Name="LogExpander" Header="Game Output" HorizontalAlignment="Stretch">
+          <StackPanel Margin="0,10,0,0">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Grid.Column="0" Classes="muted"
+                         Text="Runtime output. Kept across page switches; the last 500 lines are retained." />
+              <Button Grid.Column="1" Theme="{StaticResource TextButton}" Content="Clear"
+                      Click="ClearLog" VerticalAlignment="Center" />
+            </Grid>
+            <TextBox x:Name="LogBox" Height="220" IsReadOnly="True" AcceptsReturn="True"
+                     TextWrapping="NoWrap" FontFamily="{DynamicResource MonoFont}" FontSize="11"
+                     Margin="0,8,0,0" />
+          </StackPanel>
+        </Expander>
+      </Border>
+
+      <!-- Runtime paths -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Runtime" Classes="section" Margin="0,0,0,10" />
+          <TextBlock x:Name="RuntimeText" Classes="mono" Text="—" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

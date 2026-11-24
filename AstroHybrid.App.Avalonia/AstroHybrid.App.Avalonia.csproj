@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>AstroHybrid</AssemblyName>
+    <RootNamespace>AstroHybrid.App.Avalonia</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.23" Condition="'$(Configuration)' == 'Debug'" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/**" />
+  </ItemGroup>
+
+  <!-- The Home badge shows the build commit. The shipped folder is not a git
+       checkout, so the SHA is captured at build time next to the binary. -->
+  <Target Name="WriteBuildInfo" AfterTargets="Build">
+    <Exec Command="git rev-parse --short HEAD > &quot;$(TargetDir)build-info.txt&quot;" IgnoreExitCode="true" StandardOutputImportance="Low" />
+  </Target>
+
+  <!-- Single-file publish copies only the bundle, so the manifest is written
+       next to the published executable as well. -->
+  <Target Name="WritePublishBuildInfo" AfterTargets="Publish">
+    <Exec Command="git rev-parse --short HEAD > &quot;$(PublishDir)build-info.txt&quot;" IgnoreExitCode="true" StandardOutputImportance="Low" />
+  </Target>
+</Project>

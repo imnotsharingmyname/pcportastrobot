@@ -1,0 +1,125 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AstroHybrid.App.Avalonia.Views.GraphicsView">
+  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <StackPanel Margin="0,0,0,20">
+
+      <!-- Display -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Display" Classes="section" Margin="0,0,0,10" />
+
+          <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                RowSpacing="10">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Resolution" Classes="body"
+                       VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="ResolutionBox" Width="300"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+
+            <CheckBox Grid.Row="1" Grid.Column="1" x:Name="FullscreenBox"
+                      Content="Start in fullscreen" IsCheckedChanged="OnCheckCommitted" />
+
+            <CheckBox Grid.Row="2" Grid.Column="1" x:Name="UltrawideBox"
+                      Content="Ultrawide 21:9 rendering" IsCheckedChanged="OnCheckCommitted" />
+            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="UltrawideNote" Classes="muted" />
+
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="Graphics card" Classes="body"
+                       VerticalAlignment="Center" />
+            <ComboBox Grid.Row="4" Grid.Column="1" x:Name="GpuBox" Width="400"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="5" Grid.Column="1" x:Name="GpuNote" Classes="muted" />
+
+            <CheckBox Grid.Row="6" Grid.Column="1" x:Name="VsyncBox"
+                      Content="VSync (no tearing; may add a little input delay)"
+                      IsCheckedChanged="OnCheckCommitted" />
+            <TextBlock Grid.Row="7" Grid.Column="1" Classes="muted"
+                       Text="Vulkan FIFO presentation when on; immediate presentation when off." />
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Frame Rate -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Frame Rate" Classes="section" Margin="0,0,0,10" />
+          <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto" RowSpacing="8">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Limit" Classes="body" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="FpsBox" Width="400"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Classes="muted"
+                       Text="The port is CPU-limited; a 60 FPS cap usually gives steadier pacing." />
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- NVIDIA RTX Features: kept for parity. Ray Tracing is real; the DLSS rows
+           stay disabled and explained. -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="NVIDIA RTX Features" Classes="section" Margin="0,0,0,10" />
+          <TextBlock Classes="muted" Margin="0,0,0,15" TextWrapping="Wrap"
+                     Text="Ray Tracing picks the game's lighting build. DLSS and Frame Generation are Windows-only and are shown here for parity." />
+
+          <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                RowSpacing="10">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Ray Tracing (RTX)" Classes="body"
+                       VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="RayTracingBox" Width="400"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="RayTracingNote" Classes="muted"
+                       TextWrapping="Wrap"
+                       Text="Ray Tracing is a game build, not a driver feature." />
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Upscaling" Classes="body"
+                       VerticalAlignment="Center" />
+            <ComboBox Grid.Row="2" Grid.Column="1" x:Name="UpscaleBox" Width="400"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="UpscaleNote" Classes="muted"
+                       TextWrapping="Wrap"
+                       Text="The game's own temporal upscale runs through Vulkan." />
+
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="Frame Generation" Classes="body"
+                       VerticalAlignment="Center" />
+            <ComboBox Grid.Row="4" Grid.Column="1" x:Name="FrameGenBox" Width="400"
+                      HorizontalAlignment="Left" IsEnabled="False" />
+            <TextBlock Grid.Row="5" Grid.Column="1" TextWrapping="Wrap"
+                       Text="Frame generation needs a working provider. DLSS-G is a Windows-only Streamline feature. The FSR 3.1 provider builds and presents through a wrapped swapchain, but its generation callback is untested and can hang the GPU, so it stays off." />
+
+            <TextBlock Grid.Row="6" Grid.Column="0" Text="Target FPS" Classes="body"
+                       VerticalAlignment="Center" IsVisible="False" />
+            <ComboBox Grid.Row="6" Grid.Column="1" x:Name="TargetFpsBox" Width="400"
+                      HorizontalAlignment="Left" IsVisible="False" IsEnabled="False" />
+
+            <CheckBox Grid.Row="7" Grid.Column="1" x:Name="LowLatencyBox"
+                      Content="NVIDIA Low Latency" IsCheckedChanged="OnCheckCommitted"
+                      ToolTip.Tip="Uses VK_NV_low_latency2, not Streamline Reflex." />
+          </Grid>
+          <TextBlock x:Name="LowLatencyNote" Classes="muted" Margin="150,6,0,0"
+                     Text="Needs an NVIDIA driver exposing VK_NV_low_latency2 and VK_KHR_present_id; unavailable on this system." />
+        </StackPanel>
+      </Border>
+
+      <!-- Performance Overlay -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Performance Overlay" Classes="section" Margin="0,0,0,10" />
+          <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto" RowSpacing="8">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Show Stats" Classes="body" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="OverlayBox" Width="400"
+                      HorizontalAlignment="Left" SelectionChanged="OnCommitted" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Classes="muted"
+                       Text="In game: F2 shows or hides the overlay." />
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Hardware Summary -->
+      <Border Classes="card">
+        <StackPanel>
+          <TextBlock Text="Hardware Summary" Classes="section" Margin="0,0,0,10" />
+          <TextBlock x:Name="HardwareText" Classes="body" Text="—" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

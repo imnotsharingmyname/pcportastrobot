@@ -1,0 +1,32 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!--
+    Stroke-only 24x24 icons, drawn as Path geometries and tinted with the
+    control's Foreground. They replace the WPF emoji nav glyphs because the
+    only colour-emoji face on Linux is a single-strike bitmap font that is
+    blurry at 16 px, and a minimal install has none at all.
+
+    Render with:
+      Path Data="{StaticResource IconX}" Width="16" Height="16"
+           Stretch="Uniform" Stroke="{TemplateBinding Foreground}"
+           StrokeThickness="1.5" StrokeLineCap="Round" StrokeJoin="Round"
+    Leave Fill unset: these are open subpaths and would fill as polygons.
+  -->
+
+  <StreamGeometry x:Key="IconHome">M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10</StreamGeometry>
+  <StreamGeometry x:Key="IconGraphics">M6 12h4 M8 10v4 M15 13h.01 M18 11h.01 M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z</StreamGeometry>
+  <StreamGeometry x:Key="IconController">M22 12h-4 M6 12H2 M12 6V2 M12 22v-4 M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z</StreamGeometry>
+  <StreamGeometry x:Key="IconAdvanced">M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z</StreamGeometry>
+  <StreamGeometry x:Key="IconInstallation">M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z M3.3 7l8.7 5 8.7-5 M12 22V12</StreamGeometry>
+
+  <!-- Home badges, update banner and the Controller feature ticks. -->
+  <StreamGeometry x:Key="IconPackage">M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z M3.3 7l8.7 5 8.7-5 M12 22V12</StreamGeometry>
+  <StreamGeometry x:Key="IconUpdate">M12 3v12 M7.5 10.5 12 15l4.5-4.5 M4 20h16</StreamGeometry>
+  <StreamGeometry x:Key="IconBell">M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9 M10.3 21a1.94 1.94 0 0 0 3.4 0</StreamGeometry>
+  <StreamGeometry x:Key="IconBolt">M13 2 3 14h9l-1 8 10-12h-9l1-8z</StreamGeometry>
+  <StreamGeometry x:Key="IconWarning">M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01</StreamGeometry>
+  <StreamGeometry x:Key="IconCheck">M20 6 9 17l-5-5</StreamGeometry>
+  <StreamGeometry x:Key="IconCross">M18 6 6 18 M6 6l12 12</StreamGeometry>
+  <StreamGeometry x:Key="IconStar">M12 2.5l2.9 5.88 6.49.95-4.7 4.58 1.11 6.46L12 17.32l-5.8 3.05 1.11-6.46-4.7-4.58 6.49-.95z</StreamGeometry>
+</ResourceDictionary>
