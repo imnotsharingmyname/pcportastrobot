@@ -168,6 +168,12 @@ namespace AstroHybrid.App
                 // The saved settings, including choices RecompLauncher wrote, as they are: a later start of the
                 // main window must not replace them with its first-run recommendations.
                 _settings.ApplyBestOnStart = false;
+                // Honor RecompLauncher's Big Picture mode (couch / Steam Deck / controller-only): start fullscreen.
+                var rlMode = Environment.GetEnvironmentVariable("RECOMPLAUNCHER_MODE");
+                if (string.Equals(rlMode, "bigpicture", StringComparison.OrdinalIgnoreCase))
+                {
+                    _settings.Fullscreen = true;
+                }
                 var hardware = new HardwareDetector().DetectHardware();
                 hardware.SelectGpu(_settings.Gpu);
                 _settings.Sanitize(hardware.SupportsDlss, hardware.SupportsFrameGeneration, hardware.SupportsReflex,

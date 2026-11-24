@@ -45,6 +45,11 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("fsrfg")]
         public bool FsrFrameGen { get; set; } = false;
 
+        // Experimental: allow RTX 30 series users to enable DLSS Frame Generation with a
+        // third-party layer (e.g. OpenDLSSG). Default false; opt-in only. Issue #198.
+        [JsonPropertyName("allowRtx30FgOverride")]
+        public bool AllowRtx30FgOverride { get; set; } = false;
+
         [JsonPropertyName("lowlatency")]
         public bool LowLatency { get; set; } = false;
 
@@ -231,7 +236,9 @@ namespace AstroHybrid.App.Models
 
             if (!supportsDlss && Upscale == 1) Upscale = 0;
             // Frame generation is NVIDIA DLSS Frame Generation: it needs DLSS as the upscaler.
-            if (!supportsFrameGeneration || Upscale != 1) FrameGenMode = 0;
+            // Allow RTX 30 override for experimental third-party FG layers (issue #198).
+            bool effectiveFrameGenSupport = supportsFrameGeneration || AllowRtx30FgOverride;
+            if (!effectiveFrameGenSupport || Upscale != 1) FrameGenMode = 0;
             if (!supportsReflex) LowLatency = false;
             // Fixed 3x / 4x need a card that can generate that many frames (RTX 50 multi frame generation).
             if (FrameGenMode >= 3 && FrameGenMode > Math.Max(2, maxFrameGenMultiplier)) FrameGenMode = 2;

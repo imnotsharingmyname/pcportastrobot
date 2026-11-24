@@ -12,7 +12,6 @@
     "program": ["AstroHybrid.exe"],
     "args": ["--setup", "{game}"],
     "label": "Converting Astro Bot for Windows from your dump",
-    "timeout": 900,
     "done": ["{install}/Build/RunHybrid/AstroBot.exe"]
   },
   "start": {
@@ -175,6 +174,44 @@
       "defaults": { "lowlatency": "false" }
     },
     {
+      "id": "dualsense-speaker",
+      "label": "DualSense speaker",
+      "help": "Play the game's controller sound effects through the DualSense built-in speaker.",
+      "group": "Controls",
+      "choices": [
+        { "label": "On", "set": { "dsSpeaker": "true" } },
+        { "label": "Off", "set": { "dsSpeaker": "false" } }
+      ],
+      "defaults": { "dsSpeaker": "true" }
+    },
+    {
+      "id": "trigger-strength",
+      "label": "Adaptive trigger strength",
+      "help": "DualSense adaptive trigger resistance and vibration in percent (0 = off, 100 = game default).",
+      "group": "Controls",
+      "slider": { "key": "triggerStrength", "min": 0, "max": 100, "step": 10, "format": "%.0f" },
+      "defaults": { "triggerStrength": "100" }
+    },
+    {
+      "id": "vibration",
+      "label": "Vibration strength",
+      "help": "Rumble strength in percent for Xbox, Switch Pro and generic controllers (DualSense keeps its own haptics).",
+      "group": "Controls",
+      "slider": { "key": "rumblepct", "min": 0, "max": 200, "step": 10, "format": "%.0f" },
+      "defaults": { "rumblepct": "70" }
+    },
+    {
+      "id": "tilt-toggle",
+      "label": "Right-stick tilt mode",
+      "help": "For non-gyro pads (Xbox/generic): hold View/Back to tilt with the right stick, or press once to toggle.",
+      "group": "Controls",
+      "choices": [
+        { "label": "Hold View/Back", "set": { "tiltToggle": "false" } },
+        { "label": "Toggle View/Back", "set": { "tiltToggle": "true" } }
+      ],
+      "defaults": { "tiltToggle": "false" }
+    },
+    {
       "id": "overlay",
       "label": "Performance overlay",
       "help": "F2 shows or hides it in game.",
@@ -186,6 +223,30 @@
         { "label": "Everything", "set": { "overlay": "3" } }
       ],
       "defaults": { "overlay": "0" }
+    },
+    {
+      "id": "language",
+      "label": "Game language",
+      "help": "Follow Windows automatically or pick a console language.",
+      "group": "Advanced",
+      "choices": [
+        { "label": "Follow Windows", "set": { "language": "-1" } },
+        { "label": "English (US)", "set": { "language": "1" } },
+        { "label": "English (UK)", "set": { "language": "18" } },
+        { "label": "Japanese", "set": { "language": "0" } },
+        { "label": "French", "set": { "language": "2" } },
+        { "label": "Spanish", "set": { "language": "3" } },
+        { "label": "German", "set": { "language": "4" } },
+        { "label": "Italian", "set": { "language": "5" } },
+        { "label": "Portuguese (BR)", "set": { "language": "17" } },
+        { "label": "Korean", "set": { "language": "9" } },
+        { "label": "Chinese (Simplified)", "set": { "language": "11" } },
+        { "label": "Chinese (Traditional)", "set": { "language": "10" } },
+        { "label": "Russian", "set": { "language": "8" } },
+        { "label": "Polish", "set": { "language": "16" } },
+        { "label": "Arabic", "set": { "language": "21" } }
+      ],
+      "defaults": { "language": "-1" }
     }
   ],
   "groups": [{ "id": "Advanced", "advanced": true }],

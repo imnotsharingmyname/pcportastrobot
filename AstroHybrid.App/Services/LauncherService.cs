@@ -311,10 +311,10 @@ namespace AstroHybrid.App.Services
 
             // Graphics card (issue #24): an explicit choice names the card, for kyty_gpu.dll (Kyty patch
             // 0047) and the AnyPS5 renderer. A name, not an index: this list comes from Windows, whose
-            // order need not be Vulkan's. An automatic choice passes nothing, and kyty_gpu.dll keeps its
-            // own preference (a discrete card over integrated graphics).
+            // order need not be Vulkan's. An automatic choice passes the selected GPU (discrete preferred)
+            // to ensure the renderer picks the right card on dual-GPU laptops (issue #206).
             var gpu = hardware?.SelectedGpu;
-            if (hardware != null && hardware.SelectedGpuIndex >= 0 && gpu != null)
+            if (hardware != null && gpu != null)
             {
                 env["ANYPS5_GPU"] = GpuMatchToken(gpu.Name);
             }
@@ -599,16 +599,37 @@ namespace AstroHybrid.App.Services
 
         public bool IsGameRunning()
         {
-            var processes = Process.GetProcessesByName("AstroBot");
-            return processes.Length > 0;
+            return GameProcesses().Length > 0;
         }
 
         public void KillGameProcesses()
         {
-            foreach (var proc in Process.GetProcessesByName("AstroBot"))
+            foreach (var proc in GameProcesses())
             {
                 try { proc.Kill(); } catch { }
             }
+        }
+
+        private static Process[] GameProcesses()
+        {
+            var names = new[]
+            {
+                "AstroBot",
+                "AstroBot-NonRT",
+                "AstroBot-NonRT-SoftAssert",
+                "AstroBot-Ultrawide",
+                "AstroBot-NonRT-Ultrawide",
+                "AstroBot-NonRT-Ultrawide-SoftAssert",
+                "AstroBot-SuperUltrawide",
+                "AstroBot-NonRT-SuperUltrawide",
+                "AstroBot-NonRT-SuperUltrawide-SoftAssert"
+            };
+            var list = new List<Process>();
+            foreach (var name in names)
+            {
+                list.AddRange(Process.GetProcessesByName(name));
+            }
+            return list.ToArray();
         }
     }
 }
