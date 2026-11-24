@@ -12,7 +12,7 @@
     "program": ["AstroHybrid.exe"],
     "args": ["--setup", "{game}"],
     "label": "Converting Astro Bot for Windows from your dump",
-    "done": ["{install}/Build/RunHybrid/AstroBot.exe"]
+    "done": ["{install}/Build/RunHybrid/AstroBot.exe", "{install}/Build/RunHybrid/kyty_gpu.dll"]
   },
   "start": {
     "program": ["AstroHybrid.exe"],
@@ -20,6 +20,7 @@
   },
   "config": [
     {
+      "id": "main",
       "format": "json",
       "file": [{ "path": "{install}/Build/astrohybrid-settings.json" }],
       "game_path": "gameDumpPath"
@@ -257,14 +258,30 @@
     "{install}/Build/astrohybrid-settings.json"
   ],
   "folders": {
+    "saves": [{ "path": "{install}/Build/RunHybrid/_sd_mem" }],
     "logs": [{ "path": "{install}/Logs" }],
-    "mods": [{ "path": "{install}/mods" }]
+    "mods": [{ "path": "{install}/mods" }],
+    "game": [{ "path": "{install}/Build/RunHybrid" }]
   },
+  "looks": {
+    "allowed": false,
+    "reason": "The game runs in a second program (Build\\RunHybrid\\AstroBot.exe) started by AstroHybrid, so ReShade looks don't reach it."
+  },
+  "actions": [
+    { "id": "logs", "label": "Logs", "help": "AstroHybrid and game logs to attach to a bug report.", "open": "logs" },
+    { "id": "saves", "label": "Saves", "help": "Your Astro Bot save data folder.", "open": "saves" },
+    { "id": "mods", "label": "Mods", "help": "Drop replacement game files here without modifying your dump.", "open": "mods" },
+    { "id": "cache", "label": "Shader cache", "help": "Precompiled shaders and pipelines. Clear only if visuals look wrong after an update.", "clear": "game/_PipelineCache" }
+  ],
   "exit_codes": {
     "0": "ok",
     "321": "The graphics card was reset during play (error 321). Update to the latest AstroHybrid; at 4K on an 8 GB card, use 2560 x 1440. If it keeps happening, send the logs from the game's page.",
     "-1073740791": "The game stopped after a fatal error (0xC0000409). Make sure you are on the latest AstroHybrid and send hybrid-run.err.log + hybrid-run.out.log from the game's page.",
-    "-1073741819": "Memory access violation (0xC0000005). Update to the latest AstroHybrid, verify your PS5 dump is complete, and send hybrid-run.err.log + hybrid-run.out.log if it repeats."
+    "3221226505": "The game stopped after a fatal error (0xC0000409). Make sure you are on the latest AstroHybrid and send hybrid-run.err.log + hybrid-run.out.log from the game's page.",
+    "-1073741819": "Memory access violation (0xC0000005). Update to the latest AstroHybrid, verify your PS5 dump is complete, and send hybrid-run.err.log + hybrid-run.out.log if it repeats.",
+    "3221225477": "Memory access violation (0xC0000005). Update to the latest AstroHybrid, verify your PS5 dump is complete, and send hybrid-run.err.log + hybrid-run.out.log if it repeats.",
+    "-1073741515": "A required DLL is missing (0xC0000135). Reinstall AstroHybrid from RecompLauncher.",
+    "3221225781": "A required DLL is missing (0xC0000135). Reinstall AstroHybrid from RecompLauncher."
   },
   "system": {
     "windows": { "version": "10", "graphics": { "vulkan": "1.3" } }

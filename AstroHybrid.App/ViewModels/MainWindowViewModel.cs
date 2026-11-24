@@ -304,8 +304,8 @@ namespace AstroHybrid.App.ViewModels
                 IsLoading = false;
             }
 
-            // Auto-check for updates in background (after UI is responsive)
-            if (Settings.AutoCheckUpdates)
+            // Auto-check for updates in background (after UI is responsive), never when launched by RecompLauncher
+            if (Settings.AutoCheckUpdates && Environment.GetEnvironmentVariable("RECOMPLAUNCHER") != "1")
             {
                 _ = Task.Run(async () =>
                 {
