@@ -397,8 +397,8 @@ namespace AstroHybrid.App.Services
             env["KYTY_GPU_FULLSCREEN"] = settings.Fullscreen ? "1" : "0";
 
             // Game speed
-            // Always real time, where the game version is known: it writes one global at a fixed address.
-            env["ASTROHYBRID_GAME_SPEED"] = features == null || features.RealTimeSpeed ? "1" : "0";
+            // Real-time game speed when enabled and supported by this game version.
+            env["ASTROHYBRID_GAME_SPEED"] = (settings.RealSpeed && (features == null || features.RealTimeSpeed)) ? "1" : "0";
             if (features != null && features.GameStepAddress != 0)
                 env["ASTROHYBRID_GAME_STEP_ADDR"] = "0x" + features.GameStepAddress.ToString("x");
             var speedValues = new[] { "100", "95", "90", "85", "80", "75" };
