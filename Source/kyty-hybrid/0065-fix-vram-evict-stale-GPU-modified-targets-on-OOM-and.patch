@@ -1,0 +1,138 @@
+From d8d04bd294b587bd2acf21b061c79d3df66ca5df Mon Sep 17 00:00:00 2001
+From: Local Build <local@invalid>
+Date: Tue, 24 Nov 2026 19:56:44 +0000
+Subject: [PATCH 65/67] fix(vram): evict stale GPU-modified targets on OOM and
+ add strict sysmem fallback (#114)
+
+---
+ .../host_gpu/renderer/cache/textureCache.cpp  | 40 +++++++++++++------
+ .../host_gpu/renderer/cache/textureCache.h    |  6 ++-
+ src/graphics/host_gpu/vma.cpp                 |  6 +++
+ 3 files changed, 37 insertions(+), 15 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/cache/textureCache.cpp b/src/graphics/host_gpu/renderer/cache/textureCache.cpp
+index 1f1c9601..cdc9c19b 100644
+--- a/src/graphics/host_gpu/renderer/cache/textureCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/textureCache.cpp
+@@ -6570,17 +6570,15 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
+ 	}
+ }
+ 
+-bool TextureCache::IdleRetirable(const Image& image, uint64_t frame, uint64_t min_age) const {
++bool TextureCache::IdleRetirable(const Image& image, uint64_t frame, uint64_t min_age,
++                                 bool allow_stale_gpu) const {
+ 	// What the submission-age collector frees without a download: clean of GPU writes (the guest
+ 	// bytes or the buffer cache hold the contents, a later use recreates and refreshes it), and
+ 	// not a stencil association, a bound resource, a render target or a presentation surface.
+-	// GPU-written images stay however long they go unused (chenxiao07/KytyPS5 45beec32a frees them
+-	// after 600 flips): their native contents are the only copy of what the GPU rendered (guest
+-	// memory holds older bytes; a tiled image has no download path, and KYTY_ALIAS_BYTES would only
+-	// move the bytes into a cache buffer of the same size). An age says nothing about a later read:
+-	// a probe or impostor rendered once and sampled minutes later would come back as stale guest
+-	// bytes. Freeing them needs a download into guest memory first, not an age.
+-	return image.registered && !image.depth_id && !image.IsGpuModified() &&
++	// GPU-written images stay during normal GC, except during emergency OOM relief
++	// (allow_stale_gpu=true, #114) where unbound render/depth/storage targets unused for >=600
++	// frames are evicted rather than crashing with ErrorOutOfDeviceMemory.
++	return image.registered && !image.depth_id && (allow_stale_gpu || !image.IsGpuModified()) &&
+ 	       !image.binding.is_bound && !image.binding.is_target && !image.usage.video_out &&
+ 	       frame - std::min(frame, image.frame_accessed_last) > min_age;
+ }
+@@ -6644,12 +6642,28 @@ uint64_t TextureCache::RelieveMemoryPressure(uint64_t bytes) {
+ 	if (!m_lock.try_lock()) {
+ 		return 0;
+ 	}
+-	const auto freed = RetireUnusedImages(m_frame.load(std::memory_order_relaxed), 2, 4096, bytes);
++	const auto frame = m_frame.load(std::memory_order_relaxed);
++	uint64_t   freed = RetireUnusedImages(frame, 2, 4096, bytes);
++	uint64_t   stale_gpu_freed = 0;
++	if (freed < bytes) {
++		// Emergency OOM relief (#114): when clean images were not enough, evict unbound
++		// GPU-modified render/depth/storage targets unused for >= 600 frames rather than
++		// failing the allocation with ErrorOutOfDeviceMemory.
++		stale_gpu_freed = RetireUnusedImages(frame, 600, 256, bytes - freed, false, true);
++		freed += stale_gpu_freed;
++	}
+ 	m_lock.unlock();
+ 	if (freed != 0) {
+ 		static std::atomic<uint32_t> reported {0};
+ 		if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
+-			std::printf("Kyty VRAM: evicted %" PRIu64 " MiB of unused images to make room\n", freed >> 20u);
++			if (stale_gpu_freed != 0) {
++				std::printf("Kyty VRAM: evicted %" PRIu64 " MiB of unused images (%" PRIu64
++				            " MiB stale targets) to make room\n",
++				            freed >> 20u, stale_gpu_freed >> 20u);
++			} else {
++				std::printf("Kyty VRAM: evicted %" PRIu64 " MiB of unused images to make room\n",
++				            freed >> 20u);
++			}
+ 			std::fflush(stdout);
+ 		}
+ 	}
+@@ -6657,7 +6671,7 @@ uint64_t TextureCache::RelieveMemoryPressure(uint64_t bytes) {
+ }
+ 
+ uint64_t TextureCache::RetireUnusedImages(uint64_t frame, uint64_t min_age, size_t max_count,
+-                                          uint64_t enough, bool idle_pass) {
++                                          uint64_t enough, bool idle_pass, bool allow_stale_gpu) {
+ 	if (frame <= min_age) {
+ 		return 0;
+ 	}
+@@ -6676,7 +6690,7 @@ uint64_t TextureCache::RetireUnusedImages(uint64_t frame, uint64_t min_age, size
+ 	// LRU head) are passed over, not counted as deletions.
+ 	m_lru_cache.ForEachItemBelow(limit_tick, [&](ImageId id) {
+ 		const auto* image = m_slot_images.try_get(id);
+-		if (image != nullptr && IdleRetirable(*image, frame, min_age) &&
++		if (image != nullptr && IdleRetirable(*image, frame, min_age, allow_stale_gpu) &&
+ 		    !(idle_pass && KeptIdlePool(*image))) {
+ 			candidates.push_back(id);
+ 		}
+@@ -6689,7 +6703,7 @@ uint64_t TextureCache::RetireUnusedImages(uint64_t frame, uint64_t min_age, size
+ 		}
+ 		// Freeing a depth image frees its stencil associations: check again.
+ 		const auto* image = m_slot_images.try_get(id);
+-		if (image == nullptr || !IdleRetirable(*image, frame, min_age)) {
++		if (image == nullptr || !IdleRetirable(*image, frame, min_age, allow_stale_gpu)) {
+ 			continue;
+ 		}
+ 		freed += image->AccountedSize();
+diff --git a/src/graphics/host_gpu/renderer/cache/textureCache.h b/src/graphics/host_gpu/renderer/cache/textureCache.h
+index 8500d76c..b0179b1b 100644
+--- a/src/graphics/host_gpu/renderer/cache/textureCache.h
++++ b/src/graphics/host_gpu/renderer/cache/textureCache.h
+@@ -509,11 +509,13 @@ private:
+ 	// may not free), images unused for K frames are freed the same way, once per frame, oldest
+ 	// first, until usage is under the trigger (K/4, at least 2, above the critical mark).
+ 	// m_frame_ticks: the GC tick each recent frame began at (LRU ticks are GC ticks).
+-	[[nodiscard]] bool IdleRetirable(const Image& image, uint64_t frame, uint64_t min_age) const;
++	[[nodiscard]] bool IdleRetirable(const Image& image, uint64_t frame, uint64_t min_age,
++	                                 bool allow_stale_gpu = false) const;
+ 	void               NoteFrameTick(uint64_t frame, uint64_t tick);
+ 	// Returns the AccountedSize bytes freed (stops past `enough`).
+ 	uint64_t           RetireUnusedImages(uint64_t frame, uint64_t min_age, size_t max_count,
+-	                                      uint64_t enough, bool idle_pass = false);
++	                                      uint64_t enough, bool idle_pass = false,
++	                                      bool allow_stale_gpu = false);
+ 	// KYTY_VRAM_IDLE_KEEP_POOLS_MB=<n> (default 0: off): the idle pass (KYTY_VRAM_IDLE_FRAMES)
+ 	// passes over sampled-only one-level texture arrays of n MiB and more while the device budget
+ 	// is 12 GiB or more; pressure and budget collection still take them.
+diff --git a/src/graphics/host_gpu/vma.cpp b/src/graphics/host_gpu/vma.cpp
+index 78645f14..051136e1 100644
+--- a/src/graphics/host_gpu/vma.cpp
++++ b/src/graphics/host_gpu/vma.cpp
+@@ -973,6 +973,12 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
+ 			alloc_info.requiredFlags  = 0;
+ 			alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+ 			result                    = allocate();
++			if (memory_failure(result)) {
++				// Second fallback (#114): drop the device-local preference completely so VMA
++				// allocates directly in host-visible system memory instead of failing OOM.
++				alloc_info.preferredFlags = 0;
++				result                    = allocate();
++			}
+ 			static std::atomic<uint32_t> reported {0};
+ 			if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+ 				std::fprintf(stderr, "Vulkan: video memory full, %s: %ux%ux%u format=%d layers=%u levels=%u "
+-- 
+2.55.0.windows.5
+

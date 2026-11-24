@@ -186,6 +186,20 @@ namespace AstroHybrid.App.ViewModels
 
         public string UltrawideNote => "Uses the matching 21:9 or 32:9 game patch and window dimensions (2560x1080 / 3440x1440 / 5120x2160 / 3840x1080 / 5120x1440) when enabled; 16:9 remains unchanged.";
 
+        public bool Fixed1080p
+        {
+            get => _mainViewModel.Settings.Fixed1080p;
+            set
+            {
+                if (_mainViewModel.Settings.Fixed1080p != value)
+                {
+                    _mainViewModel.Settings.Fixed1080p = value;
+                    OnPropertyChanged();
+                    _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+                }
+            }
+        }
+
         // Ray Tracing / Lighting mode (0 = OFF / Non-RT, 1 = ON / Ray Tracing)
         public string[] RayTracingLabels => new[] { "OFF - Faster lighting (Non-RT, recommended)", "ON - Ray Tracing (Original lighting)" };
 

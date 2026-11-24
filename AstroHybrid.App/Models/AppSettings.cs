@@ -50,6 +50,11 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("allowRtx30FgOverride")]
         public bool AllowRtx30FgOverride { get; set; } = false;
 
+        // Keep Astro Bot's dynamic-resolution controller locked to level 0 (1920x1080) across
+        // Standard, Ultrawide, and SuperUltrawide executables to save VRAM on 8-12 GB GPUs (#114).
+        [JsonPropertyName("fixed1080p")]
+        public bool Fixed1080p { get; set; } = false;
+
         [JsonPropertyName("lowlatency")]
         public bool LowLatency { get; set; } = false;
 

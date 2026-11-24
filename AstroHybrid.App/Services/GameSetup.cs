@@ -670,6 +670,30 @@ namespace AstroHybrid.App.Services
             return patched;
         }
 
+        // Reversible fixed_1080p patch (Source/game-patches/fixed_1080p.toml, #114):
+        // Locks Astro Bot's dynamic-resolution controller to level 0 (1920x1080) across all
+        // Standard, Ultrawide, and SuperUltrawide executables so 8-12 GB GPUs stay under VRAM budget.
+        public bool SetFixed1080pCap(string exeName, bool enable, Action<string>? log = null)
+        {
+            log ??= _ => { };
+            string path = Path.Combine(_root, "Build", "RunHybrid", exeName);
+            if (!File.Exists(path)) return false;
+            var bytes = File.ReadAllBytes(path);
+            byte[] orig    = Hex("440373084489730C"); // add r14d, [rbx+0x8]; mov [rbx+0xc], r14d
+            byte[] patched = Hex("4531F6904489730C"); // xor r14d, r14d; nop; mov [rbx+0xc], r14d
+            byte[] find    = enable ? orig : patched;
+            byte[] replace = enable ? patched : orig;
+            int off = FindUnique(bytes, find, out int count);
+            if (off < 0)
+            {
+                return false; // Already in requested state or non-matching game version
+            }
+            Buffer.BlockCopy(replace, 0, bytes, off, 4);
+            File.WriteAllBytes(path, bytes);
+            log($"fixed_1080p {(enable ? "enabled" : "disabled")} on {exeName} at 0x{off:x}");
+            return true;
+        }
+
         public bool UpgradeCommandBufferTable(string exeName, Action<string>? log = null)
         {
             log ??= _ => { };

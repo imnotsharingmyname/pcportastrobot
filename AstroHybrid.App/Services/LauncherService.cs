@@ -361,6 +361,7 @@ namespace AstroHybrid.App.Services
                 {
                     setup.UpgradeCommandBufferTable(candidate);
                     setup.UpgradeHavokContactShapeGuard(candidate);
+                    setup.SetFixed1080pCap(candidate, settings.Fixed1080p);
                 }
             }
             catch (Exception ex)

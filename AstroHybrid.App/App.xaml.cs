@@ -1,7 +1,11 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
 using AstroHybrid.App.Models;
 using AstroHybrid.App.Services;
 using AstroHybrid.App.Views;
@@ -18,7 +22,21 @@ namespace AstroHybrid.App
         {
             base.OnStartup(e);
 
+            // Optional software rendering fallback (#110, #137) for GPUs/overlays that crash WPF D3D9 on cold boot.
+            if (Environment.GetEnvironmentVariable("ASTROHYBRID_SOFTWARE_RENDER") == "1" ||
+                e.Args.Any(a => string.Equals(a, "--software-render", StringComparison.OrdinalIgnoreCase)))
+            {
+                RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
+                LogDebug("WPF software rendering enabled.");
+            }
+
             // Set up global exception handling
+            TaskScheduler.UnobservedTaskException += (sender, args) =>
+            {
+                LogException(args.Exception);
+                args.SetObserved();
+            };
+
             AppDomain.CurrentDomain.UnhandledException += (sender, args) =>
             {
                 var ex = args.ExceptionObject as Exception;
@@ -219,12 +237,16 @@ namespace AstroHybrid.App
 
         private void ShowMainWindow()
         {
+            LogDebug("ShowMainWindow: creating MainWindow...");
             var mainWindow = new MainWindow();
             var rootDir = GetRootDirectory();
+            LogDebug("ShowMainWindow: creating MainWindowViewModel...");
             mainWindow.DataContext = new MainWindowViewModel(rootDir);
             MainWindow = mainWindow;
             ShutdownMode = ShutdownMode.OnMainWindowClose;
+            LogDebug("ShowMainWindow: calling Show()...");
             mainWindow.Show();
+            LogDebug("ShowMainWindow: visible.");
         }
 
         private void InitializeApplication()

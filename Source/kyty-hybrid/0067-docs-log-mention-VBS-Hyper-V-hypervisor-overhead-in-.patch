@@ -1,0 +1,31 @@
+From 52f41fd26b5d8e95216460060772aba20a0e77e7 Mon Sep 17 00:00:00 2001
+From: Local Build <local@invalid>
+Date: Tue, 24 Nov 2026 19:56:45 +0000
+Subject: [PATCH 67/67] docs(log): mention VBS/Hyper-V hypervisor overhead in
+ slow write-tracking warning (#238)
+
+---
+ src/graphics/host_gpu/faultCost.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/graphics/host_gpu/faultCost.cpp b/src/graphics/host_gpu/faultCost.cpp
+index 1374b813..0d95ca1c 100644
+--- a/src/graphics/host_gpu/faultCost.cpp
++++ b/src/graphics/host_gpu/faultCost.cpp
+@@ -1134,6 +1134,13 @@ void AdvanceFrame() noexcept {
+ 				std::printf("Kyty fault cost: write tracking is slow on this PC (tightening protection calls %.1f us "
+ 				            "each beyond their pages for %d periods in a row): level %d\n",
+ 				            fixed, SlowLevelTracker::PeriodsNeeded, level);
++#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
++				if (level >= 1) {
++					std::printf("Kyty fault cost: on Windows, even with Memory Integrity off, active VBS/Hyper-V "
++					            "(VirtualizationBasedSecurityStatus=2) adds hypervisor overhead to VirtualProtect; "
++					            "disabling the hypervisor (bcdedit /set hypervisorlaunchtype off) can restore full speed.\n");
++				}
++#endif
+ 				std::fflush(stdout);
+ 			}
+ 		}
+-- 
+2.55.0.windows.5
+

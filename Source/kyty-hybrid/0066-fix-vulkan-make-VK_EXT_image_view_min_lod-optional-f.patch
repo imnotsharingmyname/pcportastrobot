@@ -1,0 +1,118 @@
+From d4229e205c19ddea398e2be8a5c24a6090a693ef Mon Sep 17 00:00:00 2001
+From: Local Build <local@invalid>
+Date: Tue, 24 Nov 2026 19:56:45 +0000
+Subject: [PATCH 66/67] fix(vulkan): make VK_EXT_image_view_min_lod optional
+ for Intel Arc / older GPUs (#211)
+
+---
+ src/graphics/host_gpu/graphicContext.h        |  3 ++
+ .../host_gpu/renderer/image/imageView.cpp     |  2 +-
+ .../presentation/window/vulkanWindow.cpp      | 28 +++++++++++++++----
+ 3 files changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/src/graphics/host_gpu/graphicContext.h b/src/graphics/host_gpu/graphicContext.h
+index e93a4518..ef78137a 100644
+--- a/src/graphics/host_gpu/graphicContext.h
++++ b/src/graphics/host_gpu/graphicContext.h
+@@ -93,6 +93,9 @@ struct GraphicContext {
+ 	// VK_EXT_depth_clip_enable: depth clipping set apart from the always-on depth clamp (the DB's
+ 	// behaviour). Without it, pipelines clamp only where the guest turns Z clipping off.
+ 	bool                               depth_clip_enable_enabled             = false;
++	// VK_EXT_image_view_min_lod: optional per-view minLod clamping (#211); without it, views omit
++	// VkImageViewMinLodCreateInfoEXT so GPUs lacking the extension still start.
++	bool                               image_view_min_lod_enabled            = false;
+ 	bool                               conditional_rendering_enabled         = false;
+ 	bool                               supports_block_texel_view              = false;
+ 	// shaderStorageImageReadWithoutFormat (TileManager::TileFromImage).
+diff --git a/src/graphics/host_gpu/renderer/image/imageView.cpp b/src/graphics/host_gpu/renderer/image/imageView.cpp
+index 427d022e..378c62f8 100644
+--- a/src/graphics/host_gpu/renderer/image/imageView.cpp
++++ b/src/graphics/host_gpu/renderer/image/imageView.cpp
+@@ -375,7 +375,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
+ 	usage.usage = is_storage ? vk::ImageUsageFlagBits::eStorage
+ 	                         : image.usage & ~vk::ImageUsageFlagBits::eStorage;
+ 	vk::ImageViewMinLodCreateInfoEXT min_lod {};
+-	if (normalized.min_lod != 0) {
++	if (normalized.min_lod != 0 && m_graphics.image_view_min_lod_enabled) {
+ 		min_lod.minLod = static_cast<float>(normalized.base_level) +
+ 		                 static_cast<float>(normalized.min_lod) / 256.0f;
+ 		usage.pNext    = &min_lod;
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index 45947231..2281cc21 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -310,7 +310,9 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
+ 		if (color_write_ext.colorWriteEnable != VK_TRUE) {
+ 			LOGF("colorWriteEnable is not supported\n");
+ 		}
+-		check_feature(image_view_min_lod.minLod, "image view minLod");
++		if (image_view_min_lod.minLod != VK_TRUE) {
++			LOGF("image view minLod is not supported\n");
++		}
+ 
+ 		check_feature(depth_clip_control.depthClipControl, "depthClipControl");
+ 		if (depth_clip_enable.depthClipEnable != VK_TRUE) {
+@@ -902,6 +904,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 		conditional_rendering.pNext = supported_features2.pNext;
+ 		supported_features2.pNext   = &conditional_rendering;
+ 	}
++	const bool image_view_min_lod_extension =
++	    HasExtension(device_extensions, VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
++	vk::PhysicalDeviceImageViewMinLodFeaturesEXT supported_image_view_min_lod {};
++	if (image_view_min_lod_extension) {
++		supported_image_view_min_lod.pNext = supported_features2.pNext;
++		supported_features2.pNext          = &supported_image_view_min_lod;
++	}
+ 	const bool barycentric_extension =
+ 	    HasExtension(device_extensions, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+ 	vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR supported_barycentric {};
+@@ -923,6 +932,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 	    color_write_extension && supported_color_write.colorWriteEnable == VK_TRUE;
+ 	graphics.depth_clip_enable_enabled =
+ 	    depth_clip_extension && supported_depth_clip.depthClipEnable == VK_TRUE;
++	graphics.image_view_min_lod_enabled =
++	    image_view_min_lod_extension && supported_image_view_min_lod.minLod == VK_TRUE;
+ 	{
+ 		void* optional = nullptr;
+ 		if (graphics.color_write_enable_enabled) {
+@@ -933,11 +944,16 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 			depth_clip_enable.pNext = optional;
+ 			optional                = &depth_clip_enable;
+ 		}
+-		image_view_min_lod.pNext = optional;
++		if (graphics.image_view_min_lod_enabled) {
++			image_view_min_lod.pNext = optional;
++			optional                 = &image_view_min_lod;
++		}
++		depth_clip_control.pNext = optional;
+ 	}
+-	LOGF("Vulkan colorWriteEnable: %s, depthClipEnable: %s\n",
++	LOGF("Vulkan colorWriteEnable: %s, depthClipEnable: %s, imageViewMinLod: %s\n",
+ 	     graphics.color_write_enable_enabled ? "true" : "false (static colour-write masks)",
+-	     graphics.depth_clip_enable_enabled ? "true" : "false (depth clamp only without Z clipping)");
++	     graphics.depth_clip_enable_enabled ? "true" : "false (depth clamp only without Z clipping)",
++	     graphics.image_view_min_lod_enabled ? "true" : "false (omitting view minLod)");
+ 	graphics.conditional_rendering_enabled =
+ 	    conditional_rendering_extension && conditional_rendering.conditionalRendering == VK_TRUE;
+ 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
+@@ -2052,8 +2068,7 @@ void WindowContext::CreateVulkan() {
+ 
+ 	std::vector<const char*> device_extensions = {
+ 	    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
+-	    VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+-	    "VK_KHR_maintenance1"};
++	    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, "VK_KHR_maintenance1"};
+ 
+ #if defined(__APPLE__)
+ 	// MoltenVK lacks VK_EXT_depth_clip_enable and VK_EXT_color_write_enable; the renderer
+@@ -2180,6 +2195,7 @@ void WindowContext::CreateVulkan() {
+ 		                             VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
+ 		                             VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME,
+ 		                             VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME,
++		                             VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME,
+ 		                             VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME}) {
+ 			if (HasExtension(available_extensions, extension)) {
+ 				device_extensions.push_back(extension);
+-- 
+2.55.0.windows.5
+
