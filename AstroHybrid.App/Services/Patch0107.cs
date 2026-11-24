@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 
@@ -155,6 +156,36 @@ namespace AstroHybrid.App.Services
             Array.Copy(section, 0, result, BaseLength, section.Length);
             log($"01.007.000 patch applied ({Changes.Length} changes, .ahpat section of {SectionLength} bytes)");
             return result;
+        }
+
+        // Releases 1.2.15-1.2.22 wrote a 23-byte .ahpat PE section header at 0x430 (missing one 0x00 byte),
+        // shifting VirtualSize/VirtualAddress/SizeOfRawData/PointerToRawData and causing Windows to reject
+        // AstroBot-NonRT*.exe with "This app can't run on your PC" / "Access is denied." after updating.
+        // Repair those exact 24 bytes in place so existing 01.007.000 installs heal automatically on Play.
+        public static void RepairCorruptedHeaderIfNeeded(string runHybridPath)
+        {
+            const int HeaderOffset = 0x430;
+            const long ExpectedPatchedLength = BaseLength + SectionLength;
+            byte[] brokenHeader = Hex("2E616870617400002000000060F40F001400000042410F00");
+            byte[] fixedHeader = Hex("2E61687061740000002000000060F40F001400000042410F");
+            try
+            {
+                if (!Directory.Exists(runHybridPath)) return;
+                foreach (var path in Directory.GetFiles(runHybridPath, "AstroBot*.exe"))
+                {
+                    var info = new FileInfo(path);
+                    if (info.Length != ExpectedPatchedLength) continue;
+                    using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                    fs.Seek(HeaderOffset, SeekOrigin.Begin);
+                    var current = new byte[brokenHeader.Length];
+                    if (fs.Read(current, 0, current.Length) != current.Length) continue;
+                    if (!current.SequenceEqual(brokenHeader)) continue;
+                    fs.Seek(HeaderOffset, SeekOrigin.Begin);
+                    fs.Write(fixedHeader, 0, fixedHeader.Length);
+                    fs.Flush();
+                }
+            }
+            catch { }
         }
 
         private static byte[] Hex(string hex) => Enumerable.Range(0, hex.Length / 2).Select(i => Convert.ToByte(hex.Substring(i * 2, 2), 16)).ToArray();

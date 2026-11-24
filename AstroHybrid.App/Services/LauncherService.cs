@@ -48,6 +48,9 @@ namespace AstroHybrid.App.Services
                 throw new FileNotFoundException("AstroBot.exe not found in RunHybrid", runHybridPath);
             }
 
+            // Auto-heal any 01.007.000 AstroBot-NonRT*.exe created by v1.2.15-1.2.22 with the shifted .ahpat header.
+            Patch0107.RepairCorruptedHeaderIfNeeded(runHybridPath);
+
             // Save settings before launch
             settings.LastLaunched = DateTime.Now;
             _settingsManager.Save(settings);
@@ -218,6 +221,9 @@ namespace AstroHybrid.App.Services
                 throw new FileNotFoundException("AstroBot.exe not found in RunHybrid", runHybridPath);
             }
 
+            // Auto-heal any 01.007.000 AstroBot-NonRT*.exe created by v1.2.15-1.2.22 with the shifted .ahpat header.
+            Patch0107.RepairCorruptedHeaderIfNeeded(runHybridPath);
+
             settings.LastLaunched = DateTime.Now;
             _settingsManager.Save(settings);
 
@@ -267,6 +273,9 @@ namespace AstroHybrid.App.Services
             {
                 throw new FileNotFoundException("AstroBot.exe not found in RunHybrid", runHybridPath);
             }
+
+            // Auto-heal any 01.007.000 AstroBot-NonRT*.exe created by v1.2.15-1.2.22 with the shifted .ahpat header.
+            Patch0107.RepairCorruptedHeaderIfNeeded(runHybridPath);
 
             settings.LastLaunched = DateTime.Now;
             _settingsManager.Save(settings);
