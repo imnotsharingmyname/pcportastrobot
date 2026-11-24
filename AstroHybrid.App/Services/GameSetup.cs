@@ -24,6 +24,8 @@ namespace AstroHybrid.App.Services
         public bool IntelConversion { get; set; }
         // 21:9 render-space patch (the original game constant is 16:9).
         public bool Ultrawide { get; set; }
+        // 32:9 render-space patch, used by the 5120x1440 preset.
+        public bool SuperUltrawide { get; set; }
         // Guest address of the game's frame-rate block (f64 60.0, f32 1/60, u64 16666 microseconds), found by
         // those values in AstroBot.exe; 0 = not found. Passed to the engine as ASTROHYBRID_GAME_STEP_ADDR.
         public ulong GameStepAddress { get; set; }
@@ -52,8 +54,9 @@ namespace AstroHybrid.App.Services
     //  2. eboot.bin and sce_module\*.prx unwrapped from their SELF containers (SelfUnwrapper, no keys);
     //  3. AnyPS5's relinker (tools\relinker.exe) turns the game code into AstroBot.exe (it also writes the
     //     *.guest.prx modules into app0\sce_module);
-    //  4. the faster-lighting and soft-assert byte patches, found by their exact bytes (each must occur
-    //     exactly once, else the patch is skipped), make AstroBot-NonRT.exe and AstroBot-NonRT-SoftAssert.exe.
+    //  4. the faster-lighting and soft-assert byte patches, found by their bytes with RIP-relative displacements
+    //     left open (each must occur exactly once, else the patch is skipped), make AstroBot-NonRT.exe and
+    //     AstroBot-NonRT-SoftAssert.exe.
     // On 01.019.000 this reproduces the development build byte for byte (OVERNIGHT.md 2026-11-13).
     public class GameSetup
     {
@@ -70,24 +73,33 @@ namespace AstroHybrid.App.Services
 
         public bool IsReleaseLayout => File.Exists(_relinker) && File.Exists(Path.Combine(_runHybrid, "kyty_gpu.dll"));
 
+        // "??" marks a RIP-relative displacement: it differs between game versions, matches any byte and is kept
+        // as the game has it. 01.018.000 has the same code as 01.019.000 with other displacements (non-tiled
+        // lighting at va 0x73b3bcf, the offset of the community 01.018.000 mod in non_tiled_lighting.toml).
         private static readonly (string Name, string Original, string Patched)[] FasterLightingPatches =
         {
-            ("non-tiled lighting", "4584F60F84F10800004531F64C8D3D3EBBA90141B430", "4584F6E9F2080000904531F64C8D3D3EBBA90141B430"),
+            ("non-tiled lighting", "4584F60F84F10800004531F64C8D3D????????41B430", "4584F6E9F2080000904531F64C8D3D????????41B430"),
             ("lighting shaders off", "0FB682A00700008887E4050000", "B80000000090908887E4050000"),
         };
 
         private static readonly (string Name, string Original, string Patched)[] SoftAssertPatches =
         {
             ("soft command-buffer assert",
-             "554889e5488d3ded6fbb07488d0dc47fc2074c8d052299e407be1f000000ba0100000031c0e8660eb6ff85c07402cd42488d3d3c54d20731c0e88235fbffcd4131c05dc3",
-             "554889e5eb2a3ded6fbb07488d0dc47fc2074c8d052299e407be1f000000ba0100000031c0e8660eb6ff85c07402cd42488d3d3c54d20731c0e88235fbff909031c05dc3"),
+             "554889e5488d3d????????488d0d????????4c8d05????????be1f000000ba0100000031c0e8660eb6ff85c07402cd42488d3d????????31c0e88235fbffcd4131c05dc3",
+             "554889e5eb2a3d????????488d0d????????4c8d05????????be1f000000ba0100000031c0e8660eb6ff85c07402cd42488d3d????????31c0e88235fbff909031c05dc3"),
         };
 
-        // Astro Bot's internal render aspect constant: 16:9 -> 2.3888889 (3440x1440 / 21:9-class displays).
-        // The patch is kept as a separate executable variant so 16:9 users retain the original framing.
+        // Astro Bot's internal render aspect constant: 16:9 -> 2.3888889 (21:9).
+        // Separate executable variants keep 16:9 and 32:9 users on their correct aspect ratio.
         private static readonly (string Name, string Original, string Patched)[] UltrawidePatches =
         {
             ("ultrawide render aspect", "398EE33F", "8EE31840"),
+        };
+
+        // 16:9 (1.7777778) -> 32:9 (3.5555556), IEEE-754 little-endian bytes.
+        private static readonly (string Name, string Original, string Patched)[] SuperUltrawidePatches =
+        {
+            ("super-ultrawide render aspect", "398EE33F", "398E6340"),
         };
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -149,33 +161,14 @@ namespace AstroHybrid.App.Services
             }
 
             Report(80, "Applying the faster-lighting patch...");
-            var baseBytes = File.ReadAllBytes(Path.Combine(_runHybrid, "AstroBot.exe"));
+            var basePath = Path.Combine(_runHybrid, "AstroBot.exe");
+            var baseBytes = File.ReadAllBytes(basePath);
             bool clothPatched = ApplyClothPhysicsPatches(baseBytes, Log);
             bool cmdbufPatched = ApplyCommandBufferPatches(baseBytes, Log);
-            if (clothPatched || cmdbufPatched)
-                File.WriteAllBytes(Path.Combine(_runHybrid, "AstroBot.exe"), baseBytes);
-            var ultrawide = (byte[])baseBytes.Clone();
-            features.Ultrawide = ApplyAllOccurrences(ultrawide, UltrawidePatches, Log);
-            if (features.Ultrawide)
-                WriteVariant(ultrawide, "AstroBot-Ultrawide");
-            var nonRt = (byte[])baseBytes.Clone();
-            features.FasterLighting = ApplyAll(nonRt, FasterLightingPatches, Log);
-            if (features.FasterLighting)
-            {
-                WriteVariant(nonRt, "AstroBot-NonRT");
-                var nonRtUltrawide = (byte[])nonRt.Clone();
-                if (features.Ultrawide && ApplyAllOccurrences(nonRtUltrawide, UltrawidePatches, Log))
-                    WriteVariant(nonRtUltrawide, "AstroBot-NonRT-Ultrawide");
-                var soft = (byte[])nonRt.Clone();
-                if (ApplyAll(soft, SoftAssertPatches, Log))
-                    WriteVariant(soft, "AstroBot-NonRT-SoftAssert");
-                if (features.Ultrawide)
-                {
-                    var softUltrawide = (byte[])nonRtUltrawide.Clone();
-                    if (ApplyAll(softUltrawide, SoftAssertPatches, Log))
-                        WriteVariant(softUltrawide, "AstroBot-NonRT-Ultrawide-SoftAssert");
-                }
-            }
+            bool garlicPatched = ApplyGarlicPoolPatch(baseBytes, Log);
+            if (clothPatched || cmdbufPatched || garlicPatched)
+                File.WriteAllBytes(basePath, baseBytes);
+            ApplyVariantPatches(baseBytes, features, overwriteExisting: true, Log);
             // Real-time speed needs the frame-rate block; it is found by its initial values in any version (the
             // engine checks the block again before every use and turns the feature off if it is not one).
             features.GameStepAddress = FindGameStepBlock(baseBytes, Log);
@@ -188,6 +181,85 @@ namespace AstroHybrid.App.Services
                 InstallationManager.CreateManifest(_root, dump, version, titleId, features.SetupAt));
             Report(100, "Done.");
             return features;
+        }
+
+        // Creates any missing executable variants (21:9, 32:9, NonRT, SoftAssert) directly from the existing
+        // AstroBot.exe so users who updated from an older launcher get ultrawide EXEs without re-dumping.
+        public void EnsureVariantExecutables(Action<string>? log = null)
+        {
+            var basePath = Path.Combine(_runHybrid, "AstroBot.exe");
+            if (!File.Exists(basePath))
+                return;
+
+            var logFn = log ?? (_ => { });
+            var baseBytes = File.ReadAllBytes(basePath);
+            var features = GameFeatures.Load(_runHybrid) ?? new GameFeatures { SetupAt = DateTime.UtcNow };
+            ApplyVariantPatches(baseBytes, features, overwriteExisting: false, logFn);
+            if (features.GameStepAddress == 0)
+            {
+                features.GameStepAddress = FindGameStepBlock(baseBytes, logFn);
+                features.RealTimeSpeed = features.GameStepAddress != 0;
+            }
+            try
+            {
+                File.WriteAllText(Path.Combine(_runHybrid, GameFeatures.FileName),
+                    JsonSerializer.Serialize(features, new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch
+            {
+                // Non-fatal if metadata write fails right before launch.
+            }
+        }
+
+        private void ApplyVariantPatches(byte[] baseBytes, GameFeatures features, bool overwriteExisting, Action<string> log)
+        {
+            bool ShouldWrite(string name) => overwriteExisting || !File.Exists(Path.Combine(_runHybrid, name + ".exe"));
+
+            var ultrawide = (byte[])baseBytes.Clone();
+            features.Ultrawide = ApplyAllOccurrences(ultrawide, UltrawidePatches, log);
+            if (features.Ultrawide && ShouldWrite("AstroBot-Ultrawide"))
+                WriteVariant(ultrawide, "AstroBot-Ultrawide");
+
+            var superUltrawide = (byte[])baseBytes.Clone();
+            features.SuperUltrawide = ApplyAllOccurrences(superUltrawide, SuperUltrawidePatches, log);
+            if (features.SuperUltrawide && ShouldWrite("AstroBot-SuperUltrawide"))
+                WriteVariant(superUltrawide, "AstroBot-SuperUltrawide");
+
+            var nonRt = (byte[])baseBytes.Clone();
+            features.FasterLighting = ApplyAll(nonRt, FasterLightingPatches, log);
+            if (features.FasterLighting)
+            {
+                if (ShouldWrite("AstroBot-NonRT"))
+                    WriteVariant(nonRt, "AstroBot-NonRT");
+
+                var nonRtUltrawide = (byte[])nonRt.Clone();
+                bool hasNonRtUltrawide = features.Ultrawide && ApplyAllOccurrences(nonRtUltrawide, UltrawidePatches, log);
+                if (hasNonRtUltrawide && ShouldWrite("AstroBot-NonRT-Ultrawide"))
+                    WriteVariant(nonRtUltrawide, "AstroBot-NonRT-Ultrawide");
+
+                var nonRtSuperUltrawide = (byte[])nonRt.Clone();
+                bool hasNonRtSuperUltrawide = features.SuperUltrawide && ApplyAllOccurrences(nonRtSuperUltrawide, SuperUltrawidePatches, log);
+                if (hasNonRtSuperUltrawide && ShouldWrite("AstroBot-NonRT-SuperUltrawide"))
+                    WriteVariant(nonRtSuperUltrawide, "AstroBot-NonRT-SuperUltrawide");
+
+                var soft = (byte[])nonRt.Clone();
+                if (ApplyAll(soft, SoftAssertPatches, log) && ShouldWrite("AstroBot-NonRT-SoftAssert"))
+                    WriteVariant(soft, "AstroBot-NonRT-SoftAssert");
+
+                if (hasNonRtUltrawide)
+                {
+                    var softUltrawide = (byte[])nonRtUltrawide.Clone();
+                    if (ApplyAll(softUltrawide, SoftAssertPatches, log) && ShouldWrite("AstroBot-NonRT-Ultrawide-SoftAssert"))
+                        WriteVariant(softUltrawide, "AstroBot-NonRT-Ultrawide-SoftAssert");
+                }
+
+                if (hasNonRtSuperUltrawide)
+                {
+                    var softSuperUltrawide = (byte[])nonRtSuperUltrawide.Clone();
+                    if (ApplyAll(softSuperUltrawide, SoftAssertPatches, log) && ShouldWrite("AstroBot-NonRT-SuperUltrawide-SoftAssert"))
+                        WriteVariant(softSuperUltrawide, "AstroBot-NonRT-SuperUltrawide-SoftAssert");
+                }
+            }
         }
 
         private static ulong FindGameStepBlock(byte[] exe, Action<string> log)
@@ -295,6 +367,26 @@ namespace AstroHybrid.App.Services
                 : Enumerable.Empty<string>();
         }
 
+        // Folders of the dump the game reads through APS5_PATH_ALIASES instead of a link in app0 (#135), one
+        // "/app0/<name>=<folder>" per line; Run-AstroHybrid.bat passes them to the game.
+        public const string App0AliasesFile = "app0-aliases.txt";
+
+        public static Dictionary<string, string> ReadApp0Aliases(string runHybrid)
+        {
+            var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var path = Path.Combine(runHybrid, App0AliasesFile);
+            if (!File.Exists(path)) return aliases;
+            foreach (var item in File.ReadAllText(path).Split(new[] { ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                int separator = item.IndexOf('=');
+                if (separator <= 0) continue;
+                var name = item.Substring(0, separator).Trim().Trim('/', '\\');
+                if (name.StartsWith("app0/", StringComparison.OrdinalIgnoreCase)) name = name.Substring(5);
+                aliases[name] = item.Substring(separator + 1).Trim();
+            }
+            return aliases;
+        }
+
         private void BuildApp0(string dump, string app0, Action<string> log)
         {
             DeleteTree(app0);
@@ -302,6 +394,10 @@ namespace AstroHybrid.App.Services
             var archive = Path.Combine(_runHybrid, "app0.zar");
             if (File.Exists(archive))
                 File.Delete(archive);
+            var aliasesFile = Path.Combine(_runHybrid, App0AliasesFile);
+            if (File.Exists(aliasesFile))
+                File.Delete(aliasesFile);
+            var aliases = new List<string>();
             foreach (var dir in Directory.GetDirectories(dump))
             {
                 var name = Path.GetFileName(dir);
@@ -314,14 +410,19 @@ namespace AstroHybrid.App.Services
                     var (linkCode, linkOutput) = RunProcess("cmd.exe", $"/c mklink /D \"{Path.Combine(app0, name)}\" \"{dir}\"", app0);
                     if (linkCode != 0)
                     {
-                        throw new InvalidOperationException(
-                            $"Could not link the dump's '{name}' folder ({output.Trim()}). If the dump is on a network drive, turn on Developer Mode " +
-                            "(Windows Settings > System > For developers) or run AstroHybrid once as administrator, then press Install again; " +
-                            "or copy the dump to a local drive.");
+                        // Neither link is possible: junctions need a local NTFS drive, and a symbolic link needs
+                        // Developer Mode or administrator rights. An exFAT or FAT32 external drive (#135) or a network
+                        // drive gets here. The game then reads the folder from the dump through AnyPS5's path aliases.
+                        aliases.Add($"/app0/{name}={dir}");
+                        log($"app0\\{name}: read from the dump through APS5_PATH_ALIASES (junction refused: {output.Trim()}; " +
+                            $"symbolic link refused: {linkOutput.Trim()})");
+                        continue;
                     }
                     log($"app0\\{name}: symbolic link (junction refused: {output.Trim()})");
                 }
             }
+            if (aliases.Count > 0)
+                File.WriteAllText(aliasesFile, string.Join(";", aliases));
             foreach (var file in Directory.GetFiles(dump))
             {
                 // app0.zar belongs beside the app0 directory so the runtime can mount it as the
@@ -348,6 +449,43 @@ namespace AstroHybrid.App.Services
             foreach (var module in OriginalModules(dump))
                 File.Copy(module, Path.Combine(modules, Path.GetFileName(module)), true);
             log($"app0: {Directory.GetDirectories(app0).Length} folders, {Directory.GetFiles(app0).Length} files");
+        }
+
+        // Build\RunHybrid\app0 holds junctions into the player's dump. When the dump is moved, renamed or on a
+        // drive that is not connected, those links dangle and the game stops at start with
+        // "param.json or param.sfo not found" (#44). Returns a description of the first broken link, or null
+        // when the game folder is usable.
+        public static string? DescribeBrokenGameLink(string runHybrid)
+        {
+            var app0 = Path.Combine(runHybrid, "app0");
+            if (!Directory.Exists(app0))
+                return "the game folder (Build\\RunHybrid\\app0) is missing";
+            foreach (var dir in Directory.GetDirectories(app0))
+            {
+                if ((new DirectoryInfo(dir).Attributes & FileAttributes.ReparsePoint) == 0)
+                    continue;
+                try
+                {
+                    // Listing a junction whose target is gone throws; Directory.Exists does not notice it.
+                    using (var entries = Directory.EnumerateFileSystemEntries(dir).GetEnumerator())
+                        entries.MoveNext();
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    return $"the link app0\\{Path.GetFileName(dir)} points to a folder that can't be opened ({ex.Message.Trim()})";
+                }
+            }
+            // Folders read through APS5_PATH_ALIASES (#135) must still be where setup found them.
+            var aliases = ReadApp0Aliases(runHybrid);
+            foreach (var alias in aliases)
+            {
+                if (!Directory.Exists(alias.Value))
+                    return $"the dump folder {alias.Value} (app0\\{alias.Key}) can't be found; is its drive connected?";
+            }
+            var sceSys = aliases.TryGetValue("sce_sys", out var aliasedSceSys) ? aliasedSceSys : Path.Combine(app0, "sce_sys");
+            if (!File.Exists(Path.Combine(sceSys, "param.json")) && !File.Exists(Path.Combine(sceSys, "param.sfo")))
+                return "the game's sce_sys\\param.json can't be found through app0";
+            return null;
         }
 
         private static void LinkOrCopy(string source, string target)
@@ -424,8 +562,85 @@ namespace AstroHybrid.App.Services
             return true;
         }
 
-        // Prevent worker command buffer exhaustion and NULL memcpy crashes in heavy scenes (#47, #50, #6).
-        // Raises the 5-worker command buffer MiB table (7,7,4,4,6 -> 8,8,8,8,8) and skips memcpy when dst is NULL.
+        private const string CommandBufferTable8 = "0800000008000000080000000800000008000000100020003000400008000000";
+        private const string CommandBufferTable16 = "1000000010000000100000001000000010000000100020003000400008000000";
+        private const string CommandBufferTable24 = "1800000018000000180000001800000018000000100020003000400008000000";
+        // The game's fixed graphics (Garlic) memory pool: mov eax, 0x87C00000 (2172 MiB). The 16 MiB command
+        // buffers (#159) come out of it, and Trunk of Funk then missed it by 256 KB ("Out of graphics memory
+        // [Garlic]", a freeze at the end of the loading animation: #166, #173, #178, #179). Raised by 256 MiB to
+        // 0x97C00000 (2428 MiB), below the 2564 MiB the same routine picks on its other path.
+        private const string GarlicPool = "B80000C08748C785";
+        private const string GarlicPoolRaised = "B80000C09748C785";
+        // Upgrades of installs made by older versions, one marker file each: an executable listed there was
+        // already checked for that upgrade.
+        private const string UpgradeMarker = "astrohybrid-upgrades-1.2.7.txt";
+
+        // Installs set up by 1.1.0 - 1.2.6 lack these patches in their AstroBot*.exe files: the 16 MiB
+        // command buffers (#159; 1.1.0 - 1.2.5 have 8 MiB) and the larger Garlic pool. Applies whichever is
+        // missing in the executable about to start, once: the names already checked are kept in a marker
+        // file next to them, so the large file is read only the first time. Patterns that are not there (a
+        // new setup, another game version) leave the file as it is. Returns true when it changed the file.
+        public bool UpgradeCommandBufferTable(string exeName, Action<string>? log = null)
+        {
+            log ??= _ => { };
+            var marker = Path.Combine(_runHybrid, UpgradeMarker);
+            var done = File.Exists(marker)
+                ? new HashSet<string>(File.ReadAllLines(marker), StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (done.Contains(exeName)) return false;
+            var path = Path.Combine(_runHybrid, exeName);
+            if (!File.Exists(path)) return false;
+            var bytes = File.ReadAllBytes(path);
+            bool table = ApplyAll(bytes, new[] { ("cmdbuf_worker_mib_table_16", CommandBufferTable8, CommandBufferTable16) }, log);
+            bool garlic = ApplyAll(bytes, new[] { ("garlic_pool_plus_256mib", GarlicPool, GarlicPoolRaised) }, log);
+            if (table || garlic) File.WriteAllBytes(path, bytes);
+            File.AppendAllLines(marker, new[] { exeName });
+            return table || garlic;
+        }
+
+        // Select 16 or 24 MiB for the five worker command buffers. UpgradeCommandBufferTable is called
+        // first by the launcher, so legacy 8 MiB installs are upgraded before this reversible choice.
+        // Unknown executable patterns are left untouched rather than risking a binary patch at the wrong offset.
+        public bool SetCommandBufferSize(string exeName, bool use24MiB, Action<string>? log = null)
+        {
+            log ??= _ => { };
+            var path = Path.Combine(_runHybrid, exeName);
+            if (!File.Exists(path)) return false;
+            var bytes = File.ReadAllBytes(path);
+            string from = use24MiB ? CommandBufferTable16 : CommandBufferTable24;
+            string to = use24MiB ? CommandBufferTable24 : CommandBufferTable16;
+            string patchName = use24MiB ? "cmdbuf_worker_mib_table_24" : "cmdbuf_worker_mib_table_16_restore";
+            var (pattern, anyByte) = HexPattern(from);
+            int at = FindUnique(bytes, pattern, out int count, anyByte);
+            if (at < 0)
+            {
+                // Already at the requested size is a normal no-op.
+                var (targetPattern, targetAny) = HexPattern(to);
+                int targetAt = FindUnique(bytes, targetPattern, out int targetCount, targetAny);
+                if (targetAt >= 0)
+                {
+                    log($"{exeName}: worker command buffers already {(use24MiB ? 24 : 16)} MiB");
+                    return false;
+                }
+                log($"{exeName}: {patchName} skipped (source pattern found {count} times; target pattern found {targetCount} times)");
+                return false;
+            }
+            var (replacement, keep) = HexPattern(to);
+            for (int i = 0; i < replacement.Length; i++)
+                if (!keep[i]) bytes[at + i] = replacement[i];
+            File.WriteAllBytes(path, bytes);
+            log($"{exeName}: worker command buffers set to {(use24MiB ? 24 : 16)} MiB at 0x{at:x}");
+            return true;
+        }
+
+        // New setups: the larger Garlic pool, with the 16 MiB command buffers (see GarlicPool).
+        private static bool ApplyGarlicPoolPatch(byte[] data, Action<string> log) =>
+            ApplyAll(data, new[] { ("garlic_pool_plus_256mib", GarlicPool, GarlicPoolRaised) }, log);
+
+        // Prevent worker command buffer exhaustion and NULL memcpy crashes in heavy scenes (#47, #50, #6, #159).
+        // Raises the 5-worker command buffer MiB table (7,7,4,4,6 -> 16 each) and skips memcpy when dst is NULL.
+        // 8 MiB each (1.1.0 - 1.2.5) still ran out in booster_construction (#159); with 1 MiB each the
+        // crash reproduces in Sky Garden, with 16 MiB it does not happen there or in booster_construction.
         // Note: Do NOT patch 0x471644 (guard0); its eb 37 jump is shared by non-null allocations and skipping it drops command buffer copies.
         private static bool ApplyCommandBufferPatches(byte[] data, Action<string> log)
         {
@@ -433,7 +648,7 @@ namespace AstroHybrid.App.Services
             {
                 ("cmdbuf_worker_mib_table",
                     "0700000007000000040000000400000006000000100020003000400008000000",
-                    "0800000008000000080000000800000008000000100020003000400008000000"),
+                    CommandBufferTable16),
                 ("cmdbuf_null_memcpy_guard1",
                     "4531FFEB0F49C1E4024D29E74983E7FC4D897E18488B7318",
                     "4531FFEB2649C1E4024D29E74983E7FC4D897E18488B7318"),
@@ -486,7 +701,8 @@ namespace AstroHybrid.App.Services
             return false;
         }
 
-        private static int FindUnique(byte[] data, byte[] pattern, out int count)
+        // anyByte[j] = true lets position j match any byte (pattern[0] must be a real byte).
+        private static int FindUnique(byte[] data, byte[] pattern, out int count, bool[]? anyByte = null)
         {
             count = 0;
             int found = -1;
@@ -494,7 +710,7 @@ namespace AstroHybrid.App.Services
             {
                 if (data[i] != pattern[0]) continue;
                 int j = 1;
-                while (j < pattern.Length && data[i + j] == pattern[j]) j++;
+                while (j < pattern.Length && ((anyByte != null && anyByte[j]) || data[i + j] == pattern[j])) j++;
                 if (j == pattern.Length)
                 {
                     count++;
@@ -507,12 +723,27 @@ namespace AstroHybrid.App.Services
 
         private static byte[] Hex(string hex) => Enumerable.Range(0, hex.Length / 2).Select(i => Convert.ToByte(hex.Substring(i * 2, 2), 16)).ToArray();
 
+        // Hex with "??" for any byte: returns the bytes (0 where "??") and which positions were "??".
+        private static (byte[] Bytes, bool[] AnyByte) HexPattern(string hex)
+        {
+            var bytes = new byte[hex.Length / 2];
+            var anyByte = new bool[bytes.Length];
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                var pair = hex.Substring(i * 2, 2);
+                if (pair == "??") anyByte[i] = true;
+                else bytes[i] = Convert.ToByte(pair, 16);
+            }
+            return (bytes, anyByte);
+        }
+
         private static bool ApplyAll(byte[] data, (string Name, string Original, string Patched)[] patches, Action<string> log)
         {
             var offsets = new List<int>();
             foreach (var (name, original, _) in patches)
             {
-                int at = FindUnique(data, Hex(original), out int count);
+                var (pattern, anyByte) = HexPattern(original);
+                int at = FindUnique(data, pattern, out int count, anyByte);
                 if (at < 0)
                 {
                     log($"patch '{name}': found {count} times, skipped (this game version differs)");
@@ -522,8 +753,9 @@ namespace AstroHybrid.App.Services
             }
             for (int i = 0; i < patches.Length; i++)
             {
-                var bytes = Hex(patches[i].Patched);
-                Array.Copy(bytes, 0, data, offsets[i], bytes.Length);
+                var (bytes, keep) = HexPattern(patches[i].Patched);
+                for (int j = 0; j < bytes.Length; j++)
+                    if (!keep[j]) data[offsets[i] + j] = bytes[j];
                 log($"patch '{patches[i].Name}' at 0x{offsets[i]:x}");
             }
             return true;
@@ -535,18 +767,20 @@ namespace AstroHybrid.App.Services
         {
             foreach (var (name, original, patched) in patches)
             {
-                var source = Hex(original);
-                var replacement = Hex(patched);
+                // "??" works as in ApplyAll: matches any byte and keeps the game's byte when writing.
+                var (source, anyByte) = HexPattern(original);
+                var (replacement, keep) = HexPattern(patched);
                 int count = 0;
                 for (int i = 0; i <= data.Length - source.Length; i++)
                 {
                     bool match = true;
                     for (int j = 0; j < source.Length; j++)
                     {
-                        if (data[i + j] != source[j]) { match = false; break; }
+                        if (!anyByte[j] && data[i + j] != source[j]) { match = false; break; }
                     }
                     if (!match) continue;
-                    Array.Copy(replacement, 0, data, i, replacement.Length);
+                    for (int j = 0; j < replacement.Length; j++)
+                        if (!keep[j]) data[i + j] = replacement[j];
                     count++;
                     log($"patch '{name}' at 0x{i:x}");
                     i += source.Length - 1;

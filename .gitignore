@@ -16,9 +16,10 @@
 /REA/*.backup*
 /Build/
 /Runtime/
-/Logs/*.log
-/Logs/**/*.log
-/Logs/rea_session.json
+/Logs/
+/AstroHybrid.App.Avalonia/bin/
+/AstroHybrid.App.Avalonia/obj/
+/dist/
 /Build/elf-input/
 /Tools/KytyPS5-jetsku/
 /Tools/kyty-int21/
@@ -27,4 +28,10 @@
 /.arena/
 /AstroBot Launcher.exe
 /work/
+
+# Local agent handoff / instructions (not part of the port)
+.ai/
+AGENTS.md
+CLAUDE.md
+codex.md
 /Reddit post/
