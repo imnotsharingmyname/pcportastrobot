@@ -1,0 +1,33 @@
+﻿From 9b8f8ed58c05dcca6068d425608e541dc1edec84 Mon Sep 17 00:00:00 2001
+From: Local Build <local@invalid>
+Date: Tue, 24 Nov 2026 12:57:29 +0000
+Subject: [PATCH] fix(overlay): log VkResult and ignore non-fatal Vulkan
+ results in CheckVulkanResult (#253)
+
+---
+ src/graphics/presentation/systemOverlay.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/graphics/presentation/systemOverlay.cpp b/src/graphics/presentation/systemOverlay.cpp
+index 807ca52b..4f167529 100644
+--- a/src/graphics/presentation/systemOverlay.cpp
++++ b/src/graphics/presentation/systemOverlay.cpp
+@@ -627,6 +627,15 @@ PFN_vkVoidFunction LoadVulkanFunction(const char* name, void* user_data) {
+ }
+ 
+ void CheckVulkanResult(VkResult result) {
++	if (result >= 0) {
++		return;
++	}
++	Log::WriteToConsoleAndLog(fmt::format("SystemOverlay Vulkan error: {} ({})\n",
++	                                      vk::to_string(static_cast<vk::Result>(result)),
++	                                      static_cast<int>(result)));
++	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
++		return;
++	}
+ 	EXIT_IF(result != VK_SUCCESS);
+ }
+ 
+-- 
+2.55.0.windows.5
+
