@@ -1,2 +1,8 @@
 # Shell scripts run on Linux: keep LF line endings in every checkout (CRLF breaks bash).
 *.sh text eol=lf
+# Patch series are applied byte for byte with `git am --keep-cr`: never convert their line endings
+# (core.autocrlf=true, Git for Windows' default, would otherwise make every patch fail to apply).
+*.patch -text
+# cmd.exe misreads labels and GOTO targets in LF-only batch files: keep CRLF in every checkout.
+*.bat text eol=crlf
+*.cmd text eol=crlf

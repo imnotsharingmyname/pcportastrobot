@@ -8,8 +8,8 @@ rerunning game setup with an older download. See [the ZAR guide](../Docs/ZAR.md)
 
 | File in the download | Built from |
 |---|---|
-| `Build\RunHybrid\kyty_gpu.dll` | KytyPS5 (Jetsku), tag `u59-windows-20261024-int21` (commit `744705ee1df4b0acb1af382ff5c32ca4a20aa5f7`) + `Source/kyty-hybrid/*.patch` (55 patches) |
-| `Build\RunHybrid\libs\*.prx`, `astrohybrid_host.dll`, `tools\relinker.exe` | AnyPS5, upstream `main` commit `319621ba2e578bd053b0baba2877fe70520e0737` + `Source/anyps5/*.patch` (32 patches) |
+| `Build\RunHybrid\kyty_gpu.dll` | KytyPS5 (Jetsku), tag `u59-windows-20261024-int21` (commit `744705ee1df4b0acb1af382ff5c32ca4a20aa5f7`) + `Source/kyty-hybrid/*.patch` (61 patches; the original download was built from 0001–0055) |
+| `Build\RunHybrid\libs\*.prx`, `astrohybrid_host.dll`, `tools\relinker.exe` | AnyPS5, upstream `main` commit `319621ba2e578bd053b0baba2877fe70520e0737` + `Source/anyps5/*.patch` (34 patches) |
 | `AstroHybrid.exe` | `AstroHybrid.App/` in this repository |
 | `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `sl.*.dll`, `NvLowLatencyVk.dll` | NVIDIA runtime files, unmodified (DLSS SDK / Streamline 2.14.16), under the licences in `licenses/` |
 | `Build\RunHybrid\anyps5-fonts\*` | Noto fonts, unmodified (SIL Open Font License) |
@@ -30,13 +30,16 @@ cd kyty
 git checkout u59-windows-20261024-int21
 git submodule update --init --recursive
 git am --keep-cr <this repo>/Source/kyty-hybrid/*.patch
-git rev-parse HEAD^{tree}     # 476fec7f6f61b98c4daf98695455714b5e03a855
+git rev-parse HEAD~6^{tree}   # 476fec7f6f61b98c4daf98695455714b5e03a855 (after 0055, the shipped DLL)
 ```
 
-Build (Windows, Visual Studio 2022 Build Tools x64 environment, LLVM 22.1.3 clang-cl, Ninja, Vulkan SDK):
+Clone with `-c core.autocrlf=false`: with Git for Windows' default `core.autocrlf=true` no patch applies.
 
-1. Configure as `Tools/hybrid/build-kyty-pgo.cmd` does (Release, clang-cl, IPO on, PGO profile
-   `tools/pgo/u59-int21-1.profdata` from the int21 tag, launcher off).
+Build (Windows, Visual Studio 2022 Build Tools x64 environment, LLVM 22.1.3 clang-cl, Ninja, Vulkan SDK);
+`Tools/hybrid/build-kyty.ps1` does all of it, see `Docs/BUILD_INSTRUCTIONS.md`:
+
+1. Configure Release, clang-cl, IPO on, PGO profile `tools/pgo/u59-int21-1.profdata` from the int21 tag
+   (compiled from the `C:\kyty-src19` path the profile was recorded at), launcher off.
 2. For DLSS and frame generation, also pass `-DKYTY_NGX_SDK_DIR=<streamline>/external/ngx-sdk` and
    `-DKYTY_STREAMLINE_DIR=<streamline>`, where `<streamline>` is NVIDIA's Streamline SDK 2.14.16
    (https://github.com/NVIDIA-RTX/Streamline). Without them the DLL builds with DLSS and frame
@@ -51,8 +54,8 @@ Build (Windows, Visual Studio 2022 Build Tools x64 environment, LLVM 22.1.3 clan
 ## AnyPS5 system libraries and relinker
 
 Base: https://github.com/boykopovar/AnyPS5, commit `319621ba2e578bd053b0baba2877fe70520e0737` (on `main`).
-The original download used patches 0001–0027. Build the current runtime with all 29 patches in
-`Source/anyps5`, including:
+The original download used patches 0001–0027. Build the current runtime with all 34 patches in
+`Source/anyps5` (two pairs share the numbers 0028 and 0029; filename order is the order), including:
 
 - `0028-fix-app0-archive-odx-fallback.patch`: root-relative archive lookup and exact-first `.odxb` fallback.
 - `0029-feat-libc-archive-stdio-streams.patch`: read-only libc archive streams and regression tests.
@@ -62,7 +65,7 @@ git clone https://github.com/boykopovar/AnyPS5.git anyps5
 cd anyps5
 git checkout -b astrobot-zar 319621ba2e578bd053b0baba2877fe70520e0737
 git submodule update --init --recursive
-git am --keep-cr <this repo>/Source/anyps5/*.patch
+git am --3way --keep-cr <this repo>/Source/anyps5/*.patch
 git rev-parse HEAD^{tree}
 ```
 

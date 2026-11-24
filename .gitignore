@@ -9,6 +9,8 @@
 /Tools/shadPS4/
 /Tools/sharpemu/
 /Tools/winlibs/
+/Tools/llvm-*/
+/Tools/sdk/
 /Tools/jdk/
 /Tools/ghidra/
 /Tools/dl/

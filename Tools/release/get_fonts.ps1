@@ -1,8 +1,8 @@
 # Downloads the openly licensed Noto fonts (SIL Open Font License) that AnyPS5's libSceFont accepts in place
 # of the console's system fonts (Tools\AnyPS5\docs\user\USAGE.md, "System fonts"). Astro Bot opens the
 # Japanese-region sets in several weights, so the CJK collections are needed even for English text.
-# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File Tools\release\get_fonts.ps1 [-Out E:\AstroHybrid-Work\fonts\noto]
-param([string]$Out = 'E:\AstroHybrid-Work\fonts\noto')
+# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File Tools\release\get_fonts.ps1 [-Out Build\fonts\noto]
+param([string]$Out = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'Build\fonts\noto'))
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 New-Item -ItemType Directory -Force $Out | Out-Null

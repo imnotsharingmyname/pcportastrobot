@@ -46,6 +46,26 @@ class ZarLayoutTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in game.iterdir()), before)
         self.assertEqual((game / "eboot.bin").read_bytes(), b"untouched program")
 
+    def test_split_modules_keeps_relinker_output_out_of_the_dump(self):
+        game = self.dump("split", archived=False)
+        (game / "sce_module").mkdir()
+        (game / "sce_module" / "libc.prx").write_bytes(b"module")
+        (game / "sce_module" / "libc.prx.guest.prx").write_bytes(b"stale output")
+        output = self.outputs[0]
+        layout.setup_game_layout(game, output, split_modules=True)
+        app0 = output / "app0"
+        self.assertFalse(os.path.samefile(app0, game))
+        self.assertTrue(os.path.samefile(app0 / "data", game / "data"))
+        self.assertTrue(os.path.samefile(app0 / "eboot.bin", game / "eboot.bin"))
+        self.assertFalse(os.path.samefile(app0 / "sce_module", game / "sce_module"))
+        self.assertEqual((app0 / "sce_module" / "libc.prx").read_bytes(), b"module")
+        self.assertFalse((app0 / "sce_module" / "libc.prx.guest.prx").exists())
+        (app0 / "sce_module" / "libc.prx.guest.prx").write_bytes(b"relinker output")
+        self.assertEqual((game / "sce_module" / "libc.prx.guest.prx").read_bytes(), b"stale output")
+        layout.setup_game_layout(game, output, split_modules=True)
+        self.assertEqual(sorted(p.name for p in game.iterdir()), ["data", "eboot.bin", "sce_module"])
+        self.assertEqual((game / "data" / "asset.bin").read_bytes(), b"plain asset")
+
     def test_placeholder_data_with_archive_is_allowed(self):
         game = self.dump("placeholder")
         (game / "data").mkdir()

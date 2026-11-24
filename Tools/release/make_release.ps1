@@ -3,9 +3,10 @@
 # (AnyPS5 system libraries, kyty_gpu.dll, the host module, NVIDIA runtime files with their licences).
 # Nothing from the game is included: no executable, no game files, no saves, no pipeline cache. Each
 # player's own dump is converted by the app's setup (Services\GameSetup.cs).
-# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File Tools\release\make_release.ps1 [-Out E:\...] [-Version 1.0.0]
+# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File Tools\release\make_release.ps1 [-Out Build\release] [-Version 1.0.0]
+# The fonts are read from <Out>\..\fonts\noto (Build\fonts\noto by default, where get_fonts.ps1 puts them).
 param(
-    [string]$Out = 'E:\AstroHybrid-Work\release',
+    [string]$Out = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'Build\release'),
     [string]$Version = '1.0.0'
 )
 $ErrorActionPreference = 'Stop'
