@@ -16,85 +16,145 @@ permissions:
   contents: write
 
 jobs:
-  build-linux-x64:
+  build-anyps5:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Free disk space on runner
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+
+      - name: Install AnyPS5 build dependencies
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          df -h
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config python3 \
+            libvulkan-dev glslang-tools \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxfixes-dev libxss-dev libxtst-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libdbus-1-dev libudev-dev libgl-dev libdrm-dev libgbm-dev \
+            libusb-1.0-0-dev libhidapi-dev libssl-dev zlib1g-dev patchelf
 
-      - name: Setup .NET 8 SDK
-        uses: actions/setup-dotnet@v4
+      - name: Prepare and build patched AnyPS5
+        run: |
+          chmod +x Tools/linux/*.sh Tools/linux/*.py
+          Tools/linux/prepare-anyps5.sh patched
+          Tools/linux/build-anyps5.sh Build/anyps5-hybrid
+
+      - name: Upload AnyPS5 outputs
+        uses: actions/upload-artifact@v4
         with:
-          dotnet-version: "8.0.x"
+          name: linux-anyps5
+          retention-days: 1
+          path: |
+            Build/anyps5-hybrid/core/relinker/relinker
+            Build/anyps5-hybrid/core/libs/libs/*.prx
 
-      - name: Install native Linux build dependencies
+  build-kyty-gpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+
+      - name: Install GPU runtime build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang lld cmake ninja-build pkg-config python3 \
             libvulkan-dev glslang-tools \
-            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxfixes-dev \
-            libwayland-dev libxkbcommon-dev \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxfixes-dev libxss-dev libxtst-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev \
             libdbus-1-dev libudev-dev libgl-dev libdrm-dev libgbm-dev \
-            libusb-1.0-0-dev libhidapi-dev libssl-dev zlib1g-dev \
-            patchelf file
-
-      - name: Prepare and build patched AnyPS5 (relinker + system .prx libs)
-        run: |
-          chmod +x Tools/linux/*.sh Tools/linux/*.py
-          Tools/linux/prepare-anyps5.sh patched
-          Tools/linux/build-anyps5.sh Build/anyps5-hybrid
+            libusb-1.0-0-dev libhidapi-dev libssl-dev zlib1g-dev
 
       - name: Prepare and build patched GPU runtime (kyty_gpu.so, Release -O3)
         env:
           CC: clang
           CXX: clang++
         run: |
+          chmod +x Tools/linux/*.sh Tools/linux/*.py
           Tools/linux/prepare-kyty.sh patched
           Tools/linux/build-kyty.sh
 
+      - name: Verify kyty_gpu.so exports
+        run: |
+          ls -lh Build/kyty-gpu/kyty_gpu.so
+          file Build/kyty-gpu/kyty_gpu.so
+          nm -D Build/kyty-gpu/kyty_gpu.so | grep -E "KytyGpuGetApi|KytyGpuGetNid|KytyGpuAstroHdr"
+
+      - name: Upload kyty_gpu.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-kyty-gpu
+          retention-days: 1
+          path: Build/kyty-gpu/kyty_gpu.so
+
+  build-gui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
       - name: Publish self-contained Avalonia Linux GUI
         run: |
+          chmod +x Tools/linux/*.sh
           Tools/linux/publish-gui.sh
+          ls -lh dist/astrohybrid-gui/AstroHybrid
 
-      - name: Verify built Linux binaries
-        run: |
-          set -euo pipefail
-          ls -lh dist/astrohybrid-gui/AstroHybrid \
-                 Build/kyty-gpu/kyty_gpu.so \
-                 Build/anyps5-hybrid/core/relinker/relinker \
-                 Build/anyps5-hybrid/core/libs/libs/libkernel.prx \
-                 Build/anyps5-hybrid/core/libs/libs/libc.prx \
-                 Build/anyps5-hybrid/core/libs/libs/libAstroHybridHost.prx
-          file dist/astrohybrid-gui/AstroHybrid Build/kyty-gpu/kyty_gpu.so Build/anyps5-hybrid/core/relinker/relinker
-          nm -D Build/kyty-gpu/kyty_gpu.so | grep -E "KytyGpuGetApi|KytyGpuGetNid|KytyGpuAstroHdr" | head -n 10
+      - name: Upload Avalonia GUI
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-gui
+          retention-days: 1
+          path: dist/astrohybrid-gui/
 
-      - name: Package AstroBotPC-AstroHybrid Linux x64 archive
+  package-linux-x64:
+    needs: [build-anyps5, build-kyty-gpu, build-gui]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-anyps5
+          path: dist/stage/Build/anyps5-hybrid
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-kyty-gpu
+          path: dist/stage/Build/kyty-gpu
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-gui
+          path: dist/stage
+
+      - name: Assemble, verify, and archive Linux x64 release
         env:
           VER: ${{ inputs.version }}
         run: |
           set -euo pipefail
           STAGE="dist/stage"
-          rm -rf "$STAGE"
-          mkdir -p "$STAGE/Build/kyty-gpu" \
-                   "$STAGE/Build/anyps5-hybrid/core/relinker" \
-                   "$STAGE/Build/anyps5-hybrid/core/libs/libs" \
-                   "$STAGE/Tools/linux" \
-                   "$STAGE/Docs"
-
-          cp -a dist/astrohybrid-gui/. "$STAGE/"
-          cp -a Build/kyty-gpu/kyty_gpu.so "$STAGE/Build/kyty-gpu/"
-          cp -a Build/anyps5-hybrid/core/relinker/relinker "$STAGE/Build/anyps5-hybrid/core/relinker/"
-          cp -a Build/anyps5-hybrid/core/libs/libs/*.prx "$STAGE/Build/anyps5-hybrid/core/libs/libs/"
+          mkdir -p "$STAGE/Tools/linux" "$STAGE/Docs"
           cp -a Tools/linux/. "$STAGE/Tools/linux/"
           cp -a Docs/LINUX.md "$STAGE/Docs/"
           cp -a recomplauncher.json "$STAGE/"
@@ -102,13 +162,25 @@ jobs:
           [ -d licenses ] && cp -a licenses "$STAGE/" || true
           [ -d fonts ] && cp -a fonts "$STAGE/" || true
 
+          chmod +x "$STAGE/AstroHybrid" \
+                   "$STAGE/Build/anyps5-hybrid/core/relinker/relinker" \
+                   "$STAGE/Tools/linux/"*.sh \
+                   "$STAGE/Tools/linux/"*.py
+
+          ls -lh "$STAGE/AstroHybrid" \
+                 "$STAGE/Build/kyty-gpu/kyty_gpu.so" \
+                 "$STAGE/Build/anyps5-hybrid/core/relinker/relinker" \
+                 "$STAGE/Build/anyps5-hybrid/core/libs/libs/libkernel.prx" \
+                 "$STAGE/Build/anyps5-hybrid/core/libs/libs/libc.prx" \
+                 "$STAGE/Build/anyps5-hybrid/core/libs/libs/libAstroHybridHost.prx"
+
           OUT="AstroBotPC-AstroHybrid-${VER}-Linux-x64.tar.gz"
           tar -C "$STAGE" -czf "$OUT" .
           ls -lh "$OUT"
           sha256sum "$OUT" | tee "${OUT}.sha256"
           echo "ARCHIVE_NAME=$OUT" >> "$GITHUB_ENV"
 
-      - name: Upload Linux x64 artifact
+      - name: Upload final Linux x64 archive
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARCHIVE_NAME }}
