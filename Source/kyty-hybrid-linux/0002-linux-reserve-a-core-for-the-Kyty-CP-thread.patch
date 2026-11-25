@@ -1,0 +1,218 @@
+From 372fdde55afdaf043a806eb04bfcde26fb9f1300 Mon Sep 17 00:00:00 2001
+From: Craig <6146447+dev-kreg@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 16:31:38 -0600
+Subject: [PATCH] linux: reserve a core for the Kyty CP thread
+
+KYTY_CPU_RESERVE=cp was Windows-only: on Linux the log said "process mask
+none" and the command-processor thread shared its core with guest threads.
+Build the CPU set list from sysfs (core_id, package, L3 id, CPPC
+highest_perf), reuse ComputeCpuLayout, pin the CP (and recorder) tid with
+sched_setaffinity and every other thread in /proc/self/task to the general
+mask, re-applied every 2 s for threads created later.
+
+Sky Garden, Ryzen 7 5700X3D, performance profile, 2 alternating runs each:
+off 25.2/25.2 fps, auto (core 1) 28.3/27.0, KYTY_CPU_RESERVE_CORE=7 28.2/27.8.
+KYTY_CPU_RESERVE=off restores the old behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/cpuPlacement.cpp | 131 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 127 insertions(+), 4 deletions(-)
+
+diff --git a/src/common/cpuPlacement.cpp b/src/common/cpuPlacement.cpp
+index ba8f40a5..493fba21 100644
+--- a/src/common/cpuPlacement.cpp
++++ b/src/common/cpuPlacement.cpp
+@@ -22,6 +22,10 @@
+ #include <windows.h>
+ // After windows.h.
+ #include <tlhelp32.h>
++#else
++#include <dirent.h>
++#include <sched.h>
++#include <unistd.h>
+ #endif
+ 
+ namespace Common {
+@@ -607,6 +611,71 @@ bool AffinityRestricted(uint64_t* process = nullptr) {
+ 	return process_mask != system_mask;
+ }
+ 
++#else
++
++// Linux: the logical processors from sysfs, the same fields GetSystemCpuSetInformation gives.
++// `allowed`: in the process's affinity when this module first ran (later calls run on threads this
++// module may have narrowed already) and in KYTY_CPU_SETS.
++std::vector<CpuSetInfo> ReadCpuSets(uint64_t& affinity) {
++	static const uint64_t initial = [] {
++		cpu_set_t set;
++		CPU_ZERO(&set);
++		uint64_t mask = 0;
++		if (sched_getaffinity(0, sizeof(set), &set) == 0) {
++			for (int cpu = 0; cpu < 64; cpu++) {
++				mask |= CPU_ISSET(cpu, &set) ? uint64_t {1} << cpu : 0;
++			}
++		}
++		return mask;
++	}();
++	const auto read_number = [](int cpu, const char* leaf) -> long {
++		char path[128];
++		std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/%s", cpu, leaf);
++		auto* file  = std::fopen(path, "r");
++		long  value = -1;
++		if (file != nullptr) {
++			if (std::fscanf(file, "%ld", &value) != 1) {
++				value = -1;
++			}
++			std::fclose(file);
++		}
++		return value;
++	};
++	const auto              restriction = CpuSetsMask();
++	std::vector<CpuSetInfo> sets;
++	affinity = initial;
++	for (int cpu = 0; cpu < 64; cpu++) {
++		const auto core = read_number(cpu, "topology/core_id");
++		if (core < 0) {
++			continue; // offline or absent
++		}
++		const auto package = std::max(read_number(cpu, "topology/physical_package_id"), 0L);
++		const auto cache   = std::max(read_number(cpu, "cache/index3/id"), 0L);
++		const auto perf    = std::max(read_number(cpu, "acpi_cppc/highest_perf"), 0L);
++		CpuSetInfo set;
++		set.id               = static_cast<uint32_t>(cpu);
++		set.logical          = static_cast<uint8_t>(cpu);
++		set.core             = static_cast<uint8_t>(package * 64 + core);
++		set.cache            = static_cast<uint8_t>(cache);
++		set.scheduling_class = static_cast<uint8_t>(std::min(perf, 255L));
++		set.allowed          = ((initial >> cpu) & 1u) != 0 &&
++		              (restriction == 0 || ((restriction >> cpu) & 1u) != 0);
++		sets.push_back(set);
++	}
++	return sets;
++}
++
++void SetTidAffinity(pid_t tid, uint64_t mask) {
++	cpu_set_t set;
++	CPU_ZERO(&set);
++	for (int cpu = 0; cpu < 64; cpu++) {
++		if (((mask >> cpu) & 1u) != 0) {
++			CPU_SET(cpu, &set);
++		}
++	}
++	(void)sched_setaffinity(tid, sizeof(set), &set);
++}
++
+ #endif
+ 
+ struct State {
+@@ -633,6 +702,9 @@ struct State {
+ 	std::vector<ColdThread> cold;
+ 	// PlaceCurrentThreadGuest threads (guest pthreads and the guest main thread).
+ 	std::vector<ColdThread> guest;
++#else
++	// The CP's and the recorder's thread ids (0: not placed yet).
++	std::array<pid_t, static_cast<size_t>(ThreadRole::Count)> tids {};
+ #endif
+ 	// KYTY_VCACHE_PLACEMENT.
+ 	VCacheTopology                        topology;
+@@ -807,6 +879,36 @@ std::vector<uint32_t> GuestIdsLocked(const State& state) {
+ }
+ #endif
+ 
++#if !defined(_WIN32)
++// Every thread of the process gets its mask: new threads inherit their creator's, so a periodic
++// pass (StartMonitor) only catches threads the CP or the recorder created and any re-pinning.
++void ApplyLinuxAffinitiesLocked(const State& state) {
++	if (!state.layout.reserved) {
++		return;
++	}
++	const auto cp       = state.tids[static_cast<size_t>(ThreadRole::Cp)];
++	const auto recorder = state.tids[static_cast<size_t>(ThreadRole::Recorder)];
++	auto*      dir      = opendir("/proc/self/task");
++	if (dir == nullptr) {
++		return;
++	}
++	while (const auto* entry = readdir(dir)) {
++		const auto tid = static_cast<pid_t>(std::strtol(entry->d_name, nullptr, 10));
++		if (tid <= 0) {
++			continue;
++		}
++		if (tid == cp) {
++			SetTidAffinity(tid, state.layout.cp_mask);
++		} else if (tid == recorder && state.layout.recorder_mask != 0) {
++			SetTidAffinity(tid, state.layout.recorder_mask);
++		} else {
++			SetTidAffinity(tid, state.layout.general_mask);
++		}
++	}
++	closedir(dir);
++}
++#endif
++
+ // State mutex held: computes the layout for the current process mask and constraint and applies
+ // it: the process default CPU sets (the general processors of a reservation, the hot processors
+ // of the V-cache placement, or every allowed processor with only KYTY_CPU_SETS), the reserved
+@@ -817,7 +919,7 @@ void ApplyLayoutLocked(State& state, const char* why, bool log = true, bool keep
+ #if defined(_WIN32)
+ 	state.sets = ReadCpuSets(affinity, state.external);
+ #else
+-	state.sets.clear();
++	state.sets = ReadCpuSets(affinity);
+ #endif
+ 	state.affinity = affinity;
+ 	PublishTopology(state.sets);
+@@ -909,11 +1011,13 @@ void ApplyLayoutLocked(State& state, const char* why, bool log = true, bool keep
+ 	}
+ 	state.vcache_applied = state.layout.vcache;
+ #else
+-	state.layout.reserved = false;
+-	state.layout.vcache   = false;
++	// No V-cache placement here (single-L3 parts only so far); CPU affinity stands in for CPU
++	// sets: the CP (and recorder) on their cores, every other thread of the process on the rest.
++	state.layout.vcache = false;
+ 	if (!active) {
+ 		return;
+ 	}
++	ApplyLinuxAffinitiesLocked(state);
+ #endif
+ 	g_cp_mask.store(state.layout.reserved ? state.layout.cp_mask : 0, std::memory_order_relaxed);
+ 	g_recorder_mask.store(state.layout.reserved ? state.layout.recorder_mask : 0,
+@@ -955,6 +1059,19 @@ void StartMonitor() {
+ 			}
+ 		}
+ 	}).detach();
++#else
++	if (GetCpuReserveMode() == CpuReserveMode::Off) {
++		return;
++	}
++	std::thread([] {
++		Profiler::SetThreadName("CPU placement monitor");
++		for (;;) {
++			std::this_thread::sleep_for(std::chrono::seconds(2));
++			auto&           state = GetState();
++			std::lock_guard lock(state.mutex);
++			ApplyLinuxAffinitiesLocked(state);
++		}
++	}).detach();
+ #endif
+ }
+ 
+@@ -1089,7 +1206,13 @@ void PlaceCurrentThread(ThreadRole role) {
+ 		                role == ThreadRole::Cp ? state.layout.cp_ids : state.layout.recorder_ids);
+ 	}
+ #else
+-	(void)role;
++	if (role != ThreadRole::Cp && role != ThreadRole::Recorder) {
++		return;
++	}
++	auto&           state = GetState();
++	std::lock_guard lock(state.mutex);
++	state.tids[static_cast<size_t>(role)] = static_cast<pid_t>(gettid());
++	ApplyLinuxAffinitiesLocked(state);
+ #endif
+ }
+ 
+-- 
+2.56.1
+

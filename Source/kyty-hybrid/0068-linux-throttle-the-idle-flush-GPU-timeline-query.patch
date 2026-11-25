@@ -1,0 +1,69 @@
+From f9fa2ffb4782453fdd35bd2dd098eaac8f448a80 Mon Sep 17 00:00:00 2001
+From: Craig <craigiswrigh13@gmail.com>
+Date: Tue, 24 Nov 2026 18:45:44 -0600
+Subject: [PATCH] linux: throttle the idle-flush GPU timeline query
+
+MaybeFlushIdleGpu queried the GPU timeline (vkGetSemaphoreCounterValue)
+every 4th draw while the GPU was behind. On RADV each query is a
+DRM_SYNCOBJ_QUERY ioctl: ~420 per frame at the Sky Garden start, about
+1 ms of command-processor time. KYTY_IDLE_FLUSH_REFRESH_US (default 200,
+0 restores the old behaviour, live switch) bounds it by time.
+---
+ .../command_processor/commandProcessor.h       |  1 +
+ src/graphics/guest_gpu/graphicsRun.cpp         | 18 +++++++++++++++++-
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/guest_gpu/command_processor/commandProcessor.h b/src/graphics/guest_gpu/command_processor/commandProcessor.h
+index 799f5bd3..6dab6f50 100644
+--- a/src/graphics/guest_gpu/command_processor/commandProcessor.h
++++ b/src/graphics/guest_gpu/command_processor/commandProcessor.h
+@@ -495,6 +495,7 @@ private:
+ 	// MaybeFlushIdleGpu: recording tick being counted and its draws/dispatches so far.
+ 	uint64_t  m_idle_flush_tick             = 0;
+ 	uint32_t  m_idle_flush_draws            = 0;
++	uint64_t  m_idle_flush_refresh_ns       = 0; // last timeline query (KYTY_IDLE_FLUSH_REFRESH_US)
+ 	// Draws recorded in the current graphics slice (MaybeYieldSlice).
+ 	uint32_t  m_slice_draws                 = 0;
+ 
+diff --git a/src/graphics/guest_gpu/graphicsRun.cpp b/src/graphics/guest_gpu/graphicsRun.cpp
+index 6ad75d88..3b0cb99a 100644
+--- a/src/graphics/guest_gpu/graphicsRun.cpp
++++ b/src/graphics/guest_gpu/graphicsRun.cpp
+@@ -941,6 +941,13 @@ static uint32_t IdleFlushMinDraws() {
+ 	return static_cast<uint32_t>(g_idle_flush_draws.Get());
+ }
+ 
++// KYTY_IDLE_FLUSH_REFRESH_US (default 200, 0 = every 4th draw as before): MaybeFlushIdleGpu
++// queries the GPU timeline (vkGetSemaphoreCounterValue, an ioctl on RADV) at most once per this
++// many microseconds. Every 4th draw made it ~420 queries per frame at the Sky Garden start.
++static Live::Switch g_idle_flush_refresh_us("KYTY_IDLE_FLUSH_REFRESH_US", [](const char* value) -> int64_t {
++	return value != nullptr ? static_cast<int64_t>(std::strtoull(value, nullptr, 10)) : 200;
++});
++
+ void CommandProcessor::MaybeFlushIdleGpu() {
+ 	// A draw or dispatch just recorded writes a page the command processor reads back later (e.g.
+ 	// indirect arguments): submit it now, outside a rendering instance, so that read waits for
+@@ -970,10 +977,19 @@ void CommandProcessor::MaybeFlushIdleGpu() {
+ 	}
+ 	auto& master = scheduler.GetMasterSemaphore();
+ 	if (master.KnownGpuTick() + 1u < current) {
+-		// Refresh the timeline value only every few draws (a driver query).
++		// Refresh the timeline value only every few draws (a driver query), and at most once per
++		// KYTY_IDLE_FLUSH_REFRESH_US.
+ 		if ((m_idle_flush_draws % 4u) != 0) {
+ 			return;
+ 		}
++		if (const auto interval = static_cast<uint64_t>(g_idle_flush_refresh_us.Get()) * 1000u;
++		    interval != 0) {
++			const auto now = CpNowNs();
++			if (now - m_idle_flush_refresh_ns < interval) {
++				return;
++			}
++			m_idle_flush_refresh_ns = now;
++		}
+ 		master.Refresh();
+ 		if (master.KnownGpuTick() + 1u < current) {
+ 			return;
+-- 
+2.55.0.windows.5
+

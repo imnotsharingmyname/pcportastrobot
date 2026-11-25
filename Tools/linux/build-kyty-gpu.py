@@ -9,6 +9,7 @@ ELF alias per NID, so the .so exports the names AnyPS5's relinked game imports.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import shlex
@@ -144,11 +145,13 @@ def main() -> int:
         else:
             resolved_libraries.append(str(build / path))
 
+    # KYTY_EXTRA_OBJS: colon-separated extra objects (build-kyty.sh's PGO dump thread).
+    extra_objs = [o for o in os.environ.get("KYTY_EXTRA_OBJS", "").split(":") if o]
     output = out / "kyty_gpu.so"
     command = [compiler, "-shared", "-o", str(output), *link_flags,
                "-Wl,--version-script=" + str(version_map),
                "-Wl,-soname,kyty_gpu.so",
-               str(bridge), str(alias_obj)]
+               str(bridge), str(alias_obj), *extra_objs]
     command += [str(build / obj) for obj in objects]
     command += resolved_libraries
 
