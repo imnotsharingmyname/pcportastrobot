@@ -136,7 +136,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: linux-anyps5
-          path: dist/stage/Build/anyps5-hybrid
+          path: dist/stage/Build/anyps5-hybrid/core
 
       - uses: actions/download-artifact@v4
         with:
