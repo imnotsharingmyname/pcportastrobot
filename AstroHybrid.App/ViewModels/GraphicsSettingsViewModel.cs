@@ -101,6 +101,8 @@ namespace AstroHybrid.App.ViewModels
                 // options off instead of leaving settings the launcher cannot honour.
                 if (!hardware.SupportsDlss && _mainViewModel.Settings.Upscale == 1)
                     _mainViewModel.Settings.Upscale = 0;
+                if (!hardware.SupportsXess && _mainViewModel.Settings.Upscale == 3)
+                    _mainViewModel.Settings.Upscale = 0;
                 if (!hardware.SupportsFrameGeneration && _mainViewModel.Settings.FrameGenMode != 0)
                     _mainViewModel.Settings.FrameGenMode = 0;
 
@@ -141,6 +143,9 @@ namespace AstroHybrid.App.ViewModels
                     text += " DLSS, Reflex and frame generation use this card.";
                 else if (hardware.Gpus.Any(g => g.RtxSeries >= 20))
                     text += " The NVIDIA options need the RTX card: pick it, or Automatic, to use them.";
+                var selected = hardware.SelectedGpu;
+                if (selected != null && selected.SupportsXess && selected.RtxSeries < 20)
+                    text += selected.XessXmx ? " Intel XeSS runs on this card's XMX engines." : " Intel XeSS runs on this card.";
                 return text;
             }
         }
@@ -273,6 +278,8 @@ namespace AstroHybrid.App.ViewModels
 
         // Upscaling: Auto, Off and only the upscalers this card supports.
         private bool HasDlss => _mainViewModel.HardwareInfo?.SupportsDlss == true;
+        private bool HasXess => _mainViewModel.HardwareInfo?.SupportsXess == true;
+        private bool HasXessXmx => _mainViewModel.HardwareInfo?.XessXmx == true;
 
         public string[] UpscaleLabels
         {
@@ -284,15 +291,32 @@ namespace AstroHybrid.App.ViewModels
                 labels.Add("Off - the game's own upscaling");
                 if (HasDlss) labels.Add("NVIDIA DLSS - sharper image");
                 labels.Add("AMD FSR - " + FsrVersionNote);
+                if (HasXess) labels.Add(HasXessXmx ? "Intel XeSS - sharper image (XMX on this GPU)" : "Intel XeSS - sharper image");
                 return labels.ToArray();
             }
         }
 
-        // Combo index -> Upscale value (index 0 is Auto): Off, DLSS where supported, FSR.
-        private int[] UpscaleValues => HasDlss ? new[] { -1, 0, 1, 2 } : new[] { -1, 0, 2 };
+        // Combo index -> Upscale value (index 0 is Auto): Off, DLSS where supported, FSR, XeSS where supported.
+        private int[] UpscaleValues
+        {
+            get
+            {
+                var values = new List<int> { -1, 0 };
+                if (HasDlss) values.Add(1);
+                values.Add(2);
+                if (HasXess) values.Add(3);
+                return values.ToArray();
+            }
+        }
 
         private static string UpscalerName(int value) =>
-            value == 1 ? "NVIDIA DLSS" : value == 2 ? "AMD FSR" : "the game's own upscaling";
+            value == 1 ? "NVIDIA DLSS" : value == 2 ? "AMD FSR" : value == 3 ? "Intel XeSS" : "the game's own upscaling";
+
+        // Shown under the upscaler choice while XeSS is picked.
+        public bool ShowXessNote => _mainViewModel.Settings.Upscale == 3 && HasXess;
+        public string XessNote => HasXessXmx
+            ? "XeSS replaces the game's temporal upscale pass with Intel's, on this GPU's XMX engines. It builds its shaders while the game starts; until then the game's own upscaling shows. Intel's frame generation (XeSS-FG) is D3D12-only; AMD FSR frame generation (below) works together with XeSS."
+            : "XeSS replaces the game's temporal upscale pass with Intel's (DP4a path on this GPU). It builds its shaders while the game starts; until then the game's own upscaling shows.";
 
         // FSR 4 (machine learning) runs on Radeon RX 9000 cards; the renderer falls back to FSR 3.1 elsewhere.
         private string FsrVersionNote
@@ -329,6 +353,7 @@ namespace AstroHybrid.App.ViewModels
                 OnPropertyChanged(nameof(FsrFrameGen));
                 OnPropertyChanged(nameof(IsFsrFrameGenAvailable));
                 OnPropertyChanged(nameof(FsrNote));
+                OnPropertyChanged(nameof(ShowXessNote));
                 OnPropertyChanged(nameof(ActiveSummary));
                 _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
             }
@@ -477,7 +502,7 @@ namespace AstroHybrid.App.ViewModels
                 var st = _mainViewModel.Settings;
                 var parts = new List<string>();
                 parts.Add(st.Lighting == 1 ? "ray-traced lighting" : "faster lighting");
-                parts.Add(st.Upscale == 1 ? "DLSS upscaling" : st.Upscale == 2 ? "AMD FSR upscaling" : "the game's own upscaling");
+                parts.Add(st.Upscale == 1 ? "DLSS upscaling" : st.Upscale == 2 ? "AMD FSR upscaling" : st.Upscale == 3 ? "Intel XeSS upscaling" : "the game's own upscaling");
                 if (st.FrameGenMode != 0)
                 {
                     var targetValues = new[] { 0, 50, 60, 90, 120, 144, 165 };
@@ -601,6 +626,9 @@ namespace AstroHybrid.App.ViewModels
                 else if (_mainViewModel.HardwareInfo.RtxSeries >= 20)
                     return $"{gpu}: DLSS + Reflex available (NVIDIA Frame Gen needs RTX 40+" +
                            (IsFsrFrameGenInstalled ? "; AMD FSR frame generation works on this card)" : ")");
+                else if (_mainViewModel.HardwareInfo.GpuVendor == "Intel" && _mainViewModel.HardwareInfo.SupportsXess)
+                    return $"{gpu}: Intel XeSS{(_mainViewModel.HardwareInfo.XessXmx ? " (XMX)" : "")} and AMD FSR upscaling" +
+                           (IsFsrFrameGenInstalled ? ", AMD FSR frame generation" : "") + " available (Reflex needs an NVIDIA RTX card)";
                 else
                     return $"{gpu}: AMD FSR upscaling" + (IsFsrFrameGenInstalled ? " and frame generation" : "") +
                            " available (DLSS, NVIDIA frame generation and Reflex need an NVIDIA RTX card)";

@@ -43,6 +43,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="PresentationCore" />
@@ -109,6 +110,9 @@
     <Compile Include="Models\UpdateInfo.cs" />
     <Compile Include="Services\SettingsManager.cs" />
     <Compile Include="Services\GameValidator.cs" />
+    <Compile Include="Services\GameSource.cs" />
+    <Compile Include="Services\InlineProgress.cs" />
+    <Compile Include="Services\ZArchiveReader.cs" />
     <Compile Include="Services\BuildManager.cs" />
     <Compile Include="Services\HardwareDetector.cs" />
     <Compile Include="Services\ControllerDetector.cs" />

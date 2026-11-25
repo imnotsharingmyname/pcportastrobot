@@ -2,9 +2,17 @@
 
 Use your own legally obtained, decrypted game dump. ZArchive (`.zar`) compresses and indexes files; it does not convert the game's resource formats.
 
-## Dump and runtime layout
+## Source selection and quick validation
 
-Select a dump folder containing:
+Use **Browse .zar...** to select any standalone archive, or **Browse folder...** for a dump folder. A standalone archive does not need to be renamed to `app0.zar` and does not need external sidecar files.
+
+The pre-install quick check reads the complete archive index, rejects an `app0/` wrapper, checks the required Astro Bot layout, and reads/decompresses `eboot.bin`, original `sce_module/*.prx`, and `sce_sys` entries. The wizard shows genuine byte progress and enables Install only after these reads succeed. **It does not read or certify optional compressed game-data blocks under `data/`**; damage limited to those blocks can still be discovered when the runtime reads them later.
+
+Setup extracts those required startup entries into app-owned `Build/ZarSource` for the relinker and writes a sibling `Build/RunHybrid/app0.zar` link or copy. It never unpacks optional game data, modifies the source archive, or requires an empty `data` directory. Repair/Rebuild repeats materialization from the saved standalone path; Uninstall removes only generated files and leaves the source archive intact.
+
+## Dump folder and runtime layout
+
+A dump folder with a sibling archive instead of loose `data` contains:
 
 ```text
 dump/
@@ -14,7 +22,7 @@ dump/
   app0.zar
 ```
 
-Keep `eboot.bin`, the original `sce_module` modules, and `sce_sys` available as ordinary files: setup needs them before the game runtime starts. Other loose files, such as `args.txt` or `param.sfx`, may also remain in this folder. Do not create an empty `data` directory just to satisfy setup.
+For this dump-folder form, keep `eboot.bin`, the original `sce_module` modules, and `sce_sys` available as ordinary files: setup needs them before the game runtime starts. Other loose files, such as `args.txt` or `param.sfx`, may also remain in this folder. Do not create an empty `data` directory just to satisfy setup. Standalone archives instead get those files materialized automatically as described above.
 
 The runtime layout is different:
 

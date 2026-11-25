@@ -1,0 +1,690 @@
+From f44cde961fe136deb4db285a7e8185dcdb988dfe Mon Sep 17 00:00:00 2001
+From: red-Geck0 <127088086+red-Geck0@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 10:04:57 +0700
+Subject: [PATCH 71/72] feat(framegen): FSR frame generation on GPUs with one
+ graphics queue (Intel Arc)
+
+AMD FSR frame generation (patch 0055) needs three queues besides the game
+queue, taken from the graphics family. Intel Arc has a single graphics
+queue, so frame generation never started there; with that fixed, the FSR
+runtime still failed to create its context on Intel's driver.
+
+- A graphics family with too few queues gives FSR three queues of a
+  compute family that can present to the window instead (family 1 on
+  Arc). FSR's swapchain gets each queue's family; the interpolation then
+  runs on the game queue (ASTROHYBRID_FSRFG_ASYNC=1 to try async compute),
+  so Kyty's images are not used from another queue family.
+- FSR's descriptor pools ask for up to 16,000 sets of 512 descriptors of
+  each type (8,192,000); Intel's driver refuses them with
+  VK_ERROR_OUT_OF_HOST_MEMORY and the context creation failed with
+  FFX_API_RETURN_ERROR_RUNTIME_ERROR (3). FSR 3.1.6 frame generation uses
+  720 sets in all (largest 19 descriptors), so vkCreateDescriptorPool is
+  wrapped to ask again for at most 4096 / 2048 / 1024 sets of 32
+  descriptors per type. If FSR still fails to allocate a set
+  (VK_ERROR_OUT_OF_POOL_MEMORY), its context is dropped and frame
+  generation turns off: running it without its sets froze the game.
+- FSR's graphics pipelines have a static line width of 0 (needs
+  wideLines, VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-00749); it
+  is set to 1.
+- Failures of the other Vulkan calls FSR makes, and device functions it
+  cannot get, are printed: the runtime itself only returns an error code.
+- The frame generation versions the runtime offers are listed and tried
+  newest first (ASTROHYBRID_FSRFG_VERSION=<prefix> picks one), then
+  without async workload support.
+- If creating the context for a render size above the display size (the
+  game's 3840x2160 menus in a smaller window) fails, the display size
+  becomes the cap and larger frames are shown without generation (skip
+  "above-display"), instead of frame generation turning off for the
+  session. Contexts that can be created are sized as before.
+
+Tested on Intel Arc B390 (MSI Claw 8 EX, Intel driver 101.9175), 1920x1094
+window, full overlay: with FSR upscaling and with XeSS upscaling, the
+context is created on version 3.1.6 (render up to 3840x2160) with its
+refused pools at 4096 sets,
+every game frame gets a generated one (220/220 and 280/280 per 10 s) for
+over two minutes, 45 FPS on screen with the game at 22 FPS (FSR), picture
+and HUD correct, clean exit.
+---
+ src/graphics/host_gpu/renderer/fsr.cpp        | 377 ++++++++++++++++--
+ src/graphics/host_gpu/renderer/fsr.h          |   9 +-
+ .../presentation/window/vulkanWindow.cpp      |  71 +++-
+ 3 files changed, 411 insertions(+), 46 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/fsr.cpp b/src/graphics/host_gpu/renderer/fsr.cpp
+index b1246a7f..7e828dbc 100644
+--- a/src/graphics/host_gpu/renderer/fsr.cpp
++++ b/src/graphics/host_gpu/renderer/fsr.cpp
+@@ -12,6 +12,7 @@
+ #include <cstring>
+ #include <mutex>
+ #include <string>
++#include <type_traits>
+ #include <utility>
+ #include <vector>
+ 
+@@ -154,9 +155,9 @@ struct HudRun {
+ };
+ constexpr uint32_t HUD_RUNS = 10;
+ 
+-enum class Skip : uint32_t { NoInputs, Repeat, NoContext, Prepare, Dispatch, Count };
++enum class Skip : uint32_t { NoInputs, Repeat, NoContext, Prepare, Dispatch, Larger, Count };
+ constexpr std::array<const char*, static_cast<size_t>(Skip::Count)> SKIP_NAMES {"no-inputs", "repeat", "no-context",
+-                                                                               "prepare", "dispatch"};
++                                                                               "prepare", "dispatch", "above-display"};
+ 
+ struct State {
+ 	// Library.
+@@ -191,6 +192,10 @@ struct State {
+ 	ffxCreateContextDescFrameGenerationVersion     frame_gen_version {};
+ 	ffxContext                                     frame_gen_context = nullptr;
+ 	bool                                           frame_gen_failed  = false;
++	bool                                           frame_gen_versions_queried = false;
++	bool                                           cap_render_to_display      = false;
++	std::vector<uint64_t>                          frame_gen_version_ids;
++	std::vector<std::string>                       frame_gen_version_names;
+ 	bool                                           first_configure   = true;
+ 	uint64_t                                       configured_frame  = 0;
+ 	uint64_t                                       generated_frame   = 0;
+@@ -281,15 +286,184 @@ VkResult SubmitGameQueue(uint32_t count, const VkSubmitInfo* submits, VkFence fe
+ // vkGetBufferMemoryRequirements2KHR without a null check when the GPU supports dedicated
+ // allocations). Kyty's device has them as core Vulkan 1.1+ functions without those extensions
+ // enabled, so the loader answers null for the KHR name: the core name is tried then.
++// The functions FSR gets for these calls are wrapped so that it works on more than AMD's driver:
++//  - its graphics pipelines have a static line width of 0, valid only with the wideLines feature
++//    (VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-00749): the width is set to 1;
++//  - its descriptor pools ask for 8,192,000 descriptors of each type, which Intel's driver refuses
++//    (VK_ERROR_OUT_OF_HOST_MEMORY, and the frame generation context fails with
++//    FFX_API_RETURN_ERROR_RUNTIME_ERROR): fewer descriptors per set are asked for, and frame
++//    generation turns off instead of hanging the GPU when FSR cannot allocate its sets;
++//  - failures of the other calls are printed (FSR's runtime reports only an error code).
++PFN_vkCreateGraphicsPipelines g_ffx_create_graphics = nullptr;
++
++void LogFfxFailure(const char* call, VkResult result) {
++	static std::atomic<uint32_t> logged {0};
++	if (result < VK_SUCCESS && logged.fetch_add(1) < 16) {
++		std::printf("FSR FG: %s for FSR failed (VkResult %d)\n", call, static_cast<int>(result));
++		std::fflush(stdout);
++	}
++}
++
++VkResult VKAPI_CALL FfxCreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
++                                               const VkGraphicsPipelineCreateInfo* infos,
++                                               const VkAllocationCallbacks* allocator, VkPipeline* pipelines) {
++	std::vector<VkGraphicsPipelineCreateInfo>          fixed(infos, infos + count);
++	std::vector<VkPipelineRasterizationStateCreateInfo> raster(count);
++	for (uint32_t i = 0; i < count; i++) {
++		if (fixed[i].pRasterizationState != nullptr && fixed[i].pRasterizationState->lineWidth == 0.0f) {
++			raster[i]                     = *fixed[i].pRasterizationState;
++			raster[i].lineWidth           = 1.0f;
++			fixed[i].pRasterizationState = &raster[i];
++		}
++	}
++	const auto result = g_ffx_create_graphics(device, cache, count, fixed.data(), allocator, pipelines);
++	LogFfxFailure("vkCreateGraphicsPipelines", result);
++	return result;
++}
++
++// FFX sizes its descriptor pools for 512 descriptors of each type per set (up to 16,000 sets, 8,192,000
++// descriptors of each type); Intel's driver refuses such a pool with VK_ERROR_OUT_OF_HOST_MEMORY, which
++// fails the frame generation context (the driver charges per set as well as per descriptor). FFX uses
++// far less, so a refused pool is asked for again at a size that still covers FFX's real use. A pool
++// that is too small makes vkAllocateDescriptorSets fail (VK_ERROR_OUT_OF_POOL_MEMORY) and the
++// interpolation then hangs the GPU, so failed set allocations turn frame generation off
++// (g_ffx_descriptor_failures).
++PFN_vkCreateDescriptorPool g_ffx_create_pool = nullptr;
++std::atomic<uint32_t>      g_ffx_descriptor_failures {0};
++
++VkResult VKAPI_CALL FfxCreateDescriptorPool(VkDevice device, const VkDescriptorPoolCreateInfo* info,
++                                            const VkAllocationCallbacks* allocator, VkDescriptorPool* pool) {
++	auto result = g_ffx_create_pool(device, info, allocator, pool);
++	if (result >= VK_SUCCESS || info == nullptr) {
++		return result;
++	}
++	std::string sizes;
++	for (uint32_t i = 0; i < info->poolSizeCount; i++) {
++		sizes += " " + std::to_string(info->pPoolSizes[i].type) + ":" + std::to_string(info->pPoolSizes[i].descriptorCount);
++	}
++	std::printf("FSR FG: vkCreateDescriptorPool for FSR failed (VkResult %d): flags 0x%x, max sets %u, type:count%s\n",
++	            static_cast<int>(result), static_cast<unsigned>(info->flags), info->maxSets, sizes.c_str());
++	VkDescriptorPoolCreateInfo        smaller = *info;
++	std::vector<VkDescriptorPoolSize> pool_sizes(info->pPoolSizes, info->pPoolSizes + info->poolSizeCount);
++	smaller.pPoolSizes = pool_sizes.data();
++	// Measured on FSR 3.1.6 frame generation: 720 sets in all (allocated with the context, none while
++	// running), the largest with 19 descriptors. Pools of at most 4096 / 2048 / 1024 sets with 32
++	// descriptors of each type per set cover that with room to spare and cost the driver little.
++	for (const uint32_t sets: {4096u, 2048u, 1024u}) {
++		smaller.maxSets    = std::min(info->maxSets, sets);
++		const uint64_t cap = static_cast<uint64_t>(smaller.maxSets) * 32u;
++		for (uint32_t i = 0; i < info->poolSizeCount; i++) {
++			pool_sizes[i].descriptorCount =
++			    static_cast<uint32_t>(std::min<uint64_t>(info->pPoolSizes[i].descriptorCount, cap));
++		}
++		result = g_ffx_create_pool(device, &smaller, allocator, pool);
++		std::printf("FSR FG: descriptor pool with %u sets of up to 32 descriptors of each type: VkResult %d\n",
++		            smaller.maxSets, static_cast<int>(result));
++		if (result >= VK_SUCCESS) {
++			break;
++		}
++	}
++	std::fflush(stdout);
++	return result;
++}
++
++// FSR's descriptor use: sets allocated and the largest set layout, printed with the context.
++PFN_vkAllocateDescriptorSets      g_ffx_allocate_sets = nullptr;
++PFN_vkCreateDescriptorSetLayout   g_ffx_create_layout = nullptr;
++std::atomic<uint32_t>             g_ffx_sets_allocated {0};
++std::atomic<uint32_t>             g_ffx_largest_layout {0};
++
++VkResult VKAPI_CALL FfxAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo* info,
++                                              VkDescriptorSet* sets) {
++	const auto result = g_ffx_allocate_sets(device, info, sets);
++	if (result >= VK_SUCCESS) {
++		g_ffx_sets_allocated.fetch_add(info->descriptorSetCount);
++	} else {
++		g_ffx_descriptor_failures.fetch_add(1);
++		LogFfxFailure("vkAllocateDescriptorSets", result);
++	}
++	return result;
++}
++
++VkResult VKAPI_CALL FfxCreateDescriptorSetLayout(VkDevice device, const VkDescriptorSetLayoutCreateInfo* info,
++                                                 const VkAllocationCallbacks* allocator, VkDescriptorSetLayout* layout) {
++	uint32_t descriptors = 0;
++	for (uint32_t i = 0; i < info->bindingCount; i++) {
++		descriptors += info->pBindings[i].descriptorCount;
++	}
++	uint32_t largest = g_ffx_largest_layout.load();
++	while (descriptors > largest && !g_ffx_largest_layout.compare_exchange_weak(largest, descriptors)) {
++	}
++	const auto result = g_ffx_create_layout(device, info, allocator, layout);
++	LogFfxFailure("vkCreateDescriptorSetLayout", result);
++	return result;
++}
++
++// Every other VkResult call FFX makes is forwarded through LoggedCall, which prints failures.
++#define KYTY_FFX_LOGGED_CALLS(X)                                                                       \
++	X(0, vkCreateComputePipelines) X(1, vkCreateImage) X(2, vkAllocateMemory) X(3, vkCreateBuffer)    \
++	X(4, vkBindBufferMemory) X(5, vkBindImageMemory) X(6, vkCreateShaderModule)                       \
++	X(7, vkResetCommandBuffer) X(8, vkCreatePipelineLayout) X(9, vkResetDescriptorPool)             \
++	X(10, vkResetCommandPool) X(11, vkCreateImageView) X(12, vkCreateBufferView)                      \
++	X(13, vkCreateSampler) X(14, vkCreateRenderPass) X(15, vkCreateFramebuffer)                       \
++	X(16, vkCreateCommandPool) X(17, vkAllocateCommandBuffers) X(18, vkCreateSemaphore)               \
++	X(19, vkMapMemory) X(20, vkBeginCommandBuffer) X(21, vkEndCommandBuffer) X(22, vkQueueSubmit)     \
++	X(23, vkWaitSemaphores) X(24, vkGetSemaphoreCounterValue) X(25, vkQueueWaitIdle)                  \
++	X(26, vkDeviceWaitIdle) X(27, vkFlushMappedMemoryRanges)
++constexpr size_t FFX_LOGGED_COUNT = 28;
++std::array<PFN_vkVoidFunction, FFX_LOGGED_COUNT> g_ffx_logged_original {};
++#define KYTY_FFX_NAME(index, call) #call,
++constexpr std::array<const char*, FFX_LOGGED_COUNT> FFX_LOGGED_NAMES {KYTY_FFX_LOGGED_CALLS(KYTY_FFX_NAME)};
++#undef KYTY_FFX_NAME
++
++template <size_t Index, typename Pfn>
++struct LoggedCall;
++template <size_t Index, typename... Args>
++struct LoggedCall<Index, VkResult(VKAPI_PTR*)(Args...)> {
++	static VkResult VKAPI_CALL Call(Args... args) {
++		const auto original = reinterpret_cast<VkResult(VKAPI_PTR*)(Args...)>(g_ffx_logged_original[Index]);
++		const auto result   = original(args...);
++		LogFfxFailure(FFX_LOGGED_NAMES[Index], result);
++		return result;
++	}
++};
++
+ PFN_vkVoidFunction VKAPI_CALL DeviceProcAddr(VkDevice device, const char* name) {
+ 	const auto real     = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
+ 	auto       function = real(device, name);
++	if (function != nullptr && name != nullptr) {
++		const auto wrap = [&](const char* wanted, auto& original, auto wrapper) {
++			if (std::strcmp(name, wanted) == 0) {
++				original = reinterpret_cast<std::remove_reference_t<decltype(original)>>(function);
++				function = reinterpret_cast<PFN_vkVoidFunction>(wrapper);
++			}
++		};
++		wrap("vkCreateGraphicsPipelines", g_ffx_create_graphics, &FfxCreateGraphicsPipelines);
++		wrap("vkCreateDescriptorPool", g_ffx_create_pool, &FfxCreateDescriptorPool);
++		wrap("vkAllocateDescriptorSets", g_ffx_allocate_sets, &FfxAllocateDescriptorSets);
++		wrap("vkCreateDescriptorSetLayout", g_ffx_create_layout, &FfxCreateDescriptorSetLayout);
++#define KYTY_FFX_WRAP(index, call)                                                                       \
++	if (std::strcmp(name, #call) == 0) {                                                                 \
++		g_ffx_logged_original[index] = function;                                                         \
++		return reinterpret_cast<PFN_vkVoidFunction>(&LoggedCall<index, PFN_##call>::Call);                \
++	}
++		KYTY_FFX_LOGGED_CALLS(KYTY_FFX_WRAP)
++#undef KYTY_FFX_WRAP
++	}
+ 	if (function == nullptr && name != nullptr) {
+ 		const size_t length = std::strlen(name);
+ 		if (length > 3 && std::strcmp(name + length - 3, "KHR") == 0) {
+ 			const std::string core(name, length - 3);
+ 			function = real(device, core.c_str());
+ 		}
++		// AMD's buffer markers are optional (asked for on every GPU); other missing functions are printed.
++		if (function == nullptr && std::strstr(name, "BufferMarker") == nullptr) {
++			static std::atomic<uint32_t> missing {0};
++			if (missing.fetch_add(1) < 32) {
++				std::printf("FSR FG: device function %s for FSR is unavailable\n", name);
++				std::fflush(stdout);
++			}
++		}
+ 	}
+ 	return function;
+ }
+@@ -372,8 +546,11 @@ bool LoadFfx() {
+ 	debug.header.type = FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG;
+ 	debug.effectId    = FFX_API_EFFECT_ID_FRAMEGENERATION;
+ 	debug.fpMessage   = &Message;
+-	debug.debugLevel  = FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_WARNINGS;
+-	(void)s.configure(nullptr, &debug.header);
++	debug.debugLevel  = s.debug ? FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_VERBOSE : FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_WARNINGS;
++	const auto debug_result = s.configure(nullptr, &debug.header);
++	if (s.debug) {
++		std::printf("FSR FG: runtime messages configured (%u)\n", static_cast<unsigned>(debug_result));
++	}
+ 	std::printf("FSR FG: %s loaded (depth inverted %d, jitter sign %+.0f)\n", dll.c_str(), s.depth_inverted ? 1 : 0,
+ 	            static_cast<double>(s.jitter_sign));
+ 	std::fflush(stdout);
+@@ -701,8 +878,27 @@ void EnsureFrameGenContext(uint32_t render_width, uint32_t render_height) {
+ 	if (s.swapchain_context == nullptr || s.frame_gen_failed) {
+ 		return;
+ 	}
+-	const uint32_t max_width  = std::max(s.display.width, render_width);
+-	const uint32_t max_height = std::max(s.display.height, render_height);
++	if (s.frame_gen_context != nullptr && g_ffx_descriptor_failures.load() != 0) {
++		// FSR failed to allocate descriptor sets after its context was created: stop before it hangs.
++		QueueScope                                               queue;
++		ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK wait {};
++		wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK;
++		(void)s.dispatch(&s.swapchain_context, &wait.header);
++		DestroyFrameGenContext();
++		s.frame_gen_failed = true;
++		std::printf("FSR FG: FSR could not allocate descriptor sets while running; frame generation off\n");
++		std::fflush(stdout);
++		return;
++	}
++	// A context for a render size above the display size (the game's 3840x2160 menu passes in a
++	// smaller window) is asked for as before. If creating one fails, the display size is the cap
++	// from then on instead of turning generation off for the session: larger frames are shown as
++	// they are (Skip::Larger).
++	if (s.cap_render_to_display && (render_width > s.display.width || render_height > s.display.height)) {
++		return;
++	}
++	const uint32_t max_width  = s.cap_render_to_display ? s.display.width : std::max(s.display.width, render_width);
++	const uint32_t max_height = s.cap_render_to_display ? s.display.height : std::max(s.display.height, render_height);
+ 	if (s.frame_gen_context != nullptr && s.frame_gen_desc.maxRenderSize.width >= render_width &&
+ 	    s.frame_gen_desc.maxRenderSize.height >= render_height) {
+ 		return;
+@@ -720,30 +916,126 @@ void EnsureFrameGenContext(uint32_t render_width, uint32_t render_height) {
+ 	s.frame_gen_backend.deviceContext.vkDevice         = s.device.device;
+ 	s.frame_gen_backend.deviceContext.vkPhysicalDevice = s.device.physical_device;
+ 	s.frame_gen_backend.deviceContext.vkDeviceProcAddr = &DeviceProcAddr;
+-	// Since SDK 2.1 the version structure is required (without it the newer API is refused).
+-	s.frame_gen_version              = {};
+-	s.frame_gen_version.header.type  = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
+-	s.frame_gen_version.header.pNext = &s.frame_gen_backend.header;
+-	s.frame_gen_version.version      = FFX_FRAMEGENERATION_VERSION;
+-	s.frame_gen_desc                 = {};
+-	s.frame_gen_desc.header.type     = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+-	s.frame_gen_desc.header.pNext    = &s.frame_gen_version.header;
+-	s.frame_gen_desc.flags = FFX_FRAMEGENERATION_ENABLE_ASYNC_WORKLOAD_SUPPORT |
+-	                         FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
+-	                         (s.depth_inverted ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0u) |
+-	                         (s.display_hdr ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0u) |
+-	                         (s.debug ? FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING : 0u);
+-	s.frame_gen_desc.displaySize      = {s.display.width, s.display.height};
+-	s.frame_gen_desc.maxRenderSize    = {max_width, max_height};
+-	s.frame_gen_desc.backBufferFormat = ffxApiGetSurfaceFormatVK(s.display_format);
+-	const auto result                 = s.create(&s.frame_gen_context, &s.frame_gen_desc.header, nullptr);
+-	if (result != FFX_API_RETURN_OK) {
++
++	// The runtime may offer several frame generation versions; the newest can need hardware other
++	// vendors lack (context creation then fails with FFX_API_RETURN_ERROR_RUNTIME_ERROR, as on Intel
++	// Arc). Each offered version is tried, newest first; ASTROHYBRID_FSRFG_VERSION=<prefix> picks
++	// one (e.g. "3.1"). Without async workload support last, for drivers that refuse it.
++	if (!s.frame_gen_versions_queried) {
++		s.frame_gen_versions_queried = true;
++		uint64_t                count = 0;
++		ffxQueryDescGetVersions query {};
++		query.header.type    = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
++		query.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
++		query.device         = &s.frame_gen_backend.deviceContext;
++		query.outputCount    = &count;
++		if (s.query != nullptr && s.query(nullptr, &query.header) == FFX_API_RETURN_OK && count > 0) {
++			std::vector<uint64_t>    ids(count);
++			std::vector<const char*> names(count);
++			query.versionIds   = ids.data();
++			query.versionNames = names.data();
++			(void)s.query(nullptr, &query.header);
++			const char* wanted = std::getenv("ASTROHYBRID_FSRFG_VERSION");
++			std::string offered;
++			for (uint64_t i = 0; i < count; i++) {
++				const std::string name = names[i] != nullptr ? names[i] : "?";
++				offered += (i == 0 ? "" : ", ") + name;
++				if (wanted != nullptr && wanted[0] != '\0' && std::strcmp(wanted, "auto") != 0 &&
++				    name.compare(0, std::strlen(wanted), wanted) != 0) {
++					continue;
++				}
++				s.frame_gen_version_ids.push_back(ids[i]);
++				s.frame_gen_version_names.push_back(name);
++			}
++			std::printf("FSR FG: frame generation versions offered: %s (ASTROHYBRID_FSRFG_VERSION=%s)\n",
++			            offered.c_str(), wanted != nullptr ? wanted : "auto");
++		} else {
++			std::printf("FSR FG: the runtime lists no frame generation versions; using its default\n");
++		}
++		std::fflush(stdout);
++	}
++
++	struct Attempt {
++		int  version; // index into frame_gen_version_ids, -1: the runtime's default
++		bool async_workload;
++	};
++	std::vector<Attempt> attempts;
++	if (s.frame_gen_version_ids.empty()) {
++		attempts.push_back({-1, true});
++	}
++	for (size_t i = 0; i < s.frame_gen_version_ids.size(); i++) {
++		attempts.push_back({static_cast<int>(i), true});
++	}
++	const size_t with_async = attempts.size();
++	for (size_t i = 0; i < with_async; i++) {
++		attempts.push_back({attempts[i].version, false});
++	}
++
++	ffxReturnCode_t    result = FFX_API_RETURN_ERROR;
++	ffxOverrideVersion override_version {};
++	for (const auto& attempt: attempts) {
++		// Since SDK 2.1 the version structure is required (without it the newer API is refused).
++		s.frame_gen_version              = {};
++		s.frame_gen_version.header.type  = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
++		s.frame_gen_version.header.pNext = &s.frame_gen_backend.header;
++		s.frame_gen_version.version      = FFX_FRAMEGENERATION_VERSION;
++		s.frame_gen_backend.header.pNext = nullptr;
++		if (attempt.version >= 0) {
++			override_version             = {};
++			override_version.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
++			override_version.versionId   = s.frame_gen_version_ids[static_cast<size_t>(attempt.version)];
++			s.frame_gen_backend.header.pNext = &override_version.header;
++		}
++		s.frame_gen_desc              = {};
++		s.frame_gen_desc.header.type  = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
++		s.frame_gen_desc.header.pNext = &s.frame_gen_version.header;
++		s.frame_gen_desc.flags = (attempt.async_workload ? FFX_FRAMEGENERATION_ENABLE_ASYNC_WORKLOAD_SUPPORT : 0u) |
++		                         FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
++		                         (s.depth_inverted ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0u) |
++		                         (s.display_hdr ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0u) |
++		                         (s.debug ? FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING : 0u);
++		s.frame_gen_desc.displaySize      = {s.display.width, s.display.height};
++		s.frame_gen_desc.maxRenderSize    = {max_width, max_height};
++		s.frame_gen_desc.backBufferFormat = ffxApiGetSurfaceFormatVK(s.display_format);
++		s.frame_gen_context               = nullptr;
++		g_ffx_descriptor_failures.store(0);
++		result = s.create(&s.frame_gen_context, &s.frame_gen_desc.header, nullptr);
++		const char* name = attempt.version >= 0 ? s.frame_gen_version_names[static_cast<size_t>(attempt.version)].c_str()
++		                                        : "default";
++		if (result == FFX_API_RETURN_OK) {
++			std::printf("FSR FG: frame generation version %s%s\n", name,
++			            attempt.async_workload ? "" : " (without async workload support)");
++			s.async = s.async && attempt.async_workload;
++			break;
++		}
++		std::printf("FSR FG: frame generation version %s%s could not be created (%u)\n", name,
++		            attempt.async_workload ? "" : " without async workload support", static_cast<unsigned>(result));
++		std::fflush(stdout);
++	}
++	s.frame_gen_backend.header.pNext = nullptr; // override_version goes out of scope
++	if (result == FFX_API_RETURN_OK && g_ffx_descriptor_failures.load() != 0) {
++		// Created, but without all of its descriptor sets: its dispatches would hang the GPU.
++		std::printf("FSR FG: FSR could not allocate %u descriptor set(s) (driver memory); dropping the context\n",
++		            g_ffx_descriptor_failures.load());
++		DestroyFrameGenContext();
++		result = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
++	}
++	if (result != FFX_API_RETURN_OK && !s.cap_render_to_display &&
++	    (max_width > s.display.width || max_height > s.display.height)) {
++		s.frame_gen_context     = nullptr;
++		s.cap_render_to_display = true;
++		std::printf("FSR FG: frame generation context creation failed (%u) for display %ux%u, render up to %ux%u; "
++		            "trying again at the display size (larger frames shown without generation)\n",
++		            static_cast<unsigned>(result), s.display.width, s.display.height, max_width, max_height);
++	} else if (result != FFX_API_RETURN_OK) {
+ 		s.frame_gen_context = nullptr;
+ 		s.frame_gen_failed  = true;
+ 		std::printf("FSR FG: frame generation context creation failed (%u) for display %ux%u, render up to %ux%u: off\n",
+ 		            static_cast<unsigned>(result), s.display.width, s.display.height, max_width, max_height);
+ 	} else {
+ 		s.first_configure = true;
++		std::printf("FSR FG: FSR allocated %u descriptor sets so far (largest set layout: %u descriptors)\n",
++		            g_ffx_sets_allocated.load(), g_ffx_largest_layout.load());
+ 		std::printf("FSR FG: frame generation context created, display %ux%u (format %d%s), render up to %ux%u, %s\n",
+ 		            s.display.width, s.display.height, static_cast<int>(s.display_format), s.display_hdr ? ", HDR" : "",
+ 		            max_width, max_height, s.async ? "async compute queue" : "game queue");
+@@ -787,7 +1079,11 @@ ffxReturnCode_t FrameGenerationCallback(ffxDispatchDescFrameGeneration* params,
+ 		std::scoped_lock slots(s.slot_mutex);
+ 		const auto&      slot = s.slots[params->frameID % SLOT_COUNT];
+ 		if (slot.valid && slot.frame == params->frameID && slot.depth != VK_NULL_HANDLE &&
+-		    slot.motion != VK_NULL_HANDLE) {
++		    slot.motion != VK_NULL_HANDLE &&
++		    (slot.width > s.frame_gen_desc.maxRenderSize.width || slot.height > s.frame_gen_desc.maxRenderSize.height)) {
++			skip = Skip::Larger;
++		} else if (slot.valid && slot.frame == params->frameID && slot.depth != VK_NULL_HANDLE &&
++		           slot.motion != VK_NULL_HANDLE) {
+ 			frame = slot;
+ 		} else {
+ 			skip = Skip::NoInputs;
+@@ -883,7 +1179,7 @@ void Summary() {
+ 	VideoMemory(video_used, video_budget);
+ 	std::printf("FSR FG 10s: %llu game presents, %llu generated (%.2f shown per game frame) | not generated:%s | "
+ 	            "inputs %llu, %ux%u, jitter %.3f %.3f px, frame %.1f ms, camera near %.3f far %.1f vfov %.1f deg | "
+-	            "HUD-less: %llu copies, %llu used, %llu unavailable | video memory %llu of %llu MiB\n",
++	            "HUD-less: %llu copies, %llu used, %llu unavailable | FSR descriptor sets %u | video memory %llu of %llu MiB\n",
+ 	            static_cast<unsigned long long>(s.presents), static_cast<unsigned long long>(s.generated),
+ 	            s.presents == 0 ? 1.0 : 1.0 + static_cast<double>(s.generated) / static_cast<double>(s.presents),
+ 	            text.empty() ? " none" : text.c_str(),
+@@ -894,7 +1190,7 @@ void Summary() {
+ 	            static_cast<unsigned long long>(s.hud_copies.exchange(0, std::memory_order_relaxed)),
+ 	            static_cast<unsigned long long>(s.hud_used),
+ 	            static_cast<unsigned long long>(s.hud_unavailable.exchange(0, std::memory_order_relaxed)),
+-	            static_cast<unsigned long long>(video_used >> 20), static_cast<unsigned long long>(video_budget >> 20));
++	            g_ffx_sets_allocated.load(), static_cast<unsigned long long>(video_used >> 20), static_cast<unsigned long long>(video_budget >> 20));
+ 	std::fflush(stdout);
+ 	s.hud_used = 0;
+ 	s.presents = s.generated = 0;
+@@ -930,10 +1226,17 @@ void OnDeviceReady(const DeviceInfo& info) {
+ 	if (FrameGenRequested()) {
+ 		if (info.extra_count == 3) {
+ 			s.frame_gen_active.store(true, std::memory_order_release);
+-			std::printf("FSR FG: frame generation on, queues %p (game) %p %p %p of family %u\n",
+-			            reinterpret_cast<void*>(info.game_queue), reinterpret_cast<void*>(info.extra_queues[0]),
+-			            reinterpret_cast<void*>(info.extra_queues[1]), reinterpret_cast<void*>(info.extra_queues[2]),
+-			            info.queue_family);
++			std::printf("FSR FG: frame generation on, queues %p (game, family %u) %p %p %p (family %u)\n",
++			            reinterpret_cast<void*>(info.game_queue), info.queue_family,
++			            reinterpret_cast<void*>(info.extra_queues[0]), reinterpret_cast<void*>(info.extra_queues[1]),
++			            reinterpret_cast<void*>(info.extra_queues[2]), info.extra_families[0]);
++			// Queues of another family: the interpolation reads Kyty's images, which belong to the
++			// graphics family, so it runs on the game queue unless ASTROHYBRID_FSRFG_ASYNC=1.
++			if (info.extra_families[0] != info.queue_family && !EnvIs("ASTROHYBRID_FSRFG_ASYNC", "1") && s.async) {
++				s.async = false;
++				std::printf("FSR FG: interpolation on the game queue (FSR's queues are of another family; "
++				            "ASTROHYBRID_FSRFG_ASYNC=1 to try async compute)\n");
++			}
+ 		} else {
+ 			std::printf("FSR FG: frame generation off (no extra queues)\n");
+ 		}
+@@ -1113,10 +1416,10 @@ bool CreateSwapchain(const VkSwapchainCreateInfoKHR& info, VkSwapchainKHR* swapc
+ 		std::printf("FSR FG: a second swapchain is created normally\n");
+ 		return false;
+ 	}
+-	const auto queue = [&](VkQueue handle, PFN_vkQueueSubmitFFXAPI submit) {
++	const auto queue = [&](VkQueue handle, uint32_t family, PFN_vkQueueSubmitFFXAPI submit) {
+ 		VkQueueInfoFFXAPI q {};
+ 		q.queue       = handle;
+-		q.familyIndex = s.device.queue_family;
++		q.familyIndex = family;
+ 		q.submitFunc  = submit;
+ 		return q;
+ 	};
+@@ -1128,10 +1431,10 @@ bool CreateSwapchain(const VkSwapchainCreateInfoKHR& info, VkSwapchainKHR* swapc
+ 	s.swapchain_desc.swapchain         = &handle;
+ 	s.swapchain_desc.allocator         = nullptr;
+ 	s.swapchain_desc.createInfo        = info;
+-	s.swapchain_desc.gameQueue         = queue(s.device.game_queue, &SubmitGameQueue);
+-	s.swapchain_desc.asyncComputeQueue = queue(s.device.extra_queues[0], nullptr);
+-	s.swapchain_desc.presentQueue      = queue(s.device.extra_queues[1], nullptr);
+-	s.swapchain_desc.imageAcquireQueue = queue(s.device.extra_queues[2], nullptr);
++	s.swapchain_desc.gameQueue         = queue(s.device.game_queue, s.device.queue_family, &SubmitGameQueue);
++	s.swapchain_desc.asyncComputeQueue = queue(s.device.extra_queues[0], s.device.extra_families[0], nullptr);
++	s.swapchain_desc.presentQueue      = queue(s.device.extra_queues[1], s.device.extra_families[1], nullptr);
++	s.swapchain_desc.imageAcquireQueue = queue(s.device.extra_queues[2], s.device.extra_families[2], nullptr);
+ 	s.swapchain_version                = {};
+ 	s.swapchain_version.header.type    = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_VK;
+ 	s.swapchain_version.version        = FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION;
+diff --git a/src/graphics/host_gpu/renderer/fsr.h b/src/graphics/host_gpu/renderer/fsr.h
+index 91fa2dd4..69cb5632 100644
+--- a/src/graphics/host_gpu/renderer/fsr.h
++++ b/src/graphics/host_gpu/renderer/fsr.h
+@@ -12,12 +12,16 @@
+ // SDK's signed Vulkan runtime is loaded at run time from ASTROHYBRID_FSR_PATH, else from the folder of
+ // this module: amd_fidelityfx_loader_vk.dll (also used by FSR upscaling, fsr.inc) and
+ // amd_fidelityfx_framegeneration_vk.dll next to it. Needs a build with KYTY_FFX_SDK_DIR; works on any
+-// Vulkan GPU with three spare queues in its graphics family.
++// Vulkan GPU with three spare queues in its graphics family, or in a compute family that can present
++// to the window (GPUs with one graphics queue, such as Intel Arc).
+ //
+ // ASTROHYBRID_FSRFG=1 (default 0; off with ASTROHYBRID_DLSSG=1): FSR frame generation, one generated
+ // frame per rendered frame.
+ //  - Three more queues of the graphics family are created (FSR's swapchain needs its own queues for
+-//    async compute, composition/present and image acquisition).
++//    async compute, composition/present and image acquisition). A graphics family with too few
++//    queues (Intel Arc has one) gives them from a compute family that presents to the window
++//    instead; the interpolation then runs on the game queue unless ASTROHYBRID_FSRFG_ASYNC=1, so
++//    Kyty's images are not used from another queue family.
+ //  - Kyty's swapchain is created through FSR's frame-interpolation swapchain: acquire and present
+ //    go through its replacement functions, and the presented image is left in
+ //    SHADER_READ_ONLY_OPTIMAL (what that swapchain expects) instead of PRESENT_SRC.
+@@ -56,6 +60,7 @@ struct DeviceInfo {
+ 	uint32_t         queue_family    = 0;
+ 	VkQueue          game_queue      = VK_NULL_HANDLE;
+ 	VkQueue          extra_queues[3] = {};
++	uint32_t         extra_families[3] = {}; // family of each extra queue
+ 	uint32_t         extra_count     = 0;
+ 	QueueLock        queue_lock      = nullptr;
+ };
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index c9d9f517..4542a7bd 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -703,6 +703,33 @@ static void PrintGpuCapabilities(GraphicContext& graphics, const vk::PhysicalDev
+ static uint32_t        g_fsr_first_queue = 0;
+ static uint32_t        g_fsr_queue_count = 0;
+ static GraphicContext* g_fsr_graphics    = nullptr;
++// The family FSR's queues come from: the graphics family, or (when it has too few queues, as on
++// Intel Arc with one graphics queue) a compute family that can present to the window
++// (FsrQueueFamily). g_fsr_surface is the window surface, set before the device is created.
++static uint32_t     g_fsr_queue_family = static_cast<uint32_t>(-1);
++static VkSurfaceKHR g_fsr_surface      = VK_NULL_HANDLE;
++
++// A family other than the graphics family with compute, presentation to the window surface and at
++// least three queues, for FSR's async compute, present and image acquire queues; -1 if none.
++static uint32_t FsrQueueFamily(vk::PhysicalDevice physical_device, uint32_t graphics_family,
++                               const std::vector<vk::QueueFamilyProperties>& families) {
++	if (g_fsr_surface == VK_NULL_HANDLE || VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceSurfaceSupportKHR == nullptr) {
++		return static_cast<uint32_t>(-1);
++	}
++	for (uint32_t family = 0; family < families.size(); family++) {
++		const auto flags = families[family].queueFlags;
++		if (family == graphics_family || families[family].queueCount < 3 || !(flags & vk::QueueFlagBits::eCompute)) {
++			continue;
++		}
++		VkBool32 present = VK_FALSE;
++		if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceSurfaceSupportKHR(
++		        static_cast<VkPhysicalDevice>(physical_device), family, g_fsr_surface, &present) == VK_SUCCESS &&
++		    present == VK_TRUE) {
++			return family;
++		}
++	}
++	return static_cast<uint32_t>(-1);
++}
+ 
+ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 	                                 const std::vector<const char*>& device_extensions) {
+@@ -735,14 +762,35 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 	       family_queue_count);
+ 
+ 	const std::array<float, 8> queue_priorities {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+-	std::array<vk::DeviceQueueCreateInfo, 2> queue_create_infos {};
++	std::array<vk::DeviceQueueCreateInfo, 3> queue_create_infos {};
+ 	auto&                      queue_create_info = queue_create_infos[0];
+ 	queue_create_info.queueFamilyIndex = queue_family;
+ 	queue_create_info.queueCount       = graphics.side_queue_index != 0 ? 2u : 1u;
+ 	queue_create_info.pQueuePriorities = queue_priorities.data();
+-	g_fsr_first_queue = queue_create_info.queueCount;
+-	g_fsr_queue_count = Fsr::ExtraQueues(family_queue_count, queue_create_info.queueCount);
+-	queue_create_info.queueCount += g_fsr_queue_count;
++	g_fsr_first_queue  = queue_create_info.queueCount;
++	g_fsr_queue_family = queue_family;
++	g_fsr_queue_count  = 0;
++	// ASTROHYBRID_FSRFG: three more graphics-family queues, else three of a compute family that can
++	// present (a GPU with a single graphics queue, e.g. Intel Arc).
++	if (Fsr::FrameGenRequested() && family_queue_count < queue_create_info.queueCount + 3) {
++		uint32_t count = 0;
++		physical_device.getQueueFamilyProperties(&count, nullptr);
++		std::vector<vk::QueueFamilyProperties> families(count);
++		physical_device.getQueueFamilyProperties(&count, families.data());
++		const uint32_t other = FsrQueueFamily(physical_device, queue_family, families);
++		if (other != static_cast<uint32_t>(-1)) {
++			g_fsr_queue_family = other;
++			g_fsr_first_queue  = 0;
++			g_fsr_queue_count  = 3;
++			std::printf("FSR FG: the graphics family has %u queue(s); using 3 queues of family %u (compute, presents)\n",
++			            family_queue_count, other);
++			std::fflush(stdout);
++		}
++	}
++	if (g_fsr_queue_family == queue_family) {
++		g_fsr_queue_count = Fsr::ExtraQueues(family_queue_count, queue_create_info.queueCount);
++		queue_create_info.queueCount += g_fsr_queue_count;
++	}
+ 	// KYTY_UPLOAD_DMA: one queue of a transfer-only family (the copy engines), for UploadDma.
+ 	// Not under RenderDoc, whose captures of the extra queue are not needed for analysis.
+ 	graphics.transfer_queue_family = static_cast<uint32_t>(-1);
+@@ -770,6 +818,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 		transfer.queueCount       = 1;
+ 		transfer.pQueuePriorities = queue_priorities.data();
+ 	}
++	if (g_fsr_queue_count != 0 && g_fsr_queue_family != queue_family) {
++		// A compute family: never the transfer-only family above.
++		auto& fsr_queues            = queue_create_infos[queue_create_count++];
++		fsr_queues.queueFamilyIndex = g_fsr_queue_family;
++		fsr_queues.queueCount       = g_fsr_queue_count;
++		fsr_queues.pQueuePriorities = queue_priorities.data();
++	}
+ 	std::printf("Kyty upload DMA queue: %s (KYTY_UPLOAD_DMA)\n",
+ 	            graphics.transfer_queue_family != static_cast<uint32_t>(-1)
+ 	                ? fmt::format("family {}", graphics.transfer_queue_family).c_str()
+@@ -2332,6 +2387,7 @@ void WindowContext::CreateVulkan() {
+ 	}
+ 
+ 	Dlss::ProbeBinaryImport("before device creation");
++	g_fsr_surface      = static_cast<VkSurfaceKHR>(surface);
+ 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, device_extensions);
+ 	if (graphic_ctx.device == nullptr) {
+ 		EXIT("Could not create device");
+@@ -2372,9 +2428,10 @@ void WindowContext::CreateVulkan() {
+ 		fsr.game_queue      = static_cast<VkQueue>(graphic_ctx.queue);
+ 		for (uint32_t i = 0; i < g_fsr_queue_count && i < 3; i++) {
+ 			vk::Queue queue = nullptr;
+-			graphic_ctx.device.getQueue(graphic_ctx.queue_family, g_fsr_first_queue + i, &queue);
+-			fsr.extra_queues[i] = static_cast<VkQueue>(queue);
+-			fsr.extra_count     = i + 1;
++			graphic_ctx.device.getQueue(g_fsr_queue_family, g_fsr_first_queue + i, &queue);
++			fsr.extra_queues[i]   = static_cast<VkQueue>(queue);
++			fsr.extra_families[i] = g_fsr_queue_family;
++			fsr.extra_count       = i + 1;
+ 		}
+ 		fsr.queue_lock = [](bool lock) {
+ 			if (lock) {
+-- 
+2.55.0.windows.5
+

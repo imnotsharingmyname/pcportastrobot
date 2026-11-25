@@ -28,6 +28,8 @@ Copy-Item (Join-Path $root 'Run-AstroHybrid.bat') $stage
 Copy-Item (Join-Path $root 'recomplauncher.json') $stage
 $noticePath = Join-Path $root 'NOTICE'
 if (Test-Path $noticePath) { Copy-Item $noticePath $stage }
+$zstdLicense = Join-Path $root 'licenses\ZstdSharp.license.txt'
+if (Test-Path $zstdLicense) { Copy-Item $zstdLicense (Join-Path $stage 'licenses') }
 foreach ($extraBat in 'Run-AstroHybrid-DLSS.bat', 'Run-AstroHybrid-FG.bat') {
     $batPath = Join-Path $root $extraBat
     if (Test-Path $batPath) { Copy-Item $batPath $stage }
@@ -65,6 +67,18 @@ if (Test-Path $pl) {
     New-Item -ItemType Directory -Force (Join-Path $run 'PipelineLists') | Out-Null
     Copy-Item (Join-Path $pl '*.kyplst') (Join-Path $run 'PipelineLists') -ErrorAction SilentlyContinue
 }
+# Intel XeSS Super Resolution (ASTROHYBRID_XESS): libxess.dll from the XeSS SDK's bin folder
+# (https://github.com/intel/xess), redistributable unmodified under the Intel Simplified Software
+# License; put it and that licence (as xess.license.txt) in Build\RunHybrid. Optional: without it
+# the XeSS choice keeps the game's own upscaling.
+if (Test-Path (Join-Path $src 'libxess.dll')) {
+    if (-not (Test-Path (Join-Path $src 'xess.license.txt'))) { throw 'libxess.dll without xess.license.txt' }
+    Copy-Item (Join-Path $src 'libxess.dll') $run
+    Copy-Item (Join-Path $src 'xess.license.txt') $run
+    Copy-Item (Join-Path $src 'xess.license.txt') (Join-Path $stage 'licenses')
+} else {
+    Write-Warning 'Build\RunHybrid\libxess.dll missing: the download will have no XeSS runtime'
+}
 
 # System fonts: the game lays out its menu and prompt text in the console's system fonts. The Noto
 # substitutes AnyPS5 accepts (SIL Open Font License, Tools\release\get_fonts.ps1 downloads them) go in
@@ -81,19 +95,22 @@ Get-ChildItem $fonts -Filter 'OFL-*.txt' | Copy-Item -Destination (Join-Path $st
 AstroHybrid $Version - Astro Bot (PPSA21567) native PC port
 ==========================================================
 
-You need your own decrypted PS5 dump of Astro Bot (the folder with eboot.bin, sce_module and sce_sys).
+You need your own decrypted PS5 dump of Astro Bot (a dump folder or standalone .zar).
 No game files are included here.
 
 1. Extract the zip into a new, empty folder with about 1 GB free (the game itself stays where your
-   dump is). To update an existing install, use the app's Update button or extract over that folder.
-2. Start AstroHybrid.exe. Setup asks for your dump folder, then builds the game for Windows from it
-   (about 2 minutes; your dump is only read, never changed).
+   source is). To update an existing install, use the app's Update button or extract over that folder.
+2. Start AstroHybrid.exe. Select your dump folder or any standalone .zar and click Check source.
+   The quick check validates the index and required startup files with byte progress; optional game-data
+   blocks are not all decompressed before Install. Setup builds the game for Windows in about 2 minutes
+   and only extracts the startup files it needs; your source is only read, never changed.
 3. The app picks the best settings for your PC once; change them on the Graphics and Controller pages.
 4. Press Play.
 
 Tested version: 01.019.000. Other versions are accepted: faster lighting and real-time game speed turn
 themselves off when the version's code differs, everything else works the same way.
 NVIDIA: DLSS needs an RTX card, frame generation an RTX 40 or 50.
+Intel XeSS (Graphics page, Upscaling): Intel Arc (XMX) and most other GPUs (Iris Xe, GTX 10+, Radeon RX).
 Controllers: DualSense, DualShock 4, Xbox, Switch Pro and compatible pads, generic pads.
 In game: F2 performance overlay, F11 or Alt+Enter fullscreen.
 Logs: Logs\hybrid-run.*.log, Logs\setup.log.

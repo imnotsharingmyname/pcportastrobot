@@ -261,7 +261,8 @@ namespace AstroHybrid.App.ViewModels
                 ResolveAutoGraphics();
                 bool fsrFrameGen = LauncherService.FsrFrameGenRuntimeAvailable(_rootDirectory);
                 if (HardwareInfo != null)
-                    Settings.Sanitize(HardwareInfo.SupportsDlss, HardwareInfo.SupportsFrameGeneration, HardwareInfo.SupportsReflex, HardwareInfo.MaxFrameGenMultiplier, fsrFrameGen);
+                    Settings.Sanitize(HardwareInfo.SupportsDlss, HardwareInfo.SupportsFrameGeneration, HardwareInfo.SupportsReflex, HardwareInfo.MaxFrameGenMultiplier, fsrFrameGen,
+                                      HardwareInfo.SupportsXess);
                 else
                     Settings.Sanitize(supportsFsrFrameGen: fsrFrameGen);
                 _settingsManager.Save(Settings);
@@ -474,8 +475,7 @@ namespace AstroHybrid.App.ViewModels
             if (problem == null)
                 return true;
 
-            bool dumpFound = !string.IsNullOrEmpty(Settings.GameDumpPath) &&
-                             System.IO.File.Exists(System.IO.Path.Combine(Settings.GameDumpPath, "eboot.bin"));
+            bool dumpFound = GameSource.Exists(Settings.GameDumpPath);
             var message = $"Astro Bot can't start: {problem}.\n\n" +
                           (dumpFound
                               ? "This usually means the game links are out of date. Repair the installation now?"
@@ -699,6 +699,11 @@ namespace AstroHybrid.App.ViewModels
             {
                 best.Upscale = 1;
                 best.LowLatency = true;
+            }
+            else if (pc.GpuVendor == "Intel" && pc.SupportsXess)
+            {
+                // Intel Arc and Iris Xe: Intel's own upscaler, on the XMX engines where the GPU has them.
+                best.Upscale = 3;
             }
 
             if (pc.RtxSeries >= 40)

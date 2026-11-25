@@ -77,6 +77,8 @@
                                   Style="{StaticResource ModernComboBoxStyle}" HorizontalAlignment="Left" Width="400"/>
                     </Grid>
 
+                    <TextBlock Text="{Binding XessNote}" Style="{StaticResource MutedTextStyle}" Margin="0,0,0,4" TextWrapping="Wrap"
+                               Visibility="{Binding ShowXessNote, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     <TextBlock Text="{Binding FrameGenNote}" Style="{StaticResource MutedTextStyle}" TextWrapping="Wrap"
                                Visibility="{Binding ShowFrameGen, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     <TextBlock Text="{Binding FpsLimitNote}" Style="{StaticResource MutedTextStyle}" Margin="0,4,0,0" TextWrapping="Wrap"

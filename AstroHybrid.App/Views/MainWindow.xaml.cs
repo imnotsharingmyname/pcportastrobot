@@ -103,21 +103,38 @@ namespace AstroHybrid.App.Views
     // Template Selector for page content
     public class PageTemplateSelector : IValueConverter
     {
+        // One view instance per page, reused on every navigation. Creating a new view per
+        // navigation also created a new view model each time, and every view model subscribes
+        // to MainWindowViewModel.PropertyChanged without unsubscribing, so the subscriber list
+        // (and the work done on every settings change) grew without bound as the user navigated.
+        private readonly System.Collections.Generic.Dictionary<LauncherPage, UserControl> _pages =
+            new System.Collections.Generic.Dictionary<LauncherPage, UserControl>();
+
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
             if (value is LauncherPage page)
             {
-                return page switch
+                if (!_pages.TryGetValue(page, out var view))
                 {
-                    LauncherPage.Home => new HomeView(),
-                    LauncherPage.GraphicsSettings => new GraphicsSettingsView(),
-                    LauncherPage.ControllerSettings => new ControllerSettingsView(),
-                    LauncherPage.AdvancedSettings => new AdvancedSettingsView(),
-                    LauncherPage.Installation => new InstallationView(),
-                    _ => new HomeView()
-                };
+                    view = page switch
+                    {
+                        LauncherPage.Home => (UserControl)new HomeView(),
+                        LauncherPage.GraphicsSettings => new GraphicsSettingsView(),
+                        LauncherPage.ControllerSettings => new ControllerSettingsView(),
+                        LauncherPage.AdvancedSettings => new AdvancedSettingsView(),
+                        LauncherPage.Installation => new InstallationView(),
+                        _ => new HomeView()
+                    };
+                    _pages[page] = view;
+                }
+                return view;
             }
-            return new HomeView();
+            if (!_pages.TryGetValue(LauncherPage.Home, out var fallback))
+            {
+                fallback = new HomeView();
+                _pages[LauncherPage.Home] = fallback;
+            }
+            return fallback;
         }
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

@@ -32,7 +32,9 @@ static class AstroBotLauncher
     static readonly string[] OverlayValues = { "", "fps", "compact", "full" };
     static readonly string[] SizeLabels = { "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440" };
     static readonly int[,] SizeValues = { { 1280, 720 }, { 1600, 900 }, { 1920, 1080 }, { 2560, 1440 } };
-    static readonly string[] UpscaleLabels = { "Game's own (default)", "NVIDIA DLSS - sharper image" };
+    // The "upscale" values the app writes too: 0 the game's own pass, 1 NVIDIA DLSS (RTX), 2 AMD FSR,
+    // 3 Intel XeSS (Intel Arc, most GPUs with DP4a).
+    static readonly string[] UpscaleLabels = { "Game's own (default)", "NVIDIA DLSS - sharper image (RTX)", "AMD FSR - sharper image", "Intel XeSS - sharper image (Intel Arc, most GPUs)" };
     static readonly string[] FrameGenLabels = { "Off (default)", "Auto - reach the target (recommended)", "Fixed 2x", "Fixed 3x", "Fixed 4x" };
     static readonly string[] TargetLabels = { "No lock - game as fast as it can", "50 FPS on screen", "60 FPS on screen (recommended)", "90 FPS on screen", "120 FPS on screen", "144 FPS on screen", "165 FPS on screen" };
     static readonly int[] TargetValues = { 0, 50, 60, 90, 120, 144, 165 };
@@ -84,6 +86,7 @@ static class AstroBotLauncher
     {
         public string Gpu = "unknown graphics card";
         public int RtxSeries;
+        public bool IntelXess; // Intel Arc / Iris Xe: XeSS is the recommended upscaler
         public string Cpu = "unknown CPU";
         public int Threads = Environment.ProcessorCount;
         public int RamGb;
@@ -116,6 +119,7 @@ static class AstroBotLauncher
 
         var m = Regex.Match(pc.Gpu, @"RTX\s*(\d{1,2})\d{2}", RegexOptions.IgnoreCase);
         if (m.Success) pc.RtxSeries = int.Parse(m.Groups[1].Value);
+        pc.IntelXess = Regex.IsMatch(pc.Gpu, @"Intel.*(?:\bArc\b|Iris\(R\)\s*Xe|Iris\s*Xe)", RegexOptions.IgnoreCase);
         try
         {
             var dm = new DevMode { dmSize = (short)Marshal.SizeOf(typeof(DevMode)) };
@@ -223,6 +227,11 @@ static class AstroBotLauncher
         }
         else if (pc.RtxSeries >= 20)
             why += "DLSS and Reflex (frame generation needs an RTX 40 or newer), game at a steady 30.";
+        else if (pc.IntelXess)
+        {
+            b.Upscale = 3;
+            why += "Intel XeSS (frame generation and Reflex need an NVIDIA RTX), game at a steady 30.";
+        }
         else
             why += "no NVIDIA RTX, so the game's own upscaling at a steady 30.";
         b.Why = why;
@@ -348,7 +357,7 @@ static class AstroBotLauncher
         var ultrawide = new CheckBox { Text = "Ultrawide 21:9 rendering", AutoSize = true, Checked = ReadBool(json, "ultrawide", false), Location = new Point(150, y) };
         form.Controls.Add(ultrawide);
         y += 34;
-        form.Controls.Add(new Label { Text = "NVIDIA RTX", Font = new Font("Segoe UI", 9f, FontStyle.Bold), AutoSize = true, Location = new Point(18, y) });
+        form.Controls.Add(new Label { Text = "Upscaling and NVIDIA RTX", Font = new Font("Segoe UI", 9f, FontStyle.Bold), AutoSize = true, Location = new Point(18, y) });
         y += 24;
         var upscale = AddRow(form, "Upscaling", UpscaleLabels, ReadInt(json, "upscale", 0, UpscaleLabels.Length), ref y);
         var framegen = AddRow(form, "Frame generation", FrameGenLabels, ReadInt(json, "fgmode", 0, FrameGenLabels.Length), ref y);
@@ -523,12 +532,25 @@ static class AstroBotLauncher
         psi.EnvironmentVariables["ASTROHYBRID_WINDOW_TITLE"] = "Astro Bot";
         // NVIDIA RTX options (OVERNIGHT.md 2026-11-12): DLSS and frame generation need the CUDA address
         // window in the PS5 memory map and the NVIDIA runtime files next to the game.
-        if (upscale.SelectedIndex != 0 || framegen.SelectedIndex != 0)
+        if (upscale.SelectedIndex == 1 || framegen.SelectedIndex != 0)
         {
             psi.EnvironmentVariables["ASTROHYBRID_CUDA_HOLE"] = "1";
             psi.EnvironmentVariables["ASTROHYBRID_DLSS_PATH"] = Path.Combine(root, @"Build\RunHybrid");
         }
-        if (upscale.SelectedIndex != 0) psi.EnvironmentVariables["ASTROHYBRID_DLSS"] = "1";
+        if (upscale.SelectedIndex == 1) psi.EnvironmentVariables["ASTROHYBRID_DLSS"] = "1";
+        // AMD FSR and Intel XeSS (kyty_gpu.dll, dlss.h / xess.h): their runtimes next to the game.
+        if (upscale.SelectedIndex == 2)
+        {
+            psi.EnvironmentVariables["ASTROHYBRID_FSR"] = "1";
+            psi.EnvironmentVariables["ASTROHYBRID_FSR_PATH"] = Path.Combine(root, @"Build\RunHybrid");
+        }
+        if (upscale.SelectedIndex == 3)
+        {
+            psi.EnvironmentVariables["ASTROHYBRID_XESS"] = "1";
+            // libxess.dll next to the game, else in the install folder (dropped there by hand).
+            psi.EnvironmentVariables["ASTROHYBRID_XESS_PATH"] = File.Exists(Path.Combine(root, @"Build\RunHybrid\libxess.dll")) || !File.Exists(Path.Combine(root, "libxess.dll"))
+                ? Path.Combine(root, @"Build\RunHybrid") : root;
+        }
         if (framegen.SelectedIndex != 0)
         {
             int mult, limit;

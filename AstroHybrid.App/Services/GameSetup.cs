@@ -116,15 +116,26 @@ namespace AstroHybrid.App.Services
             if (!IsReleaseLayout)
                 throw new InvalidOperationException("The runtime files are missing (tools\\relinker.exe or Build\\RunHybrid\\kyty_gpu.dll). Extract the whole download again.");
 
+            var selectedSource = dump;
+            string? archiveSource = null;
+            if (GameSource.IsArchiveFile(selectedSource))
+            {
+                Report(2, "Checking and extracting the required ZArchive setup files...");
+                var extractionProgress = progress == null ? null : new InlineProgress<ArchiveProgress>(p =>
+                    Report(Math.Min(4, 1 + p.Percent * 4 / 100), p.Message));
+                dump = GameSource.MaterializeForSetup(selectedSource, Path.Combine(_root, "Build", "ZarSource"), extractionProgress);
+                archiveSource = selectedSource;
+            }
+
             var (titleId, version) = ReadParam(dump);
             var features = new GameFeatures { TitleId = titleId, Version = version, SetupAt = DateTime.Now };
             var logPath = Path.Combine(_root, "Logs", "setup.log");
             Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
             void Log(string line) => File.AppendAllText(logPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {line}\r\n");
-            Log($"setup from {dump}: {titleId} {version}");
+            Log($"setup from {selectedSource}: {titleId} {version}");
 
-            Report(5, "Linking the game folder (nothing is copied into or changed in your dump)...");
-            BuildApp0(dump, Path.Combine(_runHybrid, "app0"), Log);
+            Report(5, "Linking the game folder (nothing is copied into or changed in your source)...");
+            BuildApp0(dump, Path.Combine(_runHybrid, "app0"), Log, archiveSource);
 
             var work = Path.Combine(_root, "Build", "work");
             DeleteTree(work);
@@ -179,7 +190,7 @@ namespace AstroHybrid.App.Services
             File.WriteAllText(Path.Combine(_runHybrid, GameFeatures.FileName),
                 JsonSerializer.Serialize(features, new JsonSerializerOptions { WriteIndented = true }));
             InstallationManager.SaveManifest(_root,
-                InstallationManager.CreateManifest(_root, dump, version, titleId, features.SetupAt));
+                InstallationManager.CreateManifest(_root, selectedSource, version, titleId, features.SetupAt));
             Report(100, "Done.");
             return features;
         }
@@ -344,8 +355,16 @@ namespace AstroHybrid.App.Services
             try
             {
                 var path = Path.Combine(dump, "sce_sys", "param.json");
-                if (!File.Exists(path)) return false;
-                using var document = JsonDocument.Parse(File.ReadAllText(path));
+                return File.Exists(path) && IsAstroBotMetadata(File.ReadAllText(path));
+            }
+            catch { return false; }
+        }
+
+        public static bool IsAstroBotMetadata(string json)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(json);
                 var root = document.RootElement;
                 if (root.TryGetProperty("conceptId", out var concept) &&
                     (concept.ValueKind == JsonValueKind.Number ? concept.GetRawText() : concept.ValueKind == JsonValueKind.String ? concept.GetString() : "") == AstroBotConceptId)
@@ -363,8 +382,12 @@ namespace AstroHybrid.App.Services
         public static (string TitleId, string Version) ReadParam(string dump)
         {
             var path = Path.Combine(dump, "sce_sys", "param.json");
-            if (!File.Exists(path)) return ("", "");
-            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            return File.Exists(path) ? ReadParamText(File.ReadAllText(path)) : ("", "");
+        }
+
+        public static (string TitleId, string Version) ReadParamText(string json)
+        {
+            using var document = JsonDocument.Parse(json);
             string Get(string name) => document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
             return (Get("titleId"), Get("contentVersion"));
         }
@@ -397,12 +420,14 @@ namespace AstroHybrid.App.Services
             return aliases;
         }
 
-        private void BuildApp0(string dump, string app0, Action<string> log)
+        private void BuildApp0(string dump, string app0, Action<string> log, string? archiveSource = null)
         {
+            if (archiveSource != null && IsUnderDirectory(archiveSource, app0))
+                throw new InvalidOperationException("The selected archive cannot be inside the generated app0 directory; move it elsewhere before setup.");
             DeleteTree(app0);
             Directory.CreateDirectory(app0);
             var archive = Path.Combine(_runHybrid, "app0.zar");
-            if (File.Exists(archive))
+            if (File.Exists(archive) && !SamePath(archiveSource, archive))
                 File.Delete(archive);
             var aliasesFile = Path.Combine(_runHybrid, App0AliasesFile);
             if (File.Exists(aliasesFile))
@@ -444,6 +469,11 @@ namespace AstroHybrid.App.Services
                     continue;
                 }
                 LinkOrCopy(file, Path.Combine(app0, Path.GetFileName(file)));
+            }
+            if (archiveSource != null)
+            {
+                LinkOrCopy(archiveSource, archive);
+                log("app0.zar: linked the selected standalone archive beside app0");
             }
             // args.txt carries the game's start arguments; some dumps leave it out, and without "-mode product" the
             // game starts as a development build that reads its data from the developer's host and stops at its
@@ -498,8 +528,20 @@ namespace AstroHybrid.App.Services
             return null;
         }
 
+        private static bool SamePath(string? left, string right)
+        {
+            return GameSource.SamePath(left, right);
+        }
+
+        private static bool IsUnderDirectory(string path, string directory)
+        {
+            var fullDirectory = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return Path.GetFullPath(path).StartsWith(fullDirectory, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static void LinkOrCopy(string source, string target)
         {
+            if (SamePath(source, target)) return;
             if (!CreateHardLink(target, source, IntPtr.Zero))
                 File.Copy(source, target, true);
         }

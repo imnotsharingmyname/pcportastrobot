@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
@@ -15,6 +16,9 @@ namespace AstroHybrid.App.ViewModels
         private readonly BuildManager _buildManager;
         private readonly SettingsManager _settingsManager;
         private readonly string _rootDirectory;
+        private readonly Func<string, IProgress<ArchiveProgress>?, CancellationToken, Task<GameInfo>> _validateSelectedSource;
+        private CancellationTokenSource? _validationCts;
+        private int _validationGeneration;
 
         private string _gameDumpPath = "";
         private GameInfo? _gameInfo;
@@ -28,11 +32,18 @@ namespace AstroHybrid.App.ViewModels
         private bool _showError;
 
         public SetupWizardViewModel(string rootDirectory)
+            : this(rootDirectory, null)
+        {
+        }
+
+        internal SetupWizardViewModel(string rootDirectory,
+            Func<string, IProgress<ArchiveProgress>?, CancellationToken, Task<GameInfo>>? validateSelectedSource)
         {
             _rootDirectory = rootDirectory;
             _gameValidator = new GameValidator();
             _buildManager = new BuildManager(rootDirectory);
             _settingsManager = new SettingsManager(rootDirectory);
+            _validateSelectedSource = validateSelectedSource ?? ((path, progress, token) => _gameValidator.ValidateGameDumpAsync(path, progress, token));
 
             _buildManager.ProgressChanged += msg => StatusMessage = msg;
             _buildManager.ProgressPercentChanged += pct => ProgressPercent = pct;
@@ -43,6 +54,7 @@ namespace AstroHybrid.App.ViewModels
             };
 
             BrowseCommand = new RelayCommand(BrowseForGameFolder);
+            BrowseArchiveCommand = new RelayCommand(BrowseForGameArchive);
             ValidateCommand = new RelayCommand(async () => await ValidateGameDumpAsync(), () => !IsValidating && !string.IsNullOrWhiteSpace(GameDumpPath));
             InstallCommand = new RelayCommand(async () => await InstallAsync(), () => !IsInstalling && GameInfo?.IsValid == true);
             // Setup cannot be stopped half-way (the game program would be left half-written); Cancel waits for it.
@@ -56,8 +68,10 @@ namespace AstroHybrid.App.ViewModels
             {
                 // A pasted path may come with quotes; a changed path needs a new check.
                 var path = (value ?? "").Trim().Trim('"').Trim();
-                if (SetProperty(ref _gameDumpPath, path) && GameInfo != null)
+                if (SetProperty(ref _gameDumpPath, path))
                 {
+                    CancelValidation();
+                    IsValidating = false;
                     GameInfo = null;
                     CanProceed = false;
                     ShowError = false;
@@ -104,7 +118,11 @@ namespace AstroHybrid.App.ViewModels
         public bool CanProceed
         {
             get => _canProceed;
-            set => SetProperty(ref _canProceed, value);
+            set
+            {
+                if (SetProperty(ref _canProceed, value))
+                    (InstallCommand as RelayCommand)?.RaiseCanExecuteChanged();
+            }
         }
 
         public string ValidationError
@@ -120,6 +138,7 @@ namespace AstroHybrid.App.ViewModels
         }
 
         public ICommand BrowseCommand { get; }
+        public ICommand BrowseArchiveCommand { get; }
         public ICommand ValidateCommand { get; }
         public ICommand InstallCommand { get; }
         public ICommand CancelCommand { get; }
@@ -129,39 +148,68 @@ namespace AstroHybrid.App.ViewModels
 
         private void BrowseForGameFolder()
         {
-            var dialog = new System.Windows.Forms.FolderBrowserDialog
+            using (var dialog = new System.Windows.Forms.FolderBrowserDialog
             {
                 Description = "Select your Astro Bot PS5 game dump folder (containing eboot.bin)",
                 ShowNewFolderButton = false
-            };
-
-            if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+            })
             {
-                GameDumpPath = dialog.SelectedPath;
+                if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                {
+                    GameDumpPath = dialog.SelectedPath;
+                    ValidateCommand.Execute(null);
+                }
+            }
+        }
+
+        private void BrowseForGameArchive()
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Select your Astro Bot ZArchive",
+                Filter = "ZArchive files (*.zar)|*.zar|All files (*.*)|*.*",
+                CheckFileExists = true,
+                Multiselect = false
+            };
+            if (dialog.ShowDialog() == true)
+            {
+                GameDumpPath = dialog.FileName;
                 ValidateCommand.Execute(null);
             }
         }
 
         private async Task ValidateGameDumpAsync()
         {
-            if (string.IsNullOrWhiteSpace(GameDumpPath))
-                return;
-
+            if (string.IsNullOrWhiteSpace(GameDumpPath)) return;
+            CancelValidation();
+            var generation = _validationGeneration;
+            var selectedPath = GameDumpPath;
+            var cts = new CancellationTokenSource();
+            _validationCts = cts;
+            GameInfo = null;
             IsValidating = true;
             ShowError = false;
             ValidationError = "";
-            StatusMessage = "Validating game dump...";
-            ProgressPercent = 10;
+            StatusMessage = "Validating game source...";
+            ProgressPercent = 0;
             CanProceed = false;
+            var progress = new Progress<ArchiveProgress>(p =>
+            {
+                if (generation != _validationGeneration || selectedPath != GameDumpPath) return;
+                ProgressPercent = p.Percent;
+                StatusMessage = p.TotalBytes > 0
+                    ? $"{p.Message} ({FormatBytes(p.ProcessedBytes)} / {FormatBytes(p.TotalBytes)})"
+                    : p.Message;
+            });
 
             try
             {
-                var info = await _gameValidator.ValidateGameDumpAsync(GameDumpPath);
+                var info = await _validateSelectedSource(selectedPath, progress, cts.Token);
+                if (generation != _validationGeneration || selectedPath != GameDumpPath || cts.IsCancellationRequested) return;
                 GameInfo = info;
-
                 if (info.IsValid)
                 {
-                    StatusMessage = "Game dump validated successfully!";
+                    StatusMessage = "Game source validated successfully!";
                     ProgressPercent = 100;
                     CanProceed = true;
                     if (!string.IsNullOrEmpty(info.Warning))
@@ -175,8 +223,17 @@ namespace AstroHybrid.App.ViewModels
                     ProgressPercent = 0;
                 }
             }
+            catch (OperationCanceledException)
+            {
+                if (generation == _validationGeneration)
+                {
+                    StatusMessage = "Validation cancelled";
+                    ProgressPercent = 0;
+                }
+            }
             catch (Exception ex)
             {
+                if (generation != _validationGeneration || selectedPath != GameDumpPath) return;
                 ValidationError = $"Validation error: {ex.Message}";
                 ShowError = true;
                 StatusMessage = "Validation error";
@@ -184,8 +241,26 @@ namespace AstroHybrid.App.ViewModels
             }
             finally
             {
-                IsValidating = false;
+                if (generation == _validationGeneration)
+                {
+                    IsValidating = false;
+                    if (ReferenceEquals(_validationCts, cts)) _validationCts = null;
+                }
+                cts.Dispose();
             }
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            string[] units = { "B", "KB", "MB", "GB", "TB" };
+            double size = bytes;
+            var unit = 0;
+            while (size >= 1024 && unit < units.Length - 1)
+            {
+                size /= 1024;
+                unit++;
+            }
+            return $"{size:0.0} {units[unit]}";
         }
 
         private async Task InstallAsync()
@@ -249,8 +324,21 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
+        private void CancelValidation()
+        {
+            _validationGeneration++;
+            _validationCts?.Cancel();
+            _validationCts?.Dispose();
+            _validationCts = null;
+        }
+
         private void Cancel()
         {
+            CancelValidation();
+            IsValidating = false;
+            GameInfo = null;
+            CanProceed = false;
+            ShowError = false;
             SetupCancelled?.Invoke();
         }
     }

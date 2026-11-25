@@ -1,0 +1,42 @@
+From 42801c91987072be54da0abf48cda14e36e5ca1e Mon Sep 17 00:00:00 2001
+From: Local Build <local@invalid>
+Date: Wed, 25 Nov 2026 03:18:13 +0000
+Subject: [PATCH 72/72] fix(xess): guard windows.h and XeSS runtime loader with
+ _WIN32 for Linux builds
+
+---
+ src/graphics/host_gpu/renderer/xess.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/host_gpu/renderer/xess.cpp b/src/graphics/host_gpu/renderer/xess.cpp
+index 04a31f29..1d9cca82 100644
+--- a/src/graphics/host_gpu/renderer/xess.cpp
++++ b/src/graphics/host_gpu/renderer/xess.cpp
+@@ -13,7 +13,7 @@
+ // prototypes only give the function types. Only kyty_emulator has 3rdparty/xess on its include
+ // path (CMakeLists.txt); the unit-test targets that compile every renderer source get the stubs
+ // at the end of this file.
+-#if __has_include(<xess/xess_vk.h>)
++#if defined(_WIN32) && __has_include(<xess/xess_vk.h>)
+ #define KYTY_XESS_HEADERS 1
+ #include <xess/xess.h>
+ #include <xess/xess_vk.h>
+@@ -21,6 +21,7 @@
+ #define KYTY_XESS_HEADERS 0
+ #endif
+ 
++#if defined(_WIN32)
+ #ifndef NOMINMAX
+ #define NOMINMAX
+ #endif
+@@ -28,6 +29,7 @@
+ #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
++#endif
+ 
+ #include <array>
+ #include <atomic>
+-- 
+2.55.0.windows.5
+

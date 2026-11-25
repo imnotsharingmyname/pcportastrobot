@@ -36,6 +36,12 @@ namespace AstroHybrid.App.Models
         public int MaxFrameGenMultiplier { get; set; } = 1;
         // Dedicated video memory in MiB from the display driver's registry entry; 0 when unknown.
         public int VramMb { get; set; } = 0;
+        // Intel XeSS Super Resolution (ASTROHYBRID_XESS, AppSettings.Upscale = 3): any GPU with DP4a -
+        // Intel Arc and Iris Xe, NVIDIA GTX 10 and newer, AMD RDNA. The renderer keeps the game's own
+        // upscaling by itself when XeSS cannot start, so this only decides what the launcher offers.
+        public bool SupportsXess { get; set; } = false;
+        // Intel Arc (Xe-HPG, Xe2, Xe3) runs XeSS on its XMX matrix engines: the best image and speed.
+        public bool XessXmx { get; set; } = false;
 
         public string KindLabel => IsDiscrete ? "discrete" : IsIntegrated ? "integrated" : "graphics";
 
@@ -80,6 +86,9 @@ namespace AstroHybrid.App.Models
         public bool SupportsFrameGeneration => SelectedGpu?.SupportsFrameGeneration == true;
         public bool SupportsReflex => SelectedGpu?.SupportsReflex == true;
         public int MaxFrameGenMultiplier => SelectedGpu?.MaxFrameGenMultiplier ?? 1;
+        public bool SupportsXess => SelectedGpu?.SupportsXess == true;
+        public bool XessXmx => SelectedGpu?.XessXmx == true;
+        public string GpuVendor => SelectedGpu?.Vendor ?? "";
 
         public string CpuName { get; set; } = "Unknown CPU";
         public int CpuThreads { get; set; } = Environment.ProcessorCount;

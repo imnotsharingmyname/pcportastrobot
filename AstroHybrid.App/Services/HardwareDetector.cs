@@ -275,8 +275,11 @@ namespace AstroHybrid.App.Services
             }
             else if (gpu.Vendor == "Intel")
             {
-                // Arc is a discrete card; UHD, HD, Iris and Iris Xe are the processor's graphics.
-                gpu.IsDiscrete = n.Contains("arc");
+                // "Arc" alone does not mean a card: Meteor Lake, Lunar Lake, Arrow Lake and Panther
+                // Lake processors call their graphics Arc too ("Arc Graphics", "Arc 140V", "Arc B390",
+                // as in the MSI Claw 8 AI+). The discrete cards are the A3xx-A7xx (Alchemist),
+                // B5xx-B7xx (Battlemage) and Arc Pro models; UHD, HD and Iris are integrated.
+                gpu.IsDiscrete = IsDiscreteIntel(gpu.Name, gpu.PnpDeviceId);
                 gpu.IsIntegrated = !gpu.IsDiscrete;
             }
             else if (gpu.Vendor == "AMD")
@@ -313,8 +316,59 @@ namespace AstroHybrid.App.Services
                 gpu.MaxFrameGenMultiplier = gpu.RtxSeries >= 50 ? 4 : 2; // RTX 50 supports up to 4x
             }
 
-            // AMD FSR support would go here if implemented
-            // Intel XeSS support would go here if implemented
+            // Intel XeSS Super Resolution (Vulkan): every GPU with DP4a. XeSS frame generation and
+            // Xe Low Latency exist only for D3D12, so this Vulkan port has no Intel frame generation.
+            ApplyXessSupport(gpu);
+        }
+
+        // PCI device IDs of Intel's discrete GPUs: DG1 (Iris Xe MAX, 0x4905-0x4909), Alchemist
+        // (0x56xx) and Battlemage (0xE2xx). Everything else from Intel is the processor's graphics.
+        internal static bool IsDiscreteIntel(string name, string pnp)
+        {
+            var id = Regex.Match(pnp ?? "", @"DEV_([0-9A-F]{4})", RegexOptions.IgnoreCase);
+            if (id.Success)
+            {
+                int dev = Convert.ToInt32(id.Groups[1].Value, 16);
+                return (dev >= 0x4905 && dev <= 0x4909) || (dev & 0xFF00) == 0x5600 || (dev & 0xFF00) == 0xE200;
+            }
+            // No PCI ID: the model number. A3xx-A7xx (with M for laptops) and B5xx-B9xx are cards,
+            // Arc Pro is a card; B3xx (Panther Lake), 1x0V/T and plain "Arc Graphics" are integrated.
+            var n = name ?? "";
+            if (Regex.IsMatch(n, @"Arc(?:\(TM\))?\s+Pro\b", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(n, @"Arc(?:\(TM\))?\s+A[3-7]\d{2}M?\b", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(n, @"Arc(?:\(TM\))?\s+B[5-9]\d{2}\b", RegexOptions.IgnoreCase)) return true;
+            return n.IndexOf("Iris Xe MAX", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        // XeSS needs DP4a (shader model 6.4 class hardware). Older generations are left out so the
+        // launcher does not offer it there; the renderer falls back by itself in any case.
+        internal static void ApplyXessSupport(GpuAdapter gpu)
+        {
+            var n = gpu.Name.ToLowerInvariant();
+            switch (gpu.Vendor)
+            {
+                case "Intel":
+                    // Gen12 (Xe-LP) and newer: Iris Xe, UHD 7xx, "Intel Graphics" (Meteor Lake) and Arc.
+                    // Gen9/Gen11 (HD, UHD 6xx, Iris Plus/Pro) have no DP4a.
+                    bool gen9 = n.Contains("hd graphics") || Regex.IsMatch(n, @"uhd graphics\s*6\d{2}") ||
+                                n.Contains("iris(r) plus") || n.Contains("iris plus") || n.Contains("iris pro");
+                    gpu.SupportsXess = !gen9;
+                    // XMX: Arc cards, and Arc integrated graphics from Lunar Lake on (Xe2/Xe3: 1x0V,
+                    // B3xx). Meteor Lake's "Arc Graphics" (Xe-LPG) uses the DP4a path.
+                    gpu.XessXmx = gpu.IsDiscrete || Regex.IsMatch(n, @"arc(?:\(tm\))?\s+(?:b\d{3}|1\d0[vt])");
+                    break;
+                case "NVIDIA":
+                    // Pascal (GTX 10) and newer; Maxwell and Kepler (GTX 9xx/7xx, GT 7xx) have no DP4a.
+                    gpu.SupportsXess = !Regex.IsMatch(n, @"gtx\s*(?:[4-9]\d{2})\b") && !n.Contains("gt 7");
+                    break;
+                case "AMD":
+                    // RDNA and newer; the old Radeon R5/R7/R9 and HD series are GCN 1-3.
+                    gpu.SupportsXess = !Regex.IsMatch(n, @"radeon\s*(?:\(tm\)\s*)?(?:r[579]|hd)\b");
+                    break;
+                default:
+                    gpu.SupportsXess = false;
+                    break;
+            }
         }
 
         private static bool SameAdapter(string a, string b)
@@ -350,6 +404,8 @@ namespace AstroHybrid.App.Services
                 parts.Add("DLSS + Frame Gen (2x) + Reflex");
             else if (info.RtxSeries >= 20)
                 parts.Add("DLSS + Reflex (no Frame Gen)");
+            else if (info.GpuVendor == "Intel" && info.SupportsXess)
+                parts.Add(info.XessXmx ? "Intel XeSS (XMX)" : "Intel XeSS");
             else
                 parts.Add("Game's own upscaling (no NVIDIA features)");
 

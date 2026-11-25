@@ -50,7 +50,7 @@
                     <StackPanel Margin="20,0,0,20">
                         <TextBlock Style="{StaticResource BodyTextStyle}">• A PS5 Astro Bot game dump (folder containing eboot.bin)</TextBlock>
                         <TextBlock Style="{StaticResource BodyTextStyle}">• Approximately 2-3 GB of free disk space</TextBlock>
-                        <TextBlock Style="{StaticResource BodyTextStyle}">• NVIDIA RTX GPU recommended for DLSS/Frame Generation</TextBlock>
+                        <TextBlock Style="{StaticResource BodyTextStyle}">• NVIDIA RTX GPU recommended for DLSS/Frame Generation; Intel XeSS and AMD FSR work on most other GPUs</TextBlock>
                     </StackPanel>
 
                     <TextBlock Style="{StaticResource MutedTextStyle}" TextWrapping="Wrap">
@@ -62,23 +62,36 @@
                 <StackPanel x:Name="GameSelectionPanel" Visibility="Collapsed">
                     <TextBlock Style="{StaticResource SectionHeaderStyle}" Text="Select Game Dump"/>
                     <TextBlock Style="{StaticResource BodyTextStyle}" Margin="0,0,0,10">
-                        Browse to your Astro Bot PS5 game dump folder (the folder containing eboot.bin):
+                        Browse to your Astro Bot PS5 dump folder or select a standalone ZArchive (.zar):
                     </TextBlock>
 
                     <Grid Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBox Grid.Column="0"
                                  Text="{Binding GameDumpPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource ModernTextBoxStyle}"
                                  ToolTip="Type or paste the dump folder, or use Browse"/>
-                        <Button Grid.Column="1" Content="Browse..."
+                        <Button Grid.Column="1" Content="Browse folder..."
                                 Command="{Binding BrowseCommand}"
                                 Style="{StaticResource SecondaryButtonStyle}"
-                                Margin="10,0,0,0" MinWidth="100"/>
+                                Margin="10,0,0,0" MinWidth="110" MinHeight="44"/>
+                        <Button Grid.Column="2" Content="Browse .zar..."
+                                Command="{Binding BrowseArchiveCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}"
+                                Margin="10,0,0,0" MinWidth="110" MinHeight="44"/>
                     </Grid>
+
+                    <StackPanel Margin="0,4,0,12"
+                                Visibility="{Binding IsValidating, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource MutedTextStyle}"
+                                   TextWrapping="Wrap" Margin="0,0,0,8"/>
+                        <ProgressBar Value="{Binding ProgressPercent}" Maximum="100" Height="10"
+                                     Style="{StaticResource ModernProgressBarStyle}"/>
+                    </StackPanel>
 
                     <TextBlock x:Name="ValidationErrorText"
                                Text="{Binding ValidationError}"
@@ -148,7 +161,7 @@
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
             <Button Content="Cancel" Command="{Binding CancelCommand}"
                     Style="{StaticResource SecondaryButtonStyle}" MinWidth="100"/>
-            <Button x:Name="NextButton" Content="Check folder" Command="{Binding ValidateCommand}"
+            <Button x:Name="NextButton" Content="Check source" Command="{Binding ValidateCommand}"
                     Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" Margin="10,0,0,0"/>
             <Button x:Name="InstallButton" Content="Install" Command="{Binding InstallCommand}"
                     Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" Margin="10,0,0,0"

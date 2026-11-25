@@ -220,14 +220,14 @@ namespace AstroHybrid.App.Models
         public bool IsSuperUltrawideSize => GetAspectRatio(Size) == 32;
 
         public void Sanitize(bool supportsDlss = true, bool supportsFrameGeneration = true, bool supportsReflex = true, int maxFrameGenMultiplier = 4,
-                             bool supportsFsrFrameGen = true)
+                             bool supportsFsrFrameGen = true, bool supportsXess = true)
         {
             if (Lighting < 0 || Lighting > 1) Lighting = 0;
             if (Fps < 0 || Fps > 6) Fps = 0;
             if (Speed < 0 || Speed > 5) Speed = 0;
             if (Size < 0 || Size >= ResolutionPresets.Length) Size = 2;
             if (Overlay < 0 || Overlay > 3) Overlay = 0;
-            if (Upscale < 0 || Upscale > 2) Upscale = 0;   // 0 game's own, 1 NVIDIA DLSS, 2 AMD FSR
+            if (Upscale < 0 || Upscale > 3) Upscale = 0;   // 0 game's own, 1 NVIDIA DLSS, 2 AMD FSR, 3 Intel XeSS
             if (FrameGenMode < 0 || FrameGenMode > 4) FrameGenMode = 0;
             if (FrameGenTarget < 0 || FrameGenTarget > 6) FrameGenTarget = 2;
             if (DlssQuality < 0 || DlssQuality > 3) DlssQuality = 0;
@@ -240,6 +240,7 @@ namespace AstroHybrid.App.Models
             else if (Ultrawide) Size = Size == 9 ? 8 : Size == 3 ? 5 : 4;
 
             if (!supportsDlss && Upscale == 1) Upscale = 0;
+            if (!supportsXess && Upscale == 3) Upscale = 0;
             // Frame generation is NVIDIA DLSS Frame Generation: it needs DLSS as the upscaler.
             // Allow RTX 30 override for experimental third-party FG layers (issue #198).
             bool effectiveFrameGenSupport = supportsFrameGeneration || AllowRtx30FgOverride;

@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using AstroHybrid.App.Models;
 
@@ -7,7 +10,7 @@ namespace AstroHybrid.App.Services
 {
     public class GameValidator
     {
-        private const long MinEbootSize = 100_000_000; // ~100MB minimum
+        private readonly long _minEbootSize;
         private const string ExpectedTitleId = "PPSA21567";
         private const string ExpectedVersion = "01.019.000";
 
@@ -22,8 +25,19 @@ namespace AstroHybrid.App.Services
             "Version 01.019.000 is the tested one and plays normally. You can still set this version up, but if it crashes, " +
             "please update your dump to 01.019.000.";
 
-        public async Task<GameInfo> ValidateGameDumpAsync(string gamePath)
+        public GameValidator(long minEbootSize = 100_000_000)
         {
+            if (minEbootSize < 0) throw new ArgumentOutOfRangeException(nameof(minEbootSize));
+            _minEbootSize = minEbootSize;
+        }
+
+        public async Task<GameInfo> ValidateGameDumpAsync(string gamePath, IProgress<ArchiveProgress>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            progress?.Report(new ArchiveProgress(0, "Checking the selected game source...", 0, 0));
+            if (GameSource.IsArchiveFile(gamePath))
+                return await Task.Run(() => ValidateArchive(gamePath, progress, cancellationToken), cancellationToken);
+
             var gameInfo = new GameInfo
             {
                 Path = gamePath,
@@ -55,10 +69,10 @@ namespace AstroHybrid.App.Services
                 var ebootInfo = new FileInfo(ebootPath);
                 gameInfo.EbootSize = ebootInfo.Length;
 
-                if (ebootInfo.Length < MinEbootSize)
+                if (ebootInfo.Length < _minEbootSize)
                 {
                     gameInfo.IsValid = false;
-                    gameInfo.ValidationError = $"eboot.bin is too small ({FormatBytes(ebootInfo.Length)}). Expected at least {FormatBytes(MinEbootSize)}. This may be an incomplete dump.";
+                    gameInfo.ValidationError = $"eboot.bin is too small ({FormatBytes(ebootInfo.Length)}). Expected at least {FormatBytes(_minEbootSize)}. This may be an incomplete dump.";
                     return gameInfo;
                 }
 
@@ -113,13 +127,127 @@ namespace AstroHybrid.App.Services
                 {
                     gameInfo.Version += " (not tested; features this version does not support turn themselves off)";
                 }
+                progress?.Report(new ArchiveProgress(100, "Game dump validated successfully.", 0, 0));
                 return gameInfo;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
                 gameInfo.IsValid = false;
                 gameInfo.ValidationError = $"Validation error: {ex.Message}";
                 return gameInfo;
+            }
+        }
+
+        private GameInfo ValidateArchive(string archivePath, IProgress<ArchiveProgress>? progress, CancellationToken cancellationToken)
+        {
+            var gameInfo = new GameInfo { Path = archivePath, LastValidated = DateTime.Now };
+            try
+            {
+                using (var archive = ZArchiveReader.Open(archivePath))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (archive.Entries.ContainsKey("app0/") && !archive.Entries.ContainsKey("eboot.bin"))
+                        return InvalidArchive(gameInfo, "The ZArchive has a wrapped app0/ root. Store app0's contents at the archive root, without an app0/ prefix.");
+                    if (!archive.Entries.TryGetValue("eboot.bin", out var eboot) || eboot.IsDirectory)
+                        return InvalidArchive(gameInfo, "eboot.bin not found in the selected ZArchive.");
+                    if (eboot.Size > long.MaxValue) return InvalidArchive(gameInfo, "eboot.bin is too large for this launcher.");
+                    gameInfo.EbootPath = archivePath + "!/eboot.bin";
+                    gameInfo.EbootSize = (long)eboot.Size;
+                    if (gameInfo.EbootSize < _minEbootSize)
+                        return InvalidArchive(gameInfo, $"eboot.bin is too small ({FormatBytes(gameInfo.EbootSize)}). Expected at least {FormatBytes(_minEbootSize)}. This may be an incomplete dump.");
+                    if (!archive.Entries.ContainsKey("sce_module/")) return InvalidArchive(gameInfo, "Required directory 'sce_module' not found in the ZArchive.");
+                    if (!archive.Entries.ContainsKey("sce_sys/")) return InvalidArchive(gameInfo, "Required directory 'sce_sys' not found in the ZArchive.");
+                    if (!archive.Entries.ContainsKey("data/")) return InvalidArchive(gameInfo, "Required directory 'data' not found in the ZArchive.");
+
+                    var required = new List<ArchiveEntry> { eboot };
+                    var moduleCount = 0;
+                    foreach (var entry in archive.Entries.Values)
+                    {
+                        if (entry.IsDirectory) continue;
+                        if (entry.Path.StartsWith("sce_module/", StringComparison.OrdinalIgnoreCase) &&
+                            entry.Path.EndsWith(".prx", StringComparison.OrdinalIgnoreCase) &&
+                            !entry.Path.EndsWith(".guest.prx", StringComparison.OrdinalIgnoreCase))
+                        {
+                            required.Add(entry);
+                            moduleCount++;
+                        }
+                        if (entry.Path.StartsWith("sce_sys/", StringComparison.OrdinalIgnoreCase)) required.Add(entry);
+                    }
+                    if (moduleCount == 0) return InvalidArchive(gameInfo, "No original .prx modules were found in 'sce_module'.");
+
+                    string paramJson = "";
+                    const ulong maxTextEntrySize = 16 * 1024 * 1024;
+                    if (archive.Entries.TryGetValue("sce_sys/param.json", out var paramEntry))
+                    {
+                        if (paramEntry.Size > maxTextEntrySize) return InvalidArchive(gameInfo, "sce_sys/param.json is unreasonably large.");
+                        paramJson = Encoding.UTF8.GetString(archive.ReadEntry(paramEntry, cancellationToken));
+                        try
+                        {
+                            var (titleId, version) = GameSetup.ReadParamText(paramJson);
+                            gameInfo.TitleId = titleId;
+                            gameInfo.Version = version;
+                        }
+                        catch (Exception ex) when (ex is System.Text.Json.JsonException || ex is InvalidOperationException) { }
+                    }
+                    if (archive.Entries.TryGetValue("param.sfx", out var sfxEntry))
+                    {
+                        if (sfxEntry.Size > maxTextEntrySize) return InvalidArchive(gameInfo, "param.sfx is unreasonably large.");
+                        ParseParamSfx(Encoding.UTF8.GetString(archive.ReadEntry(sfxEntry, cancellationToken)), gameInfo);
+                    }
+                    if (string.IsNullOrEmpty(gameInfo.TitleId))
+                    {
+                        var fileName = Path.GetFileName(archivePath);
+                        if (fileName.StartsWith("PPSA", StringComparison.OrdinalIgnoreCase) && fileName.Length >= 9)
+                            gameInfo.TitleId = fileName.Substring(0, 9).ToUpperInvariant();
+                    }
+                    if (!string.IsNullOrEmpty(gameInfo.TitleId) && gameInfo.TitleId != ExpectedTitleId &&
+                        (string.IsNullOrEmpty(paramJson) || !GameSetup.IsAstroBotMetadata(paramJson)))
+                        return InvalidArchive(gameInfo, $"This dump ({gameInfo.TitleId}) does not appear to be Astro Bot (PPSA21567 or another region of the same game).");
+
+                    var scaled = progress == null ? null : new InlineProgress<ArchiveProgress>(p =>
+                        progress.Report(new ArchiveProgress(Math.Min(99, 5 + p.Percent * 94 / 100), p.Message, p.ProcessedBytes, p.TotalBytes)));
+                    cancellationToken.ThrowIfCancellationRequested();
+                    archive.ValidateEntries(required, scaled, cancellationToken);
+                    ApplyVersionStatus(gameInfo);
+                    gameInfo.IsValid = true;
+                    gameInfo.ValidationError = null;
+                    progress?.Report(new ArchiveProgress(100, "ZArchive validated successfully.", 0, 0));
+                    return gameInfo;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                gameInfo.IsValid = false;
+                gameInfo.ValidationError = $"ZArchive validation failed: {ex.Message}";
+                return gameInfo;
+            }
+        }
+
+        private static GameInfo InvalidArchive(GameInfo gameInfo, string error)
+        {
+            gameInfo.IsValid = false;
+            gameInfo.ValidationError = error;
+            return gameInfo;
+        }
+
+        private static void ApplyVersionStatus(GameInfo gameInfo)
+        {
+            if (gameInfo.Version == KnownBadVersion)
+            {
+                gameInfo.Warning = KnownBadVersionWarning;
+                gameInfo.Version += " (known to crash: 01.019.000 recommended)";
+            }
+            else if (gameInfo.Version.Length > 0 && gameInfo.Version != ExpectedVersion)
+            {
+                gameInfo.Version += " (not tested; features this version does not support turn themselves off)";
             }
         }
 

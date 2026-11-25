@@ -441,6 +441,14 @@ namespace AstroHybrid.App.Services
                 env["ASTROHYBRID_FSR"] = "1";
                 env["ASTROHYBRID_FSR_PATH"] = Path.Combine(_rootDirectory, "Build", "RunHybrid");
             }
+            // Intel XeSS Super Resolution (XeSS SDK libxess.dll next to the game): any GPU with DP4a, on
+            // Intel Arc through its XMX engines; no CUDA window. The renderer keeps the game's own
+            // upscaling while XeSS builds its shaders and whenever it cannot start.
+            if (settings.Upscale == 3)
+            {
+                env["ASTROHYBRID_XESS"] = "1";
+                env["ASTROHYBRID_XESS_PATH"] = XessFolder(_rootDirectory);
+            }
             if (settings.Upscale == 1)
             {
                 env["ASTROHYBRID_DLSS"] = "1";
@@ -550,6 +558,16 @@ namespace AstroHybrid.App.Services
                    File.Exists(Path.Combine(folder, "amd_fidelityfx_framegeneration_vk.dll"));
         }
 
+        // Where libxess.dll is: next to the game (Build\RunHybrid, where the release puts it), else the
+        // install folder next to AstroHybrid.exe (where a player drops the XeSS SDK's DLL by hand).
+        public static string XessFolder(string rootDirectory)
+        {
+            var runHybrid = Path.Combine(rootDirectory, "Build", "RunHybrid");
+            if (File.Exists(Path.Combine(runHybrid, "libxess.dll"))) return runHybrid;
+            if (File.Exists(Path.Combine(rootDirectory, "libxess.dll"))) return rootDirectory;
+            return runHybrid;
+        }
+
         // The renderer selects a card by name (ANYPS5_GPU, a case-insensitive substring of the Vulkan
         // device name). The model token is used instead of the full Windows name so it still matches
         // the shorter name Vulkan reports ("NVIDIA GeForce RTX 4050 Laptop GPU" -> "RTX 4050").
@@ -557,7 +575,8 @@ namespace AstroHybrid.App.Services
         {
             var match = Regex.Match(name, @"(?:RTX|GTX)\s*\d{3,4}(?:\s*(?:Ti|SUPER))?", RegexOptions.IgnoreCase);
             if (match.Success) return match.Value;
-            match = Regex.Match(name, @"Arc\s*[AB]?\d{3}", RegexOptions.IgnoreCase);
+            // "Intel(R) Arc(TM) B390 GPU" -> "Arc(TM) B390", "Intel(R) Arc(TM) A770 Graphics" -> "Arc(TM) A770".
+            match = Regex.Match(name, @"Arc(?:\(TM\))?\s*(?:Pro\s*)?[AB]?\d{2,3}[MVT]?\b", RegexOptions.IgnoreCase);
             if (match.Success) return match.Value;
             match = Regex.Match(name, @"(?:UHD|Iris(?:\s*Xe)?|HD)\s*Graphics(?:\s*\d{3})?", RegexOptions.IgnoreCase);
             if (match.Success) return match.Value;

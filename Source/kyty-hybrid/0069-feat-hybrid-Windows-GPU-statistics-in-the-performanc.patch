@@ -1,0 +1,1443 @@
+From 9fe91fb3974a7220a91563d0422feb9c01bf406e Mon Sep 17 00:00:00 2001
+From: red-Geck0 <127088086+red-Geck0@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 12:42:11 +0700
+Subject: [PATCH 69/72] feat(hybrid): Windows GPU statistics in the performance
+ overlay
+
+The overlay's GPU rows were filled only on macOS (IOAccelerator): on
+Windows the compact panel showed "GPU n/a" and the full panel only the
+Vulkan device name and budget. hostGpuWindows.cpp now samples the
+adapter the renderer created its device on (SetHostGpuAdapter, by the
+Vulkan device LUID):
+
+- PDH "GPU Engine" / "GPU Adapter Memory" / "GPU Process Memory" (the
+  counters Task Manager shows, every vendor, English names so any
+  Windows language works): utilization of the busiest engine, 3D,
+  compute, copy and video engines, the emulator's own share, dedicated
+  and shared memory of the device and of the emulator;
+- DXGI: adapter name, dedicated/shared memory sizes, driver version;
+- Intel Graphics Control Library (ControlLib.dll from the Intel
+  driver, no Level Zero): clock, power from the energy counter,
+  temperature where the GPU has a sensor, throttle reasons, Xe cores;
+- D3DKMT adapter/node performance data: temperature, fan, power share
+  and clock on drivers that report them (NVIDIA, AMD);
+- ACPI thermal zones as the SoC temperature of an integrated GPU
+  without a sensor of its own.
+
+Everything is loaded at run time and optional. Tested in game on an
+Intel Arc B390 (Xe3, integrated, driver 32.0.101.9175): the compact
+panel reads "GPU 93% 2300 MHz 17.0 W 74 C SoC" in the world map, the
+full panel the 3D engine, the emulator's share and shared memory.
+D3DKMT perf data and the IGCL temperature are zero/unsupported there,
+so the panel shows the SoC temperature (ACPI).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/hostGpuWindows.cpp                 | 1055 +++++++++++++++++
+ src/common/hostGpuWindows.h                   |   38 +
+ src/common/hostStats.cpp                      |   11 +-
+ src/common/hostStats.h                        |   36 +-
+ .../presentation/performanceOverlay.cpp       |  125 +-
+ .../presentation/window/vulkanWindow.cpp      |   15 +
+ 6 files changed, 1271 insertions(+), 9 deletions(-)
+ create mode 100644 src/common/hostGpuWindows.cpp
+ create mode 100644 src/common/hostGpuWindows.h
+
+diff --git a/src/common/hostGpuWindows.cpp b/src/common/hostGpuWindows.cpp
+new file mode 100644
+index 00000000..138d5235
+--- /dev/null
++++ b/src/common/hostGpuWindows.cpp
+@@ -0,0 +1,1055 @@
++#include "common/hostGpuWindows.h"
++
++#include "common/config.h"
++
++#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
++
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h> // IWYU pragma: keep
++// clang-format off
++#include <dxgi1_4.h>
++#include <pdh.h>
++#include <pdhmsg.h>
++// clang-format on
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdio>
++#include <cstring>
++#include <cwchar>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++namespace Common {
++
++namespace {
++
++// ---------------------------------------------------------------------------------------------
++// The renderer's adapter (SetHostGpuAdapter).
++
++struct AdapterChoice {
++	bool        has_luid = false;
++	LUID        luid {};
++	std::string name;
++	uint32_t    vendor_id  = 0;
++	uint32_t    device_id  = 0;
++	bool        integrated = false;
++	bool        known      = false; // Set by the renderer (integrated is meaningful).
++	uint64_t    revision   = 0;
++};
++
++std::mutex    g_adapter_mutex;
++AdapterChoice g_adapter;
++
++AdapterChoice CurrentAdapter() {
++	std::scoped_lock lock(g_adapter_mutex);
++	return g_adapter;
++}
++
++bool SameLuid(const LUID& a, const LUID& b) {
++	return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
++}
++
++const char* VendorName(uint32_t vendor_id) {
++	switch (vendor_id) {
++		case 0x8086: return "Intel";
++		case 0x10DE: return "NVIDIA";
++		case 0x1002:
++		case 0x1022: return "AMD";
++		default: return "";
++	}
++}
++
++std::string Utf8(const wchar_t* text) {
++	if (text == nullptr || text[0] == L'\0') {
++		return {};
++	}
++	const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
++	if (size <= 1) {
++		return {};
++	}
++	std::string result(static_cast<size_t>(size), '\0');
++	WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
++	result.resize(static_cast<size_t>(size) - 1);
++	return result;
++}
++
++std::string Lower(std::string text) {
++	std::transform(text.begin(), text.end(), text.begin(), [](char c) {
++		return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
++	});
++	return text;
++}
++
++template <typename T>
++bool Resolve(HMODULE module, const char* name, T& function) {
++	function = module != nullptr
++	               ? reinterpret_cast<T>(reinterpret_cast<void*>(GetProcAddress(module, name)))
++	               : nullptr;
++	return function != nullptr;
++}
++
++// ---------------------------------------------------------------------------------------------
++// DXGI: names, memory sizes and driver versions of every adapter (read once).
++
++struct DxgiAdapter {
++	LUID        luid {};
++	std::string name;
++	uint32_t    vendor_id = 0;
++	uint32_t    device_id = 0;
++	uint64_t    dedicated = 0; // DedicatedVideoMemory
++	uint64_t    shared    = 0; // SharedSystemMemory
++	std::string driver;
++	bool        software = false;
++};
++
++const std::vector<DxgiAdapter>& DxgiAdapters() {
++	static const std::vector<DxgiAdapter> adapters = [] {
++		std::vector<DxgiAdapter> result;
++		auto* module = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++		using CreateFactory = HRESULT(WINAPI*)(REFIID, void**);
++		CreateFactory create = nullptr;
++		if (!Resolve(module, "CreateDXGIFactory1", create)) {
++			return result;
++		}
++		IDXGIFactory1* factory = nullptr;
++		if (FAILED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) ||
++		    factory == nullptr) {
++			return result;
++		}
++		for (UINT index = 0;; index++) {
++			IDXGIAdapter1* adapter = nullptr;
++			if (factory->EnumAdapters1(index, &adapter) != S_OK || adapter == nullptr) {
++				break;
++			}
++			DXGI_ADAPTER_DESC1 desc {};
++			if (SUCCEEDED(adapter->GetDesc1(&desc))) {
++				DxgiAdapter entry;
++				entry.luid      = desc.AdapterLuid;
++				entry.name      = Utf8(desc.Description);
++				entry.vendor_id = desc.VendorId;
++				entry.device_id = desc.DeviceId;
++				entry.dedicated = desc.DedicatedVideoMemory;
++				entry.shared    = desc.SharedSystemMemory;
++				entry.software  = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
++				// The user-mode driver version, as the Display adapter properties show it.
++				LARGE_INTEGER umd {};
++				if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd))) {
++					char text[48];
++					std::snprintf(text, sizeof(text), "%u.%u.%u.%u",
++					              static_cast<unsigned>(static_cast<uint32_t>(umd.HighPart) >> 16u),
++					              static_cast<unsigned>(static_cast<uint32_t>(umd.HighPart) & 0xffffu),
++					              static_cast<unsigned>(umd.LowPart >> 16u),
++					              static_cast<unsigned>(umd.LowPart & 0xffffu));
++					entry.driver = text;
++				}
++				result.push_back(std::move(entry));
++			}
++			adapter->Release();
++		}
++		factory->Release();
++		return result;
++	}();
++	return adapters;
++}
++
++const DxgiAdapter* FindDxgi(const LUID& luid) {
++	for (const auto& adapter: DxgiAdapters()) {
++		if (SameLuid(adapter.luid, luid)) {
++			return &adapter;
++		}
++	}
++	return nullptr;
++}
++
++// ---------------------------------------------------------------------------------------------
++// PDH: the "GPU Engine" and GPU memory counters (English names, so any Windows language works).
++
++struct PdhApi {
++	decltype(&PdhOpenQueryW)                open_query  = nullptr;
++	decltype(&PdhAddEnglishCounterW)        add_counter = nullptr;
++	decltype(&PdhCollectQueryData)          collect     = nullptr;
++	decltype(&PdhGetFormattedCounterArrayW) get_array   = nullptr;
++	decltype(&PdhCloseQuery)                close_query = nullptr;
++	bool                                    ready       = false;
++};
++
++const PdhApi& Pdh() {
++	static const PdhApi api = [] {
++		PdhApi result;
++		auto*  module = LoadLibraryExW(L"pdh.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++		result.ready  = Resolve(module, "PdhOpenQueryW", result.open_query) &&
++		               Resolve(module, "PdhAddEnglishCounterW", result.add_counter) &&
++		               Resolve(module, "PdhCollectQueryData", result.collect) &&
++		               Resolve(module, "PdhGetFormattedCounterArrayW", result.get_array) &&
++		               Resolve(module, "PdhCloseQuery", result.close_query);
++		return result;
++	}();
++	return api;
++}
++
++// Parsed instance names: "pid_1234_luid_0x00000000_0x00011949_phys_0_eng_3_engtype_3D" (GPU
++// Engine), "luid_0x00000000_0x00011949_phys_0" (GPU Adapter Memory), "pid_1234_luid_..._phys_0"
++// (GPU Process Memory).
++struct Instance {
++	bool        has_pid = false;
++	uint32_t    pid     = 0;
++	LUID        luid {};
++	uint32_t    phys   = 0;
++	uint32_t    engine = 0;
++	std::string type; // Lower case.
++};
++
++bool ParseInstance(const wchar_t* name, Instance& out) {
++	if (name == nullptr) {
++		return false;
++	}
++	if (const auto* pid = std::wcsstr(name, L"pid_"); pid != nullptr) {
++		out.has_pid = true;
++		out.pid     = static_cast<uint32_t>(std::wcstoul(pid + 4, nullptr, 10));
++	}
++	const auto* luid = std::wcsstr(name, L"luid_0x");
++	if (luid == nullptr) {
++		return false;
++	}
++	wchar_t*   end  = nullptr;
++	const auto high = std::wcstoul(luid + 7, &end, 16);
++	if (end == nullptr || std::wcsncmp(end, L"_0x", 3) != 0) {
++		return false;
++	}
++	const auto low     = std::wcstoul(end + 3, &end, 16);
++	out.luid.HighPart = static_cast<LONG>(high);
++	out.luid.LowPart  = static_cast<DWORD>(low);
++	if (const auto* phys = std::wcsstr(end, L"phys_"); phys != nullptr) {
++		out.phys = static_cast<uint32_t>(std::wcstoul(phys + 5, nullptr, 10));
++	}
++	if (const auto* engine = std::wcsstr(end, L"_eng_"); engine != nullptr) {
++		out.engine = static_cast<uint32_t>(std::wcstoul(engine + 5, nullptr, 10));
++	}
++	if (const auto* type = std::wcsstr(end, L"engtype_"); type != nullptr) {
++		out.type = Lower(Utf8(type + 8));
++	}
++	return true;
++}
++
++enum class EngineKind { Other, ThreeD, Compute, Copy, Video };
++
++EngineKind KindOf(const std::string& type) {
++	if (type.find("3d") != std::string::npos) {
++		return EngineKind::ThreeD;
++	}
++	if (type.find("compute") != std::string::npos) {
++		return EngineKind::Compute;
++	}
++	if (type.find("copy") != std::string::npos) {
++		return EngineKind::Copy;
++	}
++	if (type.find("video") != std::string::npos) {
++		return EngineKind::Video;
++	}
++	return EngineKind::Other;
++}
++
++// Every instance of a wildcard counter with valid data.
++template <typename F>
++void ForEachInstance(PDH_HCOUNTER counter, DWORD format, std::vector<std::byte>& buffer, F&& visit) {
++	const auto& pdh = Pdh();
++	if (counter == nullptr) {
++		return;
++	}
++	for (int attempt = 0; attempt < 3; attempt++) {
++		DWORD size  = 0;
++		DWORD count = 0;
++		auto  status = pdh.get_array(counter, format, &size, &count, nullptr);
++		if (status != static_cast<PDH_STATUS>(PDH_MORE_DATA) || size == 0) {
++			return;
++		}
++		buffer.resize(size);
++		auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
++		status      = pdh.get_array(counter, format, &size, &count, items);
++		if (status == static_cast<PDH_STATUS>(PDH_MORE_DATA)) {
++			continue; // Instances appeared in between.
++		}
++		if (status != ERROR_SUCCESS) {
++			return;
++		}
++		for (DWORD i = 0; i < count; i++) {
++			const auto& value = items[i].FmtValue;
++			if (value.CStatus == PDH_CSTATUS_VALID_DATA || value.CStatus == PDH_CSTATUS_NEW_DATA) {
++				visit(items[i].szName, value);
++			}
++		}
++		return;
++	}
++}
++
++// ---------------------------------------------------------------------------------------------
++// Intel Graphics Control Library (ControlLib.dll from the Intel driver). Only the few entry points
++// and structures used here are declared, laid out as the public IGCL 1.1 interface defines them.
++
++namespace Igcl {
++
++struct ApplicationId {
++	uint32_t data1;
++	uint16_t data2;
++	uint16_t data3;
++	uint8_t  data4[8];
++};
++
++struct InitArgs {
++	uint32_t      size;
++	uint8_t       version;
++	uint32_t      app_version;
++	uint32_t      flags; // 0: no Level Zero; power telemetry works without it.
++	uint32_t      supported_version;
++	ApplicationId application_uid;
++};
++static_assert(sizeof(InitArgs) == 36);
++
++struct DeviceProperties {
++	uint32_t size;
++	uint8_t  version;
++	void*    device_id; // LUID on Windows
++	uint32_t device_id_size;
++	int32_t  device_type; // 1 = graphics
++	uint32_t supported_functions;
++	uint64_t driver_version;
++	uint64_t firmware_version[3];
++	uint32_t pci_vendor_id;
++	uint32_t pci_device_id;
++	uint32_t rev_id;
++	uint32_t eus_per_sub_slice;
++	uint32_t sub_slices_per_slice;
++	uint32_t slices;
++	char     name[100];
++	uint32_t adapter_flags; // bit 0: integrated
++	uint32_t frequency;     // MHz
++	uint16_t subsys_id;
++	uint16_t subsys_vendor_id;
++	uint8_t  bdf[3];
++	uint32_t xe_cores; // version > 2
++	char     reserved[108];
++};
++static_assert(offsetof(DeviceProperties, name) == 88);
++static_assert(offsetof(DeviceProperties, xe_cores) == 204);
++static_assert(sizeof(DeviceProperties) == 320);
++
++struct TelemetryItem {
++	bool    supported;
++	int32_t units;
++	int32_t type;
++	union {
++		int8_t   i8;
++		uint8_t  u8;
++		int16_t  i16;
++		uint16_t u16;
++		int32_t  i32;
++		uint32_t u32;
++		int64_t  i64;
++		uint64_t u64;
++		float    f32;
++		double   f64;
++	} value;
++};
++static_assert(sizeof(TelemetryItem) == 24);
++
++struct PsuInfo {
++	bool          supported;
++	int32_t       type;
++	TelemetryItem energy;
++	TelemetryItem voltage;
++};
++
++struct PowerTelemetry {
++	uint32_t      size;
++	uint8_t       version;
++	TelemetryItem time_stamp; // s
++	TelemetryItem gpu_energy; // J, monotonic
++	TelemetryItem gpu_voltage;
++	TelemetryItem gpu_clock;       // MHz
++	TelemetryItem gpu_temperature; // C
++	TelemetryItem global_activity; // s busy, monotonic
++	TelemetryItem render_compute_activity;
++	TelemetryItem media_activity;
++	bool          gpu_power_limited;
++	bool          gpu_temperature_limited;
++	bool          gpu_current_limited;
++	bool          gpu_voltage_limited;
++	bool          gpu_utilization_limited;
++	TelemetryItem vram_energy;
++	TelemetryItem vram_voltage;
++	TelemetryItem vram_clock;
++	TelemetryItem vram_effective_clock;
++	TelemetryItem vram_read_counter;
++	TelemetryItem vram_write_counter;
++	TelemetryItem vram_temperature;
++	bool          vram_limited[5];
++	TelemetryItem total_card_energy;
++	PsuInfo       psu[5];
++	TelemetryItem fan_speed[5];
++	TelemetryItem gpu_vr_temperature;
++	TelemetryItem vram_vr_temperature;
++	TelemetryItem sa_vr_temperature;
++	TelemetryItem gpu_effective_clock;
++	TelemetryItem gpu_over_voltage_percent;
++	TelemetryItem gpu_power_percent;
++	TelemetryItem gpu_temperature_percent;
++	TelemetryItem vram_read_bandwidth;
++	TelemetryItem vram_write_bandwidth;
++};
++static_assert(offsetof(PowerTelemetry, gpu_clock) == 80);
++static_assert(offsetof(PowerTelemetry, vram_energy) == 208);
++static_assert(offsetof(PowerTelemetry, total_card_energy) == 384);
++static_assert(offsetof(PowerTelemetry, fan_speed) == 688);
++static_assert(offsetof(PowerTelemetry, gpu_vr_temperature) == 808);
++static_assert(sizeof(PowerTelemetry) == 1024);
++
++constexpr int32_t UNITS_RPM = 9; // ctl_units_t: fan speeds in RPM (others report percent)
++
++using InitFn          = int32_t(__cdecl*)(InitArgs*, void**);
++using EnumerateFn     = int32_t(__cdecl*)(void*, uint32_t*, void**);
++using PropertiesFn    = int32_t(__cdecl*)(void*, DeviceProperties*);
++using PowerTelemetryFn = int32_t(__cdecl*)(void*, PowerTelemetry*);
++
++std::optional<double> Value(const TelemetryItem& item) {
++	if (!item.supported) {
++		return std::nullopt;
++	}
++	switch (item.type) {
++		case 0: return item.value.i8;
++		case 1: return item.value.u8;
++		case 2: return item.value.i16;
++		case 3: return item.value.u16;
++		case 4: return item.value.i32;
++		case 5: return item.value.u32;
++		case 6: return static_cast<double>(item.value.i64);
++		case 7: return static_cast<double>(item.value.u64);
++		case 8: return item.value.f32;
++		case 9: return item.value.f64;
++		default: return std::nullopt;
++	}
++}
++
++struct Device {
++	void*       handle = nullptr;
++	bool        has_luid = false;
++	LUID        luid {};
++	std::string name;
++	uint32_t    device_id  = 0;
++	uint32_t    xe_cores   = 0;
++	uint32_t    max_mhz    = 0;
++	bool        integrated = false;
++};
++
++struct Library {
++	bool                ready     = false;
++	PowerTelemetryFn    telemetry = nullptr;
++	std::vector<Device> devices;
++	std::mutex          mutex; // Telemetry calls.
++};
++
++// Initialised once per process and kept: the overlay's sampler is recreated whenever the overlay
++// is shown again, and ControlLib's start-up enumerates every adapter.
++Library& Get() {
++	static Library library;
++	static std::once_flag once;
++	std::call_once(once, [] {
++		auto* module = LoadLibraryExW(L"ControlLib.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++		InitFn       init       = nullptr;
++		EnumerateFn  enumerate  = nullptr;
++		PropertiesFn properties = nullptr;
++		if (!Resolve(module, "ctlInit", init) || !Resolve(module, "ctlEnumerateDevices", enumerate) ||
++		    !Resolve(module, "ctlGetDeviceProperties", properties) ||
++		    !Resolve(module, "ctlPowerTelemetryGet", library.telemetry)) {
++			return;
++		}
++		InitArgs args {};
++		args.size        = sizeof(args);
++		args.app_version = (1u << 16u) | 1u; // IGCL 1.1
++		void* api        = nullptr;
++		if (init(&args, &api) != 0 || api == nullptr) {
++			return;
++		}
++		uint32_t count = 0;
++		if (enumerate(api, &count, nullptr) != 0 || count == 0) {
++			return;
++		}
++		std::vector<void*> handles(count);
++		if (enumerate(api, &count, handles.data()) != 0) {
++			return;
++		}
++		handles.resize(count);
++		for (auto* handle: handles) {
++			LUID             luid {};
++			DeviceProperties props {};
++			int32_t          result = -1;
++			for (int version = 3; version >= 0 && result != 0; version--) {
++				props                = {};
++				props.size           = sizeof(props);
++				props.version        = static_cast<uint8_t>(version);
++				props.device_id      = &luid;
++				props.device_id_size = sizeof(luid);
++				result               = properties(handle, &props);
++			}
++			if (result != 0 || props.device_type != 1) {
++				continue;
++			}
++			Device device;
++			device.handle     = handle;
++			device.has_luid   = luid.LowPart != 0 || luid.HighPart != 0;
++			device.luid       = luid;
++			device.name       = std::string(props.name, strnlen(props.name, sizeof(props.name)));
++			device.device_id  = props.pci_device_id;
++			device.xe_cores   = props.version >= 3 ? props.xe_cores : 0;
++			device.max_mhz    = props.frequency;
++			device.integrated = (props.adapter_flags & 1u) != 0;
++			library.devices.push_back(std::move(device));
++		}
++		library.ready = !library.devices.empty();
++		// The api handle stays open for the process.
++	});
++	return library;
++}
++
++} // namespace Igcl
++
++// ---------------------------------------------------------------------------------------------
++// D3DKMT adapter and node performance data (gdi32), as Task Manager reads the GPU temperature.
++
++namespace Kmt {
++
++struct OpenAdapterFromLuid {
++	LUID     luid;
++	uint32_t adapter;
++};
++struct CloseAdapter {
++	uint32_t adapter;
++};
++struct QueryAdapterInfo {
++	uint32_t adapter;
++	int32_t  type;
++	void*    data;
++	uint32_t size;
++};
++struct AdapterPerfData {
++	uint32_t physical_adapter_index;
++	uint64_t memory_frequency;
++	uint64_t max_memory_frequency;
++	uint64_t max_memory_frequency_oc;
++	uint64_t memory_bandwidth;
++	uint64_t pcie_bandwidth;
++	uint32_t fan_rpm;
++	uint32_t power;       // Tenths of a percent.
++	uint32_t temperature; // Tenths of a degree Celsius.
++	uint8_t  power_state_override;
++};
++static_assert(sizeof(AdapterPerfData) == 64);
++struct NodePerfData {
++	uint32_t node_ordinal;
++	uint32_t physical_adapter_index;
++	uint64_t frequency; // Hz
++	uint64_t max_frequency;
++	uint64_t max_frequency_oc;
++	uint32_t voltage;
++	uint32_t voltage_max;
++	uint32_t voltage_max_oc;
++	uint64_t max_transition_latency;
++};
++static_assert(sizeof(NodePerfData) == 56);
++
++constexpr int32_t QUERY_NODE_PERF_DATA    = 61; // KMTQAITYPE_NODEPERFDATA
++constexpr int32_t QUERY_ADAPTER_PERF_DATA = 62; // KMTQAITYPE_ADAPTERPERFDATA
++
++using OpenFn  = LONG(APIENTRY*)(OpenAdapterFromLuid*);
++using CloseFn = LONG(APIENTRY*)(const CloseAdapter*);
++using QueryFn = LONG(APIENTRY*)(const QueryAdapterInfo*);
++
++struct Api {
++	OpenFn  open  = nullptr;
++	CloseFn close = nullptr;
++	QueryFn query = nullptr;
++	bool    ready = false;
++};
++
++const Api& Get() {
++	static const Api api = [] {
++		Api   result;
++		auto* module = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++		result.ready = Resolve(module, "D3DKMTOpenAdapterFromLuid", result.open) &&
++		               Resolve(module, "D3DKMTCloseAdapter", result.close) &&
++		               Resolve(module, "D3DKMTQueryAdapterInfo", result.query);
++		return result;
++	}();
++	return api;
++}
++
++template <typename T>
++bool Query(uint32_t adapter, int32_t type, T& data) {
++	QueryAdapterInfo info {};
++	info.adapter = adapter;
++	info.type    = type;
++	info.data    = &data;
++	info.size    = sizeof(T);
++	return Get().query(&info) >= 0;
++}
++
++} // namespace Kmt
++
++} // namespace
++
++// ---------------------------------------------------------------------------------------------
++
++struct HostGpuSampler::Impl {
++	PDH_HQUERY   query            = nullptr;
++	PDH_HCOUNTER engines          = nullptr;
++	PDH_HCOUNTER adapter_dedicated = nullptr;
++	PDH_HCOUNTER adapter_shared   = nullptr;
++	PDH_HCOUNTER process_dedicated = nullptr;
++	PDH_HCOUNTER process_shared   = nullptr;
++	PDH_HCOUNTER thermal          = nullptr;
++	double       thermal_scale    = 1.0; // Counter units per kelvin.
++	bool         collected_once   = false;
++	std::vector<std::byte> buffer;
++	uint32_t     pid = GetCurrentProcessId();
++
++	// The adapter described, resolved again when the renderer names another one.
++	uint64_t choice_revision = ~0ull;
++	bool     has_target      = false;
++	LUID     target {};
++	uint32_t engine_3d = 0; // Node ordinal of the 3D engine (D3DKMT node data).
++
++	// D3DKMT handle of the target adapter (0: none).
++	uint32_t kmt_adapter = 0;
++	bool     kmt_tried   = false;
++
++	// IGCL previous counters, for power and activity rates.
++	const Igcl::Device*   igcl_device = nullptr;
++	bool                  igcl_tried  = false;
++	std::optional<double> last_time, last_energy, last_global, last_render;
++
++	Impl() {
++		const auto& pdh = Pdh();
++		if (!pdh.ready || pdh.open_query(nullptr, 0, &query) != ERROR_SUCCESS) {
++			query = nullptr;
++			return;
++		}
++		const auto add = [&](const wchar_t* path) -> PDH_HCOUNTER {
++			PDH_HCOUNTER counter = nullptr;
++			return pdh.add_counter(query, path, 0, &counter) == ERROR_SUCCESS ? counter : nullptr;
++		};
++		engines           = add(L"\\GPU Engine(*)\\Utilization Percentage");
++		adapter_dedicated = add(L"\\GPU Adapter Memory(*)\\Dedicated Usage");
++		adapter_shared    = add(L"\\GPU Adapter Memory(*)\\Shared Usage");
++		process_dedicated = add(L"\\GPU Process Memory(*)\\Dedicated Usage");
++		process_shared    = add(L"\\GPU Process Memory(*)\\Shared Usage");
++		thermal           = add(L"\\Thermal Zone Information(*)\\High Precision Temperature");
++		thermal_scale     = 10.0; // Tenths of a kelvin.
++		if (thermal == nullptr) {
++			thermal       = add(L"\\Thermal Zone Information(*)\\Temperature");
++			thermal_scale = 1.0;
++		}
++	}
++
++	~Impl() {
++		if (query != nullptr) {
++			Pdh().close_query(query);
++		}
++		CloseKmt();
++	}
++
++	Impl(const Impl&)            = delete;
++	Impl& operator=(const Impl&) = delete;
++
++	void CloseKmt() {
++		if (kmt_adapter != 0) {
++			Kmt::CloseAdapter close {kmt_adapter};
++			Kmt::Get().close(&close);
++			kmt_adapter = 0;
++		}
++		kmt_tried = false;
++	}
++
++	void SetTarget(const LUID& luid) {
++		if (has_target && SameLuid(target, luid)) {
++			return;
++		}
++		has_target  = true;
++		target      = luid;
++		igcl_device = nullptr;
++		igcl_tried  = false;
++		last_time.reset();
++		last_energy.reset();
++		last_global.reset();
++		last_render.reset();
++		CloseKmt();
++	}
++
++	void SampleEngines(HostStats& stats, const AdapterChoice& choice);
++	void SampleMemory(HostStats& stats) const;
++	void SampleIgcl(HostStats& stats, const AdapterChoice& choice);
++	void SampleKmt(HostStats& stats);
++	void SampleThermalZones(HostStats& stats);
++};
++
++void HostGpuSampler::Impl::SampleEngines(HostStats& stats, const AdapterChoice& choice) {
++	struct Entry {
++		Instance name;
++		double   value;
++	};
++	std::vector<Entry> entries;
++	ForEachInstance(engines, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, buffer,
++	                [&](const wchar_t* instance, const PDH_FMT_COUNTERVALUE& value) {
++		                Entry entry {};
++		                if (ParseInstance(instance, entry.name)) {
++			                entry.value = value.doubleValue;
++			                entries.push_back(std::move(entry));
++		                }
++	                });
++
++	// Without the renderer's LUID: the adapter this process uses most.
++	if (!has_target && !choice.has_luid) {
++		std::vector<std::pair<LUID, double>> ours;
++		for (const auto& entry: entries) {
++			if (!entry.name.has_pid || entry.name.pid != pid) {
++				continue;
++			}
++			auto it = std::find_if(ours.begin(), ours.end(),
++			                       [&](const auto& p) { return SameLuid(p.first, entry.name.luid); });
++			if (it == ours.end()) {
++				ours.emplace_back(entry.name.luid, entry.value);
++			} else {
++				it->second += entry.value;
++			}
++		}
++		const auto best = std::max_element(ours.begin(), ours.end(),
++		                                   [](const auto& a, const auto& b) { return a.second < b.second; });
++		if (best != ours.end() && best->second > 0.0) {
++			SetTarget(best->first);
++		}
++	}
++	if (!has_target || entries.empty()) {
++		return;
++	}
++
++	// Task Manager's figures: an engine's utilization is the sum over processes; the device's is
++	// that of its busiest engine.
++	struct Engine {
++		double     total = 0.0;
++		double     ours  = 0.0;
++		EngineKind kind  = EngineKind::Other;
++	};
++	std::unordered_map<uint64_t, Engine> by_engine;
++	for (const auto& entry: entries) {
++		if (!SameLuid(entry.name.luid, target)) {
++			continue;
++		}
++		auto& engine = by_engine[(static_cast<uint64_t>(entry.name.phys) << 32u) | entry.name.engine];
++		engine.total += entry.value;
++		engine.kind = KindOf(entry.name.type);
++		if (entry.name.has_pid && entry.name.pid == pid) {
++			engine.ours += entry.value;
++		}
++		if (engine.kind == EngineKind::ThreeD && entry.name.phys == 0) {
++			engine_3d = entry.name.engine;
++		}
++	}
++	if (by_engine.empty() || !collected_once) {
++		return; // The first collection has no interval yet.
++	}
++	double device = 0.0;
++	double ours   = 0.0;
++	std::optional<double> kinds[5];
++	for (const auto& [key, engine]: by_engine) {
++		const double total = std::clamp(engine.total, 0.0, 100.0);
++		device             = std::max(device, total);
++		ours               = std::max(ours, std::clamp(engine.ours, 0.0, 100.0));
++		auto& kind         = kinds[static_cast<size_t>(engine.kind)];
++		kind               = std::max(kind.value_or(0.0), total);
++	}
++	stats.gpu_percent         = device;
++	stats.gpu_process_percent = ours;
++	stats.gpu_3d_percent      = kinds[static_cast<size_t>(EngineKind::ThreeD)];
++	stats.gpu_compute_percent = kinds[static_cast<size_t>(EngineKind::Compute)];
++	stats.gpu_copy_percent    = kinds[static_cast<size_t>(EngineKind::Copy)];
++	stats.gpu_video_percent   = kinds[static_cast<size_t>(EngineKind::Video)];
++}
++
++void HostGpuSampler::Impl::SampleMemory(HostStats& stats) const {
++	if (!has_target) {
++		return;
++	}
++	std::vector<std::byte> scratch;
++	const auto sum = [&](PDH_HCOUNTER counter, bool own) -> std::optional<uint64_t> {
++		std::optional<uint64_t> total;
++		ForEachInstance(counter, PDH_FMT_LARGE, scratch,
++		                [&](const wchar_t* instance, const PDH_FMT_COUNTERVALUE& value) {
++			                Instance name;
++			                if (!ParseInstance(instance, name) || !SameLuid(name.luid, target) ||
++			                    (own && (!name.has_pid || name.pid != pid)) || value.largeValue < 0) {
++				                return;
++			                }
++			                total = total.value_or(0) + static_cast<uint64_t>(value.largeValue);
++		                });
++		return total;
++	};
++	stats.gpu_dedicated_used    = sum(adapter_dedicated, false);
++	stats.gpu_shared_used       = sum(adapter_shared, false);
++	stats.gpu_process_dedicated = sum(process_dedicated, true);
++	stats.gpu_process_shared    = sum(process_shared, true);
++}
++
++void HostGpuSampler::Impl::SampleIgcl(HostStats& stats, const AdapterChoice& choice) {
++	if (!igcl_tried) {
++		igcl_tried   = true;
++		auto& library = Igcl::Get();
++		if (library.ready) {
++			for (const auto& device: library.devices) {
++				if (device.has_luid ? SameLuid(device.luid, target)
++				                    : (choice.device_id != 0 && device.device_id == choice.device_id)) {
++					igcl_device = &device;
++					break;
++				}
++			}
++		}
++	}
++	if (igcl_device == nullptr) {
++		return;
++	}
++	const auto& device = *igcl_device;
++	if (device.xe_cores != 0) {
++		stats.gpu_cores     = device.xe_cores;
++		stats.gpu_core_name = "Xe cores";
++	}
++	if (device.max_mhz != 0) {
++		stats.gpu_max_clock_mhz = device.max_mhz;
++	}
++	if (stats.gpu_kind.empty()) {
++		stats.gpu_kind = device.integrated ? "integrated" : "discrete";
++	}
++
++	Igcl::PowerTelemetry telemetry {};
++	telemetry.size    = sizeof(telemetry);
++	telemetry.version = 1;
++	auto& library     = Igcl::Get();
++	{
++		std::scoped_lock lock(library.mutex);
++		if (library.telemetry(device.handle, &telemetry) != 0) {
++			return;
++		}
++	}
++	const auto now      = Igcl::Value(telemetry.time_stamp);
++	const auto energy   = Igcl::Value(telemetry.gpu_energy);
++	const auto global   = Igcl::Value(telemetry.global_activity);
++	const auto render   = Igcl::Value(telemetry.render_compute_activity);
++	if (now && last_time && *now > *last_time) {
++		const double elapsed = *now - *last_time;
++		if (energy && last_energy && *energy >= *last_energy) {
++			stats.gpu_power_w = (*energy - *last_energy) / elapsed;
++		}
++		// Busy time over wall time: the utilization when the engine counters are missing.
++		if (!stats.gpu_percent && global && last_global && *global >= *last_global) {
++			stats.gpu_percent = std::clamp((*global - *last_global) / elapsed * 100.0, 0.0, 100.0);
++		}
++		if (!stats.gpu_3d_percent && render && last_render && *render >= *last_render) {
++			stats.gpu_3d_percent = std::clamp((*render - *last_render) / elapsed * 100.0, 0.0, 100.0);
++		}
++	}
++	last_time   = now;
++	last_energy = energy;
++	last_global = global;
++	last_render = render;
++
++	if (const auto clock = Igcl::Value(telemetry.gpu_clock); clock && *clock > 0.0) {
++		stats.gpu_clock_mhz = *clock;
++	}
++	if (const auto temperature = Igcl::Value(telemetry.gpu_temperature);
++	    temperature && *temperature > 0.0 && *temperature < 150.0) {
++		stats.gpu_temperature_c = *temperature;
++	}
++	if (const auto percent = Igcl::Value(telemetry.gpu_power_percent); percent && *percent > 0.0) {
++		stats.gpu_power_percent = *percent;
++	}
++	for (const auto& fan: telemetry.fan_speed) {
++		if (const auto speed = Igcl::Value(fan); speed && fan.units == Igcl::UNITS_RPM && *speed > 0.0) {
++			stats.gpu_fan_rpm = static_cast<uint32_t>(*speed);
++			break;
++		}
++	}
++	std::string throttle;
++	const auto  reason = [&](bool limited, const char* name) {
++		if (limited) {
++			throttle += throttle.empty() ? std::string(name) : std::string(", ") + name;
++		}
++	};
++	reason(telemetry.gpu_power_limited, "power");
++	reason(telemetry.gpu_temperature_limited, "thermal");
++	reason(telemetry.gpu_current_limited, "current");
++	reason(telemetry.gpu_voltage_limited, "voltage");
++	stats.gpu_throttle = std::move(throttle);
++}
++
++void HostGpuSampler::Impl::SampleKmt(HostStats& stats) {
++	const auto& kmt = Kmt::Get();
++	if (!kmt.ready) {
++		return;
++	}
++	if (!kmt_tried) {
++		kmt_tried = true;
++		Kmt::OpenAdapterFromLuid open {};
++		open.luid = target;
++		if (kmt.open(&open) >= 0) {
++			kmt_adapter = open.adapter;
++		}
++	}
++	if (kmt_adapter == 0) {
++		return;
++	}
++	// Drivers without the data report zeros (Intel); only non-zero values are taken.
++	Kmt::AdapterPerfData adapter {};
++	if (Kmt::Query(kmt_adapter, Kmt::QUERY_ADAPTER_PERF_DATA, adapter)) {
++		if (!stats.gpu_temperature_c && adapter.temperature > 0 && adapter.temperature < 1500) {
++			stats.gpu_temperature_c = adapter.temperature / 10.0;
++		}
++		if (!stats.gpu_fan_rpm && adapter.fan_rpm > 0) {
++			stats.gpu_fan_rpm = adapter.fan_rpm;
++		}
++		if (!stats.gpu_power_percent && adapter.power > 0) {
++			stats.gpu_power_percent = adapter.power / 10.0;
++		}
++	}
++	Kmt::NodePerfData node {};
++	node.node_ordinal = engine_3d;
++	if (Kmt::Query(kmt_adapter, Kmt::QUERY_NODE_PERF_DATA, node)) {
++		if (!stats.gpu_clock_mhz && node.frequency > 0) {
++			stats.gpu_clock_mhz = static_cast<double>(node.frequency) / 1e6;
++		}
++		if (!stats.gpu_max_clock_mhz && node.max_frequency > 0) {
++			stats.gpu_max_clock_mhz = static_cast<double>(node.max_frequency) / 1e6;
++		}
++	}
++}
++
++void HostGpuSampler::Impl::SampleThermalZones(HostStats& stats) {
++	std::optional<double> hottest;
++	ForEachInstance(thermal, PDH_FMT_DOUBLE, buffer,
++	                [&](const wchar_t* /*instance*/, const PDH_FMT_COUNTERVALUE& value) {
++		                const double celsius = value.doubleValue / thermal_scale - 273.15;
++		                if (celsius > 0.0 && celsius < 125.0) {
++			                hottest = std::max(hottest.value_or(celsius), celsius);
++		                }
++	                });
++	if (hottest) {
++		stats.gpu_temperature_c      = *hottest;
++		stats.gpu_temperature_is_soc = true;
++	}
++}
++
++HostGpuSampler::HostGpuSampler(): m_impl(std::make_unique<Impl>()) {}
++
++HostGpuSampler::~HostGpuSampler() = default;
++
++void HostGpuSampler::Sample(HostStats& stats) {
++	auto&      s      = *m_impl;
++	const auto choice = CurrentAdapter();
++	if (choice.revision != s.choice_revision) {
++		s.choice_revision = choice.revision;
++		if (choice.has_luid) {
++			s.SetTarget(choice.luid);
++		}
++	}
++	if (s.query != nullptr) {
++		const bool collected = Pdh().collect(s.query) == ERROR_SUCCESS;
++		if (collected) {
++			s.SampleEngines(stats, choice);
++			s.collected_once = true;
++		}
++	}
++	// No LUID and no usage yet: the named adapter, else the first hardware adapter.
++	if (!s.has_target) {
++		const auto& adapters = DxgiAdapters();
++		const DxgiAdapter* pick = nullptr;
++		for (const auto& adapter: adapters) {
++			if (!adapter.software && !choice.name.empty() &&
++			    (Lower(adapter.name).find(Lower(choice.name)) != std::string::npos ||
++			     Lower(choice.name).find(Lower(adapter.name)) != std::string::npos)) {
++				pick = &adapter;
++				break;
++			}
++		}
++		for (const auto& adapter: adapters) {
++			if (pick == nullptr && !adapter.software) {
++				pick = &adapter;
++			}
++		}
++		if (pick == nullptr) {
++			return;
++		}
++		s.SetTarget(pick->luid);
++	}
++
++	const auto* dxgi      = FindDxgi(s.target);
++	const auto  vendor_id = choice.vendor_id != 0 ? choice.vendor_id : dxgi != nullptr ? dxgi->vendor_id : 0;
++	stats.gpu_model       = !choice.name.empty() ? choice.name : dxgi != nullptr ? dxgi->name : std::string();
++	stats.gpu_vendor      = VendorName(vendor_id);
++	if (choice.known) {
++		stats.gpu_kind = choice.integrated ? "integrated" : "discrete";
++	}
++	if (dxgi != nullptr) {
++		stats.gpu_driver = dxgi->driver;
++		if (dxgi->dedicated != 0) {
++			stats.gpu_dedicated_total = dxgi->dedicated;
++		}
++		if (dxgi->shared != 0) {
++			stats.gpu_shared_total = dxgi->shared;
++		}
++	}
++	if (s.query != nullptr && s.collected_once) {
++		s.SampleMemory(stats);
++	}
++	if (vendor_id == 0x8086) {
++		s.SampleIgcl(stats, choice);
++	}
++	s.SampleKmt(stats);
++	if (stats.gpu_kind.empty() && dxgi != nullptr) {
++		// No better source: integrated GPUs reserve little or no dedicated memory.
++		stats.gpu_kind = dxgi->dedicated < (512ull << 20u) ? "integrated" : "discrete";
++	}
++	if (!stats.gpu_temperature_c && stats.gpu_kind == "integrated") {
++		s.SampleThermalZones(stats);
++	}
++}
++
++void SetHostGpuAdapter(const uint8_t* luid, const char* name, uint32_t vendor_id, uint32_t device_id,
++                       bool integrated) {
++	std::scoped_lock lock(g_adapter_mutex);
++	g_adapter.has_luid = luid != nullptr;
++	g_adapter.luid     = {};
++	if (luid != nullptr) {
++		std::memcpy(&g_adapter.luid.LowPart, luid, 4);
++		std::memcpy(&g_adapter.luid.HighPart, luid + 4, 4);
++	}
++	g_adapter.name       = name != nullptr ? name : "";
++	g_adapter.vendor_id  = vendor_id;
++	g_adapter.device_id  = device_id;
++	g_adapter.integrated = integrated;
++	g_adapter.known      = true;
++	g_adapter.revision++;
++}
++
++} // namespace Common
++
++#else
++
++namespace Common {
++
++void SetHostGpuAdapter(const uint8_t* /*luid*/, const char* /*name*/, uint32_t /*vendor_id*/,
++                       uint32_t /*device_id*/, bool /*integrated*/) {}
++
++} // namespace Common
++
++#endif
+diff --git a/src/common/hostGpuWindows.h b/src/common/hostGpuWindows.h
+new file mode 100644
+index 00000000..aa614eed
+--- /dev/null
++++ b/src/common/hostGpuWindows.h
+@@ -0,0 +1,38 @@
++#ifndef KYTY_COMMON_HOST_GPU_WINDOWS_H_
++#define KYTY_COMMON_HOST_GPU_WINDOWS_H_
++
++#include "common/hostStats.h"
++
++#include <memory>
++
++namespace Common {
++
++// Windows GPU statistics for HostStatsSampler (hostStats.cpp). Every source is loaded at run time
++// and optional; a missing one leaves its HostStats fields unset:
++//  - PDH "GPU Engine", "GPU Adapter Memory", "GPU Process Memory" (what Task Manager shows, every
++//    vendor): utilization by engine kind, the emulator's share, dedicated and shared memory;
++//  - DXGI: adapter name, memory sizes and driver version, matched by LUID;
++//  - Intel Graphics Control Library (ControlLib.dll, installed with the Intel driver): clock,
++//    power from the energy counter, temperature, throttle reasons, Xe cores;
++//  - D3DKMT adapter/node performance data (the GPU temperature in Task Manager): temperature,
++//    fan, power share and clock on drivers that report them (NVIDIA, AMD; Intel reports zeros);
++//  - PDH "Thermal Zone Information": the hottest ACPI zone as the SoC temperature of an
++//    integrated GPU that has no sensor of its own.
++// Not thread-safe; HostStatsSampler calls it from one thread. The first sample has no rates.
++class HostGpuSampler final {
++public:
++	HostGpuSampler();
++	~HostGpuSampler();
++	HostGpuSampler(const HostGpuSampler&)            = delete;
++	HostGpuSampler& operator=(const HostGpuSampler&) = delete;
++
++	void Sample(HostStats& stats);
++
++private:
++	struct Impl;
++	std::unique_ptr<Impl> m_impl;
++};
++
++} // namespace Common
++
++#endif /* KYTY_COMMON_HOST_GPU_WINDOWS_H_ */
+diff --git a/src/common/hostStats.cpp b/src/common/hostStats.cpp
+index 12c9f135..f3a9df0b 100644
+--- a/src/common/hostStats.cpp
++++ b/src/common/hostStats.cpp
+@@ -1,6 +1,9 @@
+ #include "common/hostStats.h"
+ 
+ #include "common/config.h"
++#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
++#include "common/hostGpuWindows.h"
++#endif
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -67,9 +70,11 @@ uint64_t FileTimeTo100Ns(const FILETIME& time) {
+ 	return (static_cast<uint64_t>(time.dwHighDateTime) << 32u) | time.dwLowDateTime;
+ }
+ 
+-struct PlatformState {};
++struct PlatformState {
++	HostGpuSampler gpu; // hostGpuWindows.cpp
++};
+ 
+-void SamplePlatform(PlatformState& /*state*/, HostStats& stats, Counters& now) {
++void SamplePlatform(PlatformState& state, HostStats& stats, Counters& now) {
+ 	const auto process = GetCurrentProcess();
+ 	FILETIME   creation {};
+ 	FILETIME   exit {};
+@@ -107,6 +112,8 @@ void SamplePlatform(PlatformState& /*state*/, HostStats& stats, Counters& now) {
+ 		                            : system.dwMemoryLoad >= 80 ? MemoryPressure::Warning
+ 		                                                        : MemoryPressure::Normal;
+ 	}
++
++	state.gpu.Sample(stats);
+ }
+ 
+ #else
+diff --git a/src/common/hostStats.h b/src/common/hostStats.h
+index 24d2595a..cb87967b 100644
+--- a/src/common/hostStats.h
++++ b/src/common/hostStats.h
+@@ -54,7 +54,7 @@ struct HostStats {
+ 	std::optional<double> disk_read_per_s;
+ 	std::optional<double> disk_write_per_s;
+ 
+-	// GPU, whole device (macOS IOAccelerator).
++	// GPU, whole device (macOS IOAccelerator; Windows: hostGpuWindows.cpp).
+ 	std::string             gpu_model;
+ 	std::optional<uint32_t> gpu_cores;
+ 	std::optional<double>   gpu_percent;
+@@ -63,8 +63,42 @@ struct HostStats {
+ 	std::optional<uint64_t> gpu_memory_in_use; // System memory the GPU driver has in use.
+ 	std::optional<uint64_t> gpu_memory_allocated;
+ 	std::optional<uint64_t> gpu_recoveries; // GPU resets since boot.
++
++	// GPU on Windows (hostGpuWindows.cpp): the adapter the renderer uses (SetHostGpuAdapter), read
++	// from the counters Task Manager shows for every vendor, DXGI, and the driver's own telemetry
++	// where it has one (Intel IGCL, else D3DKMT performance data). Missing values stay unset.
++	std::string             gpu_vendor;    // "Intel", "NVIDIA", "AMD", or empty.
++	std::string             gpu_kind;      // "integrated", "discrete", or empty.
++	std::string             gpu_core_name; // What gpu_cores counts ("Xe cores"); empty: "cores".
++	std::string             gpu_driver;    // Driver version, e.g. "32.0.101.9175".
++	std::optional<double>   gpu_process_percent; // The emulator's own share, busiest engine, 0-100.
++	std::optional<double>   gpu_3d_percent;      // Busiest engine of each kind, whole device.
++	std::optional<double>   gpu_compute_percent;
++	std::optional<double>   gpu_copy_percent;
++	std::optional<double>   gpu_video_percent;
++	std::optional<double>   gpu_clock_mhz;
++	std::optional<double>   gpu_max_clock_mhz;
++	std::optional<double>   gpu_power_w;
++	std::optional<double>   gpu_power_percent; // Of the board power limit.
++	std::optional<double>   gpu_temperature_c;
++	bool                    gpu_temperature_is_soc = false; // ACPI thermal zone (integrated GPUs).
++	std::optional<uint32_t> gpu_fan_rpm;
++	std::string             gpu_throttle; // What limits the clock now ("power", "thermal", ...).
++	std::optional<uint64_t> gpu_dedicated_used;  // Whole device, all processes.
++	std::optional<uint64_t> gpu_dedicated_total;
++	std::optional<uint64_t> gpu_shared_used;     // System RAM the GPU uses (all of it on an iGPU).
++	std::optional<uint64_t> gpu_shared_total;
++	std::optional<uint64_t> gpu_process_dedicated; // The emulator's own.
++	std::optional<uint64_t> gpu_process_shared;
+ };
+ 
++// The adapter the renderer created its device on, so host statistics describe that GPU and not
++// another one (laptops and handhelds list several). luid: VkPhysicalDeviceIDProperties::deviceLUID
++// (nullptr when the driver gives none); vendor_id/device_id: PCI IDs. Any thread; Windows only,
++// a no-op elsewhere.
++void SetHostGpuAdapter(const uint8_t* luid, const char* name, uint32_t vendor_id, uint32_t device_id,
++                       bool integrated);
++
+ // May block for a few milliseconds (thread enumeration, OS registry reads), so call it off the
+ // render thread. The first sample has no rates.
+ class HostStatsSampler final {
+diff --git a/src/graphics/presentation/performanceOverlay.cpp b/src/graphics/presentation/performanceOverlay.cpp
+index 1b784f95..c2c90591 100644
+--- a/src/graphics/presentation/performanceOverlay.cpp
++++ b/src/graphics/presentation/performanceOverlay.cpp
+@@ -308,6 +308,115 @@ void TransferRow(const Snapshot& shown, const char* label, Counter upload, Count
+ 	    Throughput(Rate(shown, upload)) + " up / " + Throughput(Rate(shown, download)) + " down");
+ }
+ 
++// ImGui's default font covers Latin-1, so the degree sign is drawn.
++constexpr const char* DEGREES_C = "\xC2\xB0"
++                                  "C";
++
++std::string Temperature(const Common::HostStats& host) {
++	if (!host.gpu_temperature_c) {
++		return "n/a";
++	}
++	return Fmt("%.0f%s%s", *host.gpu_temperature_c, DEGREES_C,
++	           host.gpu_temperature_is_soc ? " (SoC, ACPI)" : "");
++}
++
++// "45%  1850 MHz  12.3 W  68 C": the GPU line of the compact panel.
++std::string GpuSummary(const Common::HostStats& host) {
++	std::string text = Percent(host.gpu_percent);
++	if (host.gpu_clock_mhz) {
++		text += Fmt("  %.0f MHz", *host.gpu_clock_mhz);
++	}
++	if (host.gpu_power_w) {
++		text += Fmt("  %.1f W", *host.gpu_power_w);
++	}
++	if (host.gpu_temperature_c) {
++		text += Fmt("  %.0f%s%s", *host.gpu_temperature_c, DEGREES_C,
++		            host.gpu_temperature_is_soc ? " SoC" : "");
++	}
++	return text;
++}
++
++std::string GpuDevice(const Common::HostStats& host, const GraphicContext& graphics) {
++	std::string text = host.gpu_model.empty()
++	                       ? std::string(graphics.GetPhysicalDeviceProperties().deviceName.data())
++	                       : host.gpu_model;
++	std::string details = host.gpu_kind;
++	if (host.gpu_cores) {
++		details += Fmt("%s%u %s", details.empty() ? "" : ", ", *host.gpu_cores,
++		               host.gpu_core_name.empty() ? "cores" : host.gpu_core_name.c_str());
++	}
++	return details.empty() ? text : text + " (" + details + ")";
++}
++
++// Windows (hostGpuWindows.cpp): utilization by engine kind, clock, power, temperature.
++void GpuHostRows(const Common::HostStats& host) {
++	if (!host.gpu_driver.empty()) {
++		Row("Driver", (host.gpu_vendor.empty() ? std::string() : host.gpu_vendor + " ") + host.gpu_driver);
++	}
++	std::string engines;
++	const auto  engine = [&](const char* name, const std::optional<double>& percent) {
++		if (percent) {
++			engines += Fmt("%s%s %.0f%%", engines.empty() ? "" : "  ", name, *percent);
++		}
++	};
++	engine("3D", host.gpu_3d_percent);
++	engine("Compute", host.gpu_compute_percent);
++	engine("Copy", host.gpu_copy_percent);
++	engine("Video", host.gpu_video_percent);
++	if (!engines.empty()) {
++		Row("Engines", engines);
++	}
++	if (host.gpu_process_percent) {
++		Row("Emulator's share", Percent(host.gpu_process_percent));
++	}
++	if (host.gpu_clock_mhz || host.gpu_max_clock_mhz) {
++		std::string clock = host.gpu_clock_mhz ? Fmt("%.0f", *host.gpu_clock_mhz) : std::string("n/a");
++		clock += host.gpu_max_clock_mhz ? Fmt(" / %.0f MHz", *host.gpu_max_clock_mhz) : std::string(" MHz");
++		if (!host.gpu_throttle.empty()) {
++			clock += "  limited: " + host.gpu_throttle;
++		}
++		Row("Clock", clock, host.gpu_throttle.empty() ? std::nullopt : std::optional(MEDIUM));
++	}
++	if (host.gpu_power_w || host.gpu_power_percent) {
++		std::string power = host.gpu_power_w ? Fmt("%.1f W", *host.gpu_power_w) : std::string();
++		if (host.gpu_power_percent) {
++			power += Fmt("%s%.0f%% of limit", power.empty() ? "" : "  ", *host.gpu_power_percent);
++		}
++		Row("Power", power);
++	}
++	if (host.gpu_temperature_c) {
++		Row("Temperature", Temperature(host), LevelColor(*host.gpu_temperature_c, 80, 90));
++	}
++	if (host.gpu_fan_rpm) {
++		Row("Fan", Fmt("%u RPM", *host.gpu_fan_rpm));
++	}
++}
++
++// Windows: the device's dedicated and shared memory, and the emulator's own.
++void GpuHostMemoryRows(const Common::HostStats& host) {
++	const auto used_of = [](std::optional<uint64_t> used, std::optional<uint64_t> total) {
++		return total ? Bytes(used) + " / " + Bytes(*total) : Bytes(used);
++	};
++	const auto share = [](std::optional<uint64_t> used, std::optional<uint64_t> total) {
++		return used && total && *total != 0
++		           ? std::optional(LevelColor(static_cast<double>(*used) / static_cast<double>(*total) * 100.0, 80, 95))
++		           : std::nullopt;
++	};
++	// An integrated GPU has (almost) no dedicated memory: everything is shared system RAM.
++	if (host.gpu_dedicated_used && (host.gpu_kind != "integrated" || *host.gpu_dedicated_used != 0)) {
++		Row("Dedicated (VRAM)", used_of(host.gpu_dedicated_used, host.gpu_dedicated_total),
++		    share(host.gpu_dedicated_used, host.gpu_dedicated_total));
++	}
++	if (host.gpu_shared_used) {
++		Row("Shared (system RAM)", used_of(host.gpu_shared_used, host.gpu_shared_total),
++		    share(host.gpu_shared_used, host.gpu_shared_total));
++	}
++	if (host.gpu_process_dedicated || host.gpu_process_shared) {
++		Row("Emulator on GPU", Bytes(host.gpu_process_dedicated.value_or(0)) + " dedicated + " +
++		                           Bytes(host.gpu_process_shared.value_or(0)) + " shared");
++	}
++}
++
+ void GpuActivityRows(const Snapshot& shown) {
+ 	const auto draws = Rate(shown, Counter::Draws);
+ 	Row("Draw calls", Fmt("%.0f/frame  %.0f/s", draws / std::max(shown.fps, 1.0), draws));
+@@ -388,12 +497,18 @@ void DrawCompact(const Snapshot& shown) {
+ 	Row("CPU", host.process_cpu_percent
+ 	               ? Fmt("%.0f%%  of %u threads", *host.process_cpu_percent, host.logical_cores)
+ 	               : std::string("n/a"));
+-	Row("GPU", Percent(host.gpu_percent));
++	Row("GPU", GpuSummary(host),
++	    host.gpu_percent ? std::optional(LevelColor(*host.gpu_percent, 80, 95)) : std::nullopt);
+ 	GpuActivityRows(shown);
+ 	CompilationRows(shown);
+ 	if (shown.device_memory) {
+ 		Row("GPU memory", Bytes(*shown.device_memory) + " / " + Bytes(shown.device_budget));
+ 	}
++	if (host.gpu_kind == "integrated" && host.gpu_shared_used) {
++		Row("GPU shared RAM", host.gpu_shared_total
++		                          ? Bytes(*host.gpu_shared_used) + " / " + Bytes(*host.gpu_shared_total)
++		                          : Bytes(*host.gpu_shared_used));
++	}
+ 	TransferRow(shown, "Texture transfers", Counter::TextureUploadBytes,
+ 	            Counter::TextureDownloadBytes);
+ 	TransferRow(shown, "Buffer transfers", Counter::BufferUploadBytes,
+@@ -467,13 +582,10 @@ void DrawFramesAndCpu(const Snapshot& shown, vk::Extent2D extent) {
+ void DrawGpu(const Snapshot& shown, const GraphicContext& graphics) {
+ 	const auto& host = shown.host;
+ 	if (BeginSection("GPU")) {
+-		Row("Device", host.gpu_model.empty()
+-		                  ? std::string(graphics.GetPhysicalDeviceProperties().deviceName.data())
+-		              : host.gpu_cores
+-		                  ? Fmt("%s (%u cores)", host.gpu_model.c_str(), *host.gpu_cores)
+-		                  : host.gpu_model);
++		Row("Device", GpuDevice(host, graphics));
+ 		Row("Utilization", Percent(host.gpu_percent),
+ 		    host.gpu_percent ? std::optional(LevelColor(*host.gpu_percent, 80, 95)) : std::nullopt);
++		GpuHostRows(host);
+ 		if (host.gpu_renderer_percent || host.gpu_tiler_percent) {
+ 			Row("Renderer / tiler",
+ 			    Percent(host.gpu_renderer_percent) + " / " + Percent(host.gpu_tiler_percent));
+@@ -499,6 +611,7 @@ void DrawGpu(const Snapshot& shown, const GraphicContext& graphics) {
+ 		ImGui::EndTable();
+ 	}
+ 	if (BeginSection("GPU memory")) {
++		GpuHostMemoryRows(host);
+ 		if (shown.device_memory) {
+ 			const double share = shown.device_budget != 0
+ 			                         ? static_cast<double>(*shown.device_memory) /
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index 2281cc21..b781f4cd 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -4,6 +4,7 @@
+ #include "common/emulatorConfig.h"
+ #include "common/file.h"
+ #include "common/hangWatchdog.h"
++#include "common/hostStats.h"
+ #include "common/logging/log.h"
+ #include "common/profiler.h"
+ #include "common/stringUtils.h"
+@@ -1531,6 +1532,20 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 		return nullptr;
+ 	}
+ 
++	// The performance overlay's host statistics describe this adapter (hostStats.h): laptops and
++	// handhelds list more than one, and Windows names them by LUID.
++	{
++		vk::PhysicalDeviceIDProperties id_properties {};
++		vk::PhysicalDeviceProperties2  id_query {};
++		id_query.pNext = &id_properties;
++		physical_device.getProperties2(&id_query);
++		const auto& device_properties = id_query.properties;
++		Common::SetHostGpuAdapter(
++		    id_properties.deviceLUIDValid == VK_TRUE ? id_properties.deviceLUID.data() : nullptr,
++		    device_properties.deviceName.data(), device_properties.vendorID, device_properties.deviceID,
++		    device_properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu);
++	}
++
+ 	if (DeviceFaultDiagnosticsEnabled()) {
+ 		std::printf("Device-fault diagnostics: EXT fault=%u vendor binary=%u NV checkpoints=%u NV tracking/debug=%u\n",
+ 		            static_cast<unsigned>(device_fault.deviceFault),
+-- 
+2.55.0.windows.5
+

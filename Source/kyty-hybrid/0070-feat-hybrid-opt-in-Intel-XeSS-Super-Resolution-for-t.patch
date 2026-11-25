@@ -1,0 +1,2073 @@
+From 54ec958d8addbacaece6003aaa4981cb783f7537 Mon Sep 17 00:00:00 2001
+From: red-Geck0 <127088086+red-Geck0@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 12:42:12 +0700
+Subject: [PATCH 70/72] feat(hybrid): opt-in Intel XeSS Super Resolution for
+ the game's temporal upscale
+
+ASTROHYBRID_XESS=1 replaces Astro Bot's temporal upscale draw (the
+pass ASTROHYBRID_DLSS replaces, shader 2936e5eca99d75e7) with XeSS
+Super Resolution through the XeSS 3 SDK's Vulkan API, with the same
+inputs: SMAA-resolved colour, the game's UV motion vectors (velocity
+scale -input size, jittered), the G-buffer depth attachment, the
+jitter in input pixels, HDR colour and auto exposure. It runs on any
+GPU with DP4a (XMX on Intel Arc) and needs no CUDA address window.
+
+libxess.dll is loaded at run time (next to the game or
+ASTROHYBRID_XESS_PATH); the SDK's MIT headers are in 3rdparty/xess.
+XeSS's instance and device extensions are enabled where available and
+its device features are merged into Kyty's chain (promoted structures
+into the Vulkan 1.1-1.3 feature structures, only supported features).
+The context is created with the device and builds its pipelines in the
+background; each input/output size gets a context initialised on a
+worker thread (holding Kyty's queues during xessVKInit), and the
+game's own pass runs until it is ready or whenever an input is
+missing. ASTROHYBRID_XESS_QUALITY picks a preset (default: the one
+whose input range holds the game's size). ASTROHYBRID_DLSS and
+ASTROHYBRID_FSR take precedence when set. XeSS frame generation and Xe
+Low Latency are D3D12-only in the SDK and are not part of this Vulkan
+port. AMD FSR frame generation (ASTROHYBRID_FSRFG) takes its inputs at
+the same pass and works together with it.
+
+Tested in game on an Intel Arc B390 with libxess.dll 2.0.2 (its API
+and structures match the XeSS 3 headers): 1920x1080 -> 2432x1368,
+preset ultra quality plus, every frame, picture correct, frame rate
+as with the game's own pass. The unit-test targets that compile every
+renderer source have no XeSS include path and get stubs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ 3rdparty/xess/LICENSE.txt                     |   17 +
+ 3rdparty/xess/README.md                       |    8 +
+ 3rdparty/xess/inc/xess/xess.h                 |  426 +++++++
+ 3rdparty/xess/inc/xess/xess_vk.h              |  253 ++++
+ CMakeLists.txt                                |    3 +
+ src/graphics/host_gpu/renderer/dlss.cpp       |   14 +-
+ src/graphics/host_gpu/renderer/render.h       |    5 +
+ src/graphics/host_gpu/renderer/renderDraw.cpp |   15 +-
+ src/graphics/host_gpu/renderer/xess.cpp       | 1024 +++++++++++++++++
+ src/graphics/host_gpu/renderer/xess.h         |   74 ++
+ .../presentation/window/vulkanWindow.cpp      |   33 +
+ 11 files changed, 1866 insertions(+), 6 deletions(-)
+ create mode 100644 3rdparty/xess/LICENSE.txt
+ create mode 100644 3rdparty/xess/README.md
+ create mode 100644 3rdparty/xess/inc/xess/xess.h
+ create mode 100644 3rdparty/xess/inc/xess/xess_vk.h
+ create mode 100644 src/graphics/host_gpu/renderer/xess.cpp
+ create mode 100644 src/graphics/host_gpu/renderer/xess.h
+
+diff --git a/3rdparty/xess/LICENSE.txt b/3rdparty/xess/LICENSE.txt
+new file mode 100644
+index 00000000..53b95349
+--- /dev/null
++++ b/3rdparty/xess/LICENSE.txt
+@@ -0,0 +1,17 @@
++Copyright (c) 2026 Intel Corporation
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of this
++software and associated documentation files (the "Software"), to deal in the Software
++without restriction, including without limitation the rights to use, copy, modify, merge,
++publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
++to whom the Software is furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all copies
++or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
++PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
++FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
++OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++OTHER DEALINGS IN THE SOFTWARE.
+diff --git a/3rdparty/xess/README.md b/3rdparty/xess/README.md
+new file mode 100644
+index 00000000..db36a330
+--- /dev/null
++++ b/3rdparty/xess/README.md
+@@ -0,0 +1,8 @@
++# Intel XeSS SDK headers (Super Resolution, Vulkan)
++
++`inc/xess/xess.h` and `inc/xess/xess_vk.h` are copied unmodified from the Intel XeSS 3 SDK,
++https://github.com/intel/xess (commit de0fb9c1c510661c571164e1418ceca8101dab69). The public headers are MIT licensed (`LICENSE.txt`).
++
++Only the headers are here: `src/graphics/host_gpu/renderer/xess.cpp` loads `libxess.dll` at run
++time (ASTROHYBRID_XESS=1). The DLL is in the SDK's `bin` folder and is redistributable in binary
++form under the Intel Simplified Software License that comes with it; it goes next to the game.
+diff --git a/3rdparty/xess/inc/xess/xess.h b/3rdparty/xess/inc/xess/xess.h
+new file mode 100644
+index 00000000..d43837e6
+--- /dev/null
++++ b/3rdparty/xess/inc/xess/xess.h
+@@ -0,0 +1,426 @@
++/*******************************************************************************
++ * Copyright (c) 2026 Intel Corporation
++ *
++ * SPDX-License-Identifier: MIT
++ ******************************************************************************/
++
++#ifndef XESS_H
++#define XESS_H
++
++#ifdef XESS_SHARED_LIB
++#ifdef _WIN32
++#ifdef XESS_EXPORT_API
++#define XESS_API __declspec(dllexport)
++#else
++#define XESS_API __declspec(dllimport)
++#endif
++#else
++#define XESS_API __attribute__((visibility("default")))
++#endif
++#else
++#define XESS_API
++#endif
++
++#if !defined _MSC_VER || (_MSC_VER >= 1929)
++#define XESS_PRAGMA(x) _Pragma(#x)
++#else
++#define XESS_PRAGMA(x) __pragma(x)
++#endif
++#define XESS_PACK_B_X(x) XESS_PRAGMA(pack(push, x))
++#define XESS_PACK_E() XESS_PRAGMA(pack(pop))
++#define XESS_PACK_B() XESS_PACK_B_X(8)
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct _xess_context_handle_t* xess_context_handle_t;
++
++XESS_PACK_B()
++/**
++ * @brief XeSS version.
++ * 
++ * XeSS uses major.minor.patch version format and Numeric 90+ scheme for development stage builds.
++ */
++typedef struct _xess_version_t
++{
++    /** A major version increment indicates a new API and potentially a
++     * break in functionality. */
++    uint16_t major;
++    /** A minor version increment indicates incremental changes such as
++     * optional inputs or flags. This does not break existing functionality. */
++    uint16_t minor;
++    /** A patch version increment may include performance or quality tweaks or fixes for known issues.
++     * There's no change in the interfaces.
++     * Versions beyond 90 used for development builds to change the interface for the next release.
++     */
++    uint16_t patch;
++    /** Reserved for future use. */
++    uint16_t reserved;
++} xess_version_t;
++XESS_PACK_E()
++
++XESS_PACK_B()
++/**
++ * @brief 2D variable.
++ */
++typedef struct _xess_2d_t
++{
++    uint32_t x;
++    uint32_t y;
++} xess_2d_t;
++XESS_PACK_E()
++
++/**
++ * @brief 2D coordinates.
++ */
++typedef xess_2d_t xess_coord_t;
++
++/**
++ * @brief XeSS quality settings.
++ */
++typedef enum _xess_quality_settings_t
++{
++    XESS_QUALITY_SETTING_ULTRA_PERFORMANCE = 100,
++    XESS_QUALITY_SETTING_PERFORMANCE = 101,
++    XESS_QUALITY_SETTING_BALANCED = 102,
++    XESS_QUALITY_SETTING_QUALITY = 103,
++    XESS_QUALITY_SETTING_ULTRA_QUALITY = 104,
++    XESS_QUALITY_SETTING_ULTRA_QUALITY_PLUS = 105,
++    XESS_QUALITY_SETTING_AA = 106,
++} xess_quality_settings_t;
++
++/**
++ * @brief XeSS initialization flags.
++ */
++typedef enum _xess_init_flags_t
++{
++    XESS_INIT_FLAG_NONE = 0,
++    /** Use motion vectors at target resolution. */
++    XESS_INIT_FLAG_HIGH_RES_MV = 1 << 0,
++    /** Use inverted (increased precision) depth encoding */
++    XESS_INIT_FLAG_INVERTED_DEPTH = 1 << 1,
++    /** Use exposure texture to scale input color. */
++    XESS_INIT_FLAG_EXPOSURE_SCALE_TEXTURE = 1 << 2,
++    /** Use responsive pixel mask texture. */
++    XESS_INIT_FLAG_RESPONSIVE_PIXEL_MASK = 1 << 3,
++    /** Use velocity in NDC */
++    XESS_INIT_FLAG_USE_NDC_VELOCITY = 1 << 4,
++    /** Use external descriptor heap */
++    XESS_INIT_FLAG_EXTERNAL_DESCRIPTOR_HEAP = 1 << 5,
++    /** Disable tonemapping for input and output */
++    XESS_INIT_FLAG_LDR_INPUT_COLOR = 1 << 6,
++    /** Remove jitter from input velocity*/
++    XESS_INIT_FLAG_JITTERED_MV = 1 << 7,
++    /** Enable automatic exposure calculation. */
++    XESS_INIT_FLAG_ENABLE_AUTOEXPOSURE = 1 << 8
++} xess_init_flags_t;
++
++XESS_PACK_B()
++/**
++ * @brief Properties for internal XeSS resources.
++ */
++typedef struct _xess_properties_t
++{
++    /** Required amount of descriptors for XeSS */
++    uint32_t requiredDescriptorCount;
++    /** The heap size required by XeSS for temporary buffer storage. */
++    uint64_t tempBufferHeapSize;
++    /** The heap size required by XeSS for temporary texture storage. */
++    uint64_t tempTextureHeapSize;
++} xess_properties_t;
++XESS_PACK_E()
++
++/**
++ * @brief  XeSS return codes.
++ */
++typedef enum _xess_result_t
++{
++    /** Warning. Folder to store dump data doesn't exist. Write operation skipped.*/
++    XESS_RESULT_WARNING_NONEXISTING_FOLDER = 1,
++    /** An old or outdated driver. */
++    XESS_RESULT_WARNING_OLD_DRIVER = 2,
++    /** XeSS operation was successful. */
++    XESS_RESULT_SUCCESS = 0,
++    /** XeSS not supported on the GPU. An SM 6.4 capable GPU is required. */
++    XESS_RESULT_ERROR_UNSUPPORTED_DEVICE = -1,
++    /** An unsupported driver. */
++    XESS_RESULT_ERROR_UNSUPPORTED_DRIVER = -2,
++    /** Execute called without initialization. */
++    XESS_RESULT_ERROR_UNINITIALIZED = -3,
++    /** Invalid argument such as descriptor handles. */
++    XESS_RESULT_ERROR_INVALID_ARGUMENT = -4,
++    /** Not enough available GPU memory. */
++    XESS_RESULT_ERROR_DEVICE_OUT_OF_MEMORY = -5,
++    /** Device function failed, such as resource or descriptor creation. */
++    XESS_RESULT_ERROR_DEVICE = -6,
++    /** The function is not implemented */
++    XESS_RESULT_ERROR_NOT_IMPLEMENTED = -7,
++    /** Invalid context. */
++    XESS_RESULT_ERROR_INVALID_CONTEXT = -8,
++    /** Operation not finished yet. */
++    XESS_RESULT_ERROR_OPERATION_IN_PROGRESS = -9,
++    /** Operation not supported in current configuration. */
++    XESS_RESULT_ERROR_UNSUPPORTED = -10,
++    /** The library cannot be loaded. */
++    XESS_RESULT_ERROR_CANT_LOAD_LIBRARY = -11,
++    /** Call to function done in invalid order. */
++    XESS_RESULT_ERROR_WRONG_CALL_ORDER = -12,
++
++    /** Unknown internal failure */
++    XESS_RESULT_ERROR_UNKNOWN = -1000,
++} xess_result_t;
++
++/**
++ * @brief XeSS logging level
++ */
++typedef enum _xess_logging_level_t
++{
++    XESS_LOGGING_LEVEL_DEBUG = 0,
++    XESS_LOGGING_LEVEL_INFO = 1,
++    XESS_LOGGING_LEVEL_WARNING = 2,
++    XESS_LOGGING_LEVEL_ERROR = 3
++} xess_logging_level_t;
++
++/**
++ * A logging callback provided by the application. This callback can be called from other threads.
++ * Message pointer is only valid inside function and may be invalid right after return call.
++ * Message is a null-terminated utf-8 string
++ */
++ typedef void (*xess_app_log_callback_t)(const char *message, xess_logging_level_t loggingLevel);
++
++#ifndef XESS_TYPES_ONLY
++
++/** @addtogroup xess XeSS API exports
++ * @{
++ */
++  
++/**
++ * @brief Gets the XeSS version. This is baked into the XeSS SDK release.
++ * @param[out] pVersion Returned XeSS version.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetVersion(xess_version_t* pVersion);
++
++/**
++ * @brief Gets the version of the loaded Intel XeFX library. When running on Intel platforms 
++ * this function will return the version of the loaded Intel XeFX library, for other 
++ * platforms 0.0.0 will be returned.
++ * @param hContext The XeSS context handle.
++ * @param[out] pVersion Returned Intel XeFX library version.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetIntelXeFXVersion(xess_context_handle_t hContext, 
++    xess_version_t* pVersion);
++
++/**
++ * @brief Gets XeSS internal resources properties.
++ * @param hContext The XeSS context handle.
++ * @param pOutputResolution Output resolution to calculate properties for.
++ * @param[out] pBindingProperties Returned properties.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetProperties(xess_context_handle_t hContext,
++    const xess_2d_t* pOutputResolution, xess_properties_t* pBindingProperties);
++
++/**
++ * @brief Get the input resolution for a specified output resolution for a given quality setting.
++ * XeSS expects all the input buffers except motion vectors to be in the returned resolution.
++ * Motion vectors can be either in output resolution (XESS_INIT_FLAG_HIGH_RES_MV) or
++ * returned resolution (default).
++ *
++ * @param hContext The XeSS context handle.
++ * @param pOutputResolution Output resolution to calculate input resolution for.
++ * @param qualitySettings Desired quality setting.
++ * @param[out] pInputResolution Required input resolution.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetInputResolution(xess_context_handle_t hContext,
++    const xess_2d_t* pOutputResolution, xess_quality_settings_t qualitySettings,
++    xess_2d_t* pInputResolution);
++
++/**
++ * @brief Get the optimal input resolution and possible range for a specified output resolution for a given quality setting.
++ * XeSS expects all the input buffers except motion vectors to be in the returned resolution range 
++ * and all input buffers to be in the same resolution.
++ * Motion vectors can be either in output resolution (XESS_INIT_FLAG_HIGH_RES_MV) or
++ * in the same resolution as other input buffers (by default).
++ *
++ * @note Aspect ratio of the input resolution must be the same as for the output resolution.
++ *
++ * @param hContext The XeSS context handle.
++ * @param pOutputResolution Output resolution to calculate input resolution for.
++ * @param qualitySettings Desired quality setting.
++ * @param[out] pInputResolutionOptimal Optimal input resolution.
++ * @param[out] pInputResolutionMin Required minimal input resolution.
++ * @param[out] pInputResolutionMax Required maximal input resolution.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetOptimalInputResolution(xess_context_handle_t hContext,
++    const xess_2d_t* pOutputResolution, xess_quality_settings_t qualitySettings,
++    xess_2d_t* pInputResolutionOptimal, xess_2d_t* pInputResolutionMin, xess_2d_t* pInputResolutionMax);
++
++/**
++ * @brief Gets jitter scale value.
++ * @param hContext The XeSS context handle.
++ * @param[out] pX Jitter scale pointer for the X axis.
++ * @param[out] pY Jitter scale pointer for the Y axis.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetJitterScale(xess_context_handle_t hContext, float* pX, float* pY);
++
++/**
++ * @brief Gets velocity scale value.
++ * @param hContext The XeSS context handle.
++ * @param[out] pX Velocity scale pointer for the X axis.
++ * @param[out] pY Velocity scale pointer for the Y axis.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetVelocityScale(xess_context_handle_t hContext, float* pX, float* pY);
++
++/**
++ * @brief Destroys the XeSS context.
++ * The user must ensure that any pending command lists are completed before destroying the context.
++ * @param hContext: The XeSS context handle.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessDestroyContext(xess_context_handle_t hContext);
++
++/**
++ * @brief Sets jitter scale value
++ *
++ * @param hContext The XeSS context handle.
++ * @param x scale for the X axis
++ * @param y scale for the Y axis
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessSetJitterScale(xess_context_handle_t hContext, float x, float y);
++
++/**
++ * @brief Sets velocity scale value
++ *
++ * @param hContext The XeSS context handle.
++ * @param x scale for the X axis
++ * @param y scale for the Y axis
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessSetVelocityScale(xess_context_handle_t hContext, float x, float y);
++
++/**
++ * @brief Sets exposure scale value
++ *
++ * This value will be applied on top of any passed exposure value or automatically calculated exposure.
++ *
++ * @param hContext The XeSS context handle.
++ * @param scale scale value.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessSetExposureMultiplier(xess_context_handle_t hContext, float scale);
++
++/**
++ * @brief Gets exposure scale value
++ *
++ * @param hContext The XeSS context handle.
++ * @param[out] pScale Exposure scale pointer.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetExposureMultiplier(xess_context_handle_t hContext, float *pScale);
++
++/**
++ * @brief Sets maximum value for responsive mask
++ *
++ * This value used to clip responsive mask values. Final responsive mask value calculated as
++ * clip(responsive_mask, 0.0, max_value). Value must be within range [0.0; 1.0]
++ *
++ * @param hContext The XeSS context handle.
++ * @param value maximum clip value.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessSetMaxResponsiveMaskValue(xess_context_handle_t hContext, float value);
++
++/**
++ * @brief Gets maximum value for responsive mask
++ *
++ * @param hContext The XeSS context handle.
++ * @param[out] pValue maximum clip value pointer.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessGetMaxResponsiveMaskValue(xess_context_handle_t hContext, float *pValue);
++
++/**
++ * @brief Sets logging callback
++ *
++ * @param hContext The XeSS context handle.
++ * @param loggingLevel Minimum logging level for logging callback.
++ * @param loggingCallback Logging callback
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessSetLoggingCallback(xess_context_handle_t hContext,
++    xess_logging_level_t loggingLevel, xess_app_log_callback_t loggingCallback);
++
++/**
++ * @brief Indicates if the installed driver supports best XeSS experience.
++ *
++ * @param hContext The XeSS context handle.
++ * @return xessIsOptimalDriver returns XESS_RESULT_SUCCESS, or XESS_RESULT_WARNING_OLD_DRIVER
++ * if installed driver may result in degraded performance or visual quality.  
++ * xessD3D12CreateContext(..) will return XESS_RESULT_ERROR_UNSUPPORTED_DRIVER if driver does
++ * not support XeSS  at all.
++ */
++XESS_API xess_result_t xessIsOptimalDriver(xess_context_handle_t hContext);
++
++/**
++ * @brief Forces usage of legacy (pre 1.3.0) scale factors
++ *
++ * Following scale factors will be applied:
++ * @li XESS_QUALITY_SETTING_ULTRA_PERFORMANCE: 3.0
++ * @li XESS_QUALITY_SETTING_PERFORMANCE: 2.0
++ * @li XESS_QUALITY_SETTING_BALANCED: 1.7
++ * @li XESS_QUALITY_SETTING_QUALITY: 1.5
++ * @li XESS_QUALITY_SETTING_ULTRA_QUALITY: 1.3
++ * @li XESS_QUALITY_SETTING_AA: 1.0
++ * In order to apply new scale factors application should call xessGetOptimalInputResolution and
++ * initialization function (xess*Init)
++ *
++ * @param hContext The XeSS context handle.
++ * @param force if set to true legacy scale factors will be forced, if set to false - scale factors
++ * will be selected by XeSS
++ *
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessForceLegacyScaleFactors(xess_context_handle_t hContext, bool force);
++
++/**
++ * @brief Returns current state of pipeline build
++ * This function can only be called after xess*BuildPipelines and
++ * before corresponding xess*Init.
++ * This call returns XESS_RESULT_SUCCESS if pipelines already built, and
++ * XESS_RESULT_ERROR_OPERATION_IN_PROGRESS if pipeline build is in progress.
++ * If function called before @ref xess*BuildPipelines or after @ref xess*Init -
++ * XESS_RESULT_ERROR_WRONG_CALL_ORDER will be returned.
++ *
++ * @param hContext The XeSS context handle.
++ * @return XESS_RESULT_SUCCESS if pipelines already built.
++ *         XESS_RESULT_ERROR_OPERATION_IN_PROGRESS if pipeline build is in progress.
++ *         XESS_RESULT_ERROR_WRONG_CALL_ORDER if the function is called out of order.
++ */
++XESS_API xess_result_t xessGetPipelineBuildStatus(xess_context_handle_t hContext);
++
++/** @}*/
++  
++#endif
++
++// Enum size checks. All enums must be 4 bytes
++typedef char sizecheck__LINE__[ (sizeof(xess_quality_settings_t) == 4) ? 1 : -1];
++typedef char sizecheck__LINE__[ (sizeof(xess_init_flags_t) == 4) ? 1 : -1];
++typedef char sizecheck__LINE__[ (sizeof(xess_result_t) == 4) ? 1 : -1];
++typedef char sizecheck__LINE__[ (sizeof(xess_logging_level_t) == 4) ? 1 : -1];
++
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/3rdparty/xess/inc/xess/xess_vk.h b/3rdparty/xess/inc/xess/xess_vk.h
+new file mode 100644
+index 00000000..71eaeb4d
+--- /dev/null
++++ b/3rdparty/xess/inc/xess/xess_vk.h
+@@ -0,0 +1,253 @@
++/*******************************************************************************
++ * Copyright (c) 2026 Intel Corporation
++ *
++ * SPDX-License-Identifier: MIT
++ ******************************************************************************/
++
++#ifndef XESS_VK_H
++#define XESS_VK_H
++
++#include <vulkan/vulkan.h>
++
++#include "xess.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++XESS_PACK_B()
++
++typedef struct _xess_vk_image_view_info
++{
++    VkImageView imageView;
++    VkImage image;
++    VkImageSubresourceRange subresourceRange;
++    VkFormat format;
++    unsigned int width;
++    unsigned int height;
++} xess_vk_image_view_info;
++
++XESS_PACK_E()
++
++XESS_PACK_B()
++/**
++ * @brief Execution parameters for XeSS Vulkan.
++ */
++typedef struct _xess_vk_execute_params_t
++{
++    /** Input color texture. Must be in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL state.*/
++    xess_vk_image_view_info colorTexture;
++    /** Input motion vector texture. Must be in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL state.*/
++    xess_vk_image_view_info velocityTexture;
++    /** Optional depth texture. Required if XESS_INIT_FLAG_HIGH_RES_MV has not been specified.
++     * Must be in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL state.*/
++    xess_vk_image_view_info depthTexture;
++    /** Optional 1x1 exposure scale texture. Required if XESS_INIT_FLAG_EXPOSURE_TEXTURE has been
++     * specified. Must be in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL state */
++    xess_vk_image_view_info exposureScaleTexture;
++    /** Optional responsive pixel mask texture. Required if XESS_INIT_FLAG_RESPONSIVE_PIXEL_MASK
++     * has been specified. Must be in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL state */
++    xess_vk_image_view_info responsivePixelMaskTexture;
++    /** Output texture in target resolution. Must be in VK_IMAGE_LAYOUT_GENERAL state.*/
++    xess_vk_image_view_info outputTexture;
++
++    /** Jitter X coordinate in the range [-0.5, 0.5]. */
++    float jitterOffsetX;
++    /** Jitter Y coordinate in the range [-0.5, 0.5]. */
++    float jitterOffsetY;
++    /** Optional input color scaling. Default is 1. */
++    float exposureScale;
++    /** Resets the history accumulation in this frame. */
++    uint32_t resetHistory;
++    /** Input color width. */
++    uint32_t inputWidth;
++    /** Input color height. */
++    uint32_t inputHeight;
++    /** Base coordinate for the input color in the texture. Default is (0,0). */
++    xess_coord_t inputColorBase;
++    /** Base coordinate for the input motion vector in the texture.  Default is (0,0). */
++    xess_coord_t inputMotionVectorBase;
++    /** Base coordinate for the input depth in the texture. Default is (0,0). */
++    xess_coord_t inputDepthBase;
++    /** Base coordinate for the input responsive pixel mask in the texture. Default is (0,0). */
++    xess_coord_t inputResponsiveMaskBase;
++    /** Reserved parameter. */
++    xess_coord_t reserved0;
++    /** Base coordinate for the output color.  Default is (0,0). */
++    xess_coord_t outputColorBase;
++} xess_vk_execute_params_t;
++XESS_PACK_E()
++
++XESS_PACK_B()
++/**
++ * @brief Initialization parameters for XeSS VK.
++ */
++typedef struct _xess_vk_init_params_t
++{
++    /** Output width and height. */
++    xess_2d_t outputResolution;
++    /** Quality setting */
++    xess_quality_settings_t qualitySetting;
++    /** Initialization flags. */
++    uint32_t initFlags;
++    /** Specifies the node mask for internally created resources on
++     * multi-adapter systems. */
++    uint32_t creationNodeMask;
++    /** Specifies the node visibility mask for internally created resources
++     * on multi-adapter systems. */
++    uint32_t visibleNodeMask;
++    /** Optional externally allocated buffer memory for XeSS. If VK_NULL_HANDLE the
++     * memory is allocated internally. If provided, the memory must be allocated from
++     * memory type that supports allocating buffers. The memory type should be DEVICE_LOCAL.
++     * This memory is not accessed by the CPU. */
++    VkDeviceMemory tempBufferHeap;
++    /** Offset in the externally allocated memory for temporary buffer storage. */
++    uint64_t bufferHeapOffset;
++    /** Optional externally allocated texture memory for XeSS. If VK_NULL_HANDLE the
++     * memory is allocated internally. If provided, the memory must be allocated from
++     * memory type that supports allocating textures. The memory type should be DEVICE_LOCAL.
++     * This memory is not accessed by the CPU. */
++    VkDeviceMemory tempTextureHeap;
++    /** Offset in the externally allocated memory for temporary texture storage. */
++    uint64_t textureHeapOffset;
++    /** Optional pipeline cache. If not VK_NULL_HANDLE will be used for pipeline creation. */
++    VkPipelineCache pipelineCache;
++} xess_vk_init_params_t;
++XESS_PACK_E()
++
++/** @addtogroup xess-vulkan XeSS VK API exports
++ * @{
++ */
++ /**
++  * @brief Get required extensions for Vulkan instance that would run XeSS.
++  * This function must be called to get instance extensions need by XeSS. These
++  * extensions must be enabled in subsequent vkCreateInstance call, that would create a VkInstance
++  * object to be passed to @ref xessVKCreateContext
++  * @param[out] instanceExtensionsCount returns a count of instance extensions to be enabled in Vulkan instance
++  * @param[out] instanceExtensions returns a pointer to an array of \p instanceExtensionsCount required extension names.
++  *             The memory used by the array is owned by the XeSS library and should not be freed by the application.
++  * @param[out] minVkApiVersion The Vulkan API version that XeSS would use. When calling vkCreateInstance, the application
++  *             should set VkApplicationInfo.apiVersion to value greater or equal to \p minVkApiVersion
++  * @return XeSS return status code.
++  */
++XESS_API xess_result_t xessVKGetRequiredInstanceExtensions(uint32_t* instanceExtensionsCount, const char* const** instanceExtensions, uint32_t* minVkApiVersion);
++
++
++ /**
++  * @brief Get required extensions for Vulkan device that would run XeSS.
++  * This function must be called to get device extensions need by XeSS. These
++  * extensions must be enabled in subsequent vkCreateDevice call, that would create a VkDevice
++  * object to be passed to @ref xessVKCreateContext
++  * @param instance A VkInstance object created by the user
++  * @param physicalDevice A VkPhysicalDevice selected by the user from instance
++  * @param[out] deviceExtensionsCount returns a count of device extensions to be enabled in Vulkan device
++  * @param[out] deviceExtensions returns a pointer to an array of \p deviceExtensionsCount required extension names
++  *            The memory used by the array is owned by the XeSS library and should not be freed by the application.
++  * @return XeSS return status code.
++  */
++XESS_API xess_result_t xessVKGetRequiredDeviceExtensions(VkInstance instance, VkPhysicalDevice physicalDevice,
++   uint32_t* deviceExtensionsCount, const char* const** deviceExtensions);
++
++
++ /**
++  * @brief Get required features for Vulkan device that would run XeSS.
++  * This function must be called to get device features need by XeSS. These
++  * features must be enabled in subsequent vkCreateDevice call, that would create a VkDevice
++  * object to be passed to @ref xessVKCreateContext.
++  * @param instance A VkInstance object created by the user
++  * @param physicalDevice A VkPhysicalDevice selected by the user from instance
++  * @param[out] features a pointer to writable chain of feature structures, that this function would patch
++  *             with required features, by filling required fields and attaching new structures to the chain if needed.
++  *             The returned pointer should be passed to vkCreateDevice as pNext chain of VkDeviceCreateInfo structure.
++  *             If null is passed, than the function constructs a new structure chain that should be merged
++  *             into the chain that application would use with VkDeviceCreateInfo, with application responsibility to
++  *             avoid any duplicates with its own structures.
++  *             
++  *             It is an error to chain VkDeviceCreateInfo structure with not null pEnabledFeatures field, as this field is const
++  *             and cannot be patched by this function. VkPhysicalDeviceFeatures2 structure should be used instead.
++  *             
++  *             The memory used by the structures added by this funtion to the chain is owned by the XeSS library and
++  *             should not be freed by the application.
++  * @return XeSS return status code.
++  */
++XESS_API xess_result_t xessVKGetRequiredDeviceFeatures(VkInstance instance, VkPhysicalDevice physicalDevice, void** features);
++
++
++/**
++ * @brief Create an XeSS VK context.
++ * @param instance A VkInstance object created by the user
++ * @param physicalDevice A VkPhysicalDevice selected by the user from instance
++ * @param device A VK device created by the user from physicalDevice
++ * @param[out] phContext Returned xess context handle.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessVKCreateContext(VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device,
++    xess_context_handle_t* phContext);
++
++/**
++ * @brief Initiates pipeline build process
++ * This function can only be called between @ref xessVKCreateContext and
++ * @ref xessVKInit
++ * This call initiates build of Vulkan pipelines and kernel compilation
++ * This call can be blocking (if @p blocking set to true) or non-blocking.
++ * In case of non-blocking call library will wait for pipeline build on call to
++ * @ref xessVKInit
++ * If @p pipelineCache passed to this call - same pipeline library must be passed
++ * to @ref xessVKInit
++ *
++ * @param hContext The XeSS context handle.
++ * @param pipelineCache Optional pointer to pipeline library for pipeline caching.
++ * @param blocking Wait for kernel compilation and pipeline creation to finish or not
++ * @param initFlags Initialization flags. *Must* be identical to flags passed to @ref xessVKInit
++ */
++XESS_API xess_result_t xessVKBuildPipelines(xess_context_handle_t hContext,
++    VkPipelineCache pipelineCache, bool blocking, uint32_t initFlags);
++
++/**
++ * @brief Initialize XeSS VK.
++ * This is a blocking call that initializes XeSS and triggers internal
++ * resources allocation and JIT for the XeSS kernels. The user must ensure that
++ * any pending command lists are completed before re-initialization. When
++ * During initialization, XeSS can create staging buffers and copy queues to
++ * upload internal data. These will be destroyed at the end of initialization.
++ *
++ * @note XeSS supports devices starting from VK_RESOURCE_HEAP_TIER_1, which means
++ * that buffers and textures can not live in the same resource heap.
++ *
++ * @param hContext: The XeSS context handle.
++ * @param pInitParams: Initialization parameters.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessVKInit(
++    xess_context_handle_t hContext, const xess_vk_init_params_t* pInitParams);
++
++/**
++ * @brief Get XeSS VK initialization parameters.
++ * 
++ * @note This function will return @ref XESS_RESULT_ERROR_UNINITIALIZED if @ref xessVKInit has not been called.
++ *
++ * @param hContext: The XeSS context handle.
++ * @param[out] pInitParams: Returned initialization parameters.
++ * @return XeSS return status code.
++ */
++XESS_API xess_result_t xessVKGetInitParams(
++    xess_context_handle_t hContext, xess_vk_init_params_t* pInitParams);
++
++/**
++ * @brief Record XeSS upscaling commands into the command list.
++ * @param hContext: The XeSS context handle.
++ * @param commandBuffer: The command buffer for XeSS commands.
++ * @param pExecParams: Execution parameters.
++ * @return XeSS return status code.
++ */
++
++XESS_API xess_result_t xessVKExecute(xess_context_handle_t hContext,
++    VkCommandBuffer commandBuffer, const xess_vk_execute_params_t* pExecParams);
++/** @}*/
++
++#ifdef __cplusplus
++}
++#endif
++
++
++#endif  // XESS_VK_H
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6e88d94d..699a5ab8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2610,6 +2610,9 @@ if(KYTY_STREAMLINE_DIR)
+ 	target_compile_definitions(kyty_emulator PRIVATE KYTY_STREAMLINE=1)
+ 	target_include_directories(kyty_emulator PRIVATE "${KYTY_STREAMLINE_DIR}/include")
+ endif()
++# AstroHybrid: Intel XeSS Super Resolution (renderer/xess.cpp). The SDK's public headers are in
++# 3rdparty/xess (MIT); libxess.dll is loaded at run time, so nothing is linked.
++target_include_directories(kyty_emulator PRIVATE "${KYTY_THIRD_PARTY_DIR}/xess/inc")
+ target_include_directories(kyty_emulator PRIVATE ${inc_headers})
+ 
+ clang_tidy_check(kyty_emulator "" "${check_headers}" "${inc_headers}")
+diff --git a/src/graphics/host_gpu/renderer/dlss.cpp b/src/graphics/host_gpu/renderer/dlss.cpp
+index 2bcd6f3c..a798a5c0 100644
+--- a/src/graphics/host_gpu/renderer/dlss.cpp
++++ b/src/graphics/host_gpu/renderer/dlss.cpp
+@@ -1,6 +1,7 @@
+ #include "graphics/host_gpu/renderer/dlss.h"
+ #include "graphics/host_gpu/renderer/frameGen.h"
+ #include "graphics/host_gpu/renderer/fsr.h"
++#include "graphics/host_gpu/renderer/xess.h"
+ 
+ #include "graphics/host_gpu/renderer/cache/textureCache.h"
+ #include "graphics/host_gpu/renderer/colorRenderTarget.h"
+@@ -495,8 +496,19 @@ void RenderExecutor::NoteHudlessDraw(CommandBuffer& buffer) {
+ 	}
+ }
+ 
++ImageId RenderExecutor::UpscalerDepthFor(ImageId color) const {
++	ImageId depth {};
++	for (const auto& pair: Get().depth_pairs) {
++		if (pair.color == color) {
++			depth = pair.depth;
++		}
++	}
++	return depth;
++}
++
+ void RenderExecutor::NoteDlssTargets(std::span<const RenderColorInfo> colors, ImageId depth) {
+-	if ((!Dlss::Requested() && !FrameGen::Requested() && !Fsr::Requested()) || !depth) {
++	if ((!Dlss::Requested() && !FrameGen::Requested() && !Fsr::Requested() && !Xess::Requested()) ||
++	    !depth) {
+ 		return;
+ 	}
+ 	auto& s = Get();
+diff --git a/src/graphics/host_gpu/renderer/render.h b/src/graphics/host_gpu/renderer/render.h
+index 1f07c0e4..616078de 100644
+--- a/src/graphics/host_gpu/renderer/render.h
++++ b/src/graphics/host_gpu/renderer/render.h
+@@ -1189,6 +1189,11 @@ private:
+ 	                                  ImageId output);
+ 	// ASTROHYBRID_FSR (dlss.h): the same pass replaced by AMD FSR (true: recorded, the draw is done).
+ 	[[nodiscard]] bool TryFsrUpscale(CommandBuffer& buffer, PreparedBindings& pixel, ImageId output);
++	// The depth attachment last drawn together with `color` (NoteDlssTargets), or none.
++	[[nodiscard]] ImageId UpscalerDepthFor(ImageId color) const;
++	// ASTROHYBRID_XESS (xess.h): the same pass replaced by XeSS Super Resolution.
++	[[nodiscard]] bool TryXessUpscale(CommandBuffer& buffer, PreparedBindings& pixel,
++	                                  ImageId output);
+ 	// ASTROHYBRID_DLSSG (frameGen.h): the camera from a draw's bound constants, and the frame's
+ 	// depth, motion vectors and constants at the temporal upscale pass.
+ 	void NoteFrameGenCamera(const PreparedBindings& stage);
+diff --git a/src/graphics/host_gpu/renderer/renderDraw.cpp b/src/graphics/host_gpu/renderer/renderDraw.cpp
+index 506a7166..3000169c 100644
+--- a/src/graphics/host_gpu/renderer/renderDraw.cpp
++++ b/src/graphics/host_gpu/renderer/renderDraw.cpp
+@@ -25,6 +25,7 @@
+ #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+ #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
+ #include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/xess.h"
+ #include "graphics/host_gpu/renderer/frameGen.h"
+ #include "graphics/host_gpu/renderer/fsr.h"
+ #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
+@@ -4178,10 +4179,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 	}
+ 	CommitStats::StepMark(CommitStats::Step::LateCheck);
+ 
+-	// ASTROHYBRID_DLSS (dlss.h): depth attachments by colour target, and the game's temporal
+-	// upscale replaced by DLSS Super Resolution. A replaced draw records nothing else; like a
+-	// skipped one (KYTY_PIPELINE_SKIP below) no run record may be continued across it.
+-	if (Dlss::Requested() || FrameGen::Requested() || Fsr::Requested()) [[unlikely]] {
++	// ASTROHYBRID_DLSS (dlss.h), ASTROHYBRID_FSR (dlss.h) and ASTROHYBRID_XESS (xess.h): depth
++	// attachments by colour target, and the game's temporal upscale replaced by DLSS, FSR or XeSS
++	// (one of them, in that order). A replaced draw records nothing else; like a skipped one
++	// (KYTY_PIPELINE_SKIP below) no run record may be continued across it.
++	if (Dlss::Requested() || FrameGen::Requested() || Fsr::Requested() || Xess::Requested())
++	    [[unlikely]] {
+ 		NoteDlssTargets(std::span<const RenderColorInfo> {state.color_info, state.color_count},
+ 		                state.depth_info.image_id);
+ 		// ASTROHYBRID_FSRFG (fsr.h): the display buffers' cache images, for the HUD-less copy.
+@@ -4195,7 +4198,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
+ 		if (state.ps_active && bindings.pixel.has_value() && state.color_count != 0 &&
+ 		    ((Dlss::Requested() && TryDlssUpscale(buffer, *bindings.pixel, state.color_info[0].image_id)) ||
+ 		     (!Dlss::Requested() && Fsr::Requested() &&
+-		      TryFsrUpscale(buffer, *bindings.pixel, state.color_info[0].image_id)))) {
++		      TryFsrUpscale(buffer, *bindings.pixel, state.color_info[0].image_id)) ||
++		     (!Dlss::Requested() && !Fsr::Requested() && Xess::Requested() &&
++		      TryXessUpscale(buffer, *bindings.pixel, state.color_info[0].image_id)))) {
+ 			m_run.valid        = false;
+ 			m_run_active       = false;
+ 			m_run_targets_kept = false;
+diff --git a/src/graphics/host_gpu/renderer/xess.cpp b/src/graphics/host_gpu/renderer/xess.cpp
+new file mode 100644
+index 00000000..04a31f29
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/xess.cpp
+@@ -0,0 +1,1024 @@
++#include "graphics/host_gpu/renderer/xess.h"
++
++#include "common/threads.h"
++#include "graphics/host_gpu/renderer/cache/textureCache.h"
++#include "graphics/host_gpu/renderer/colorRenderTarget.h"
++#include "graphics/host_gpu/renderer/commandScheduler.h"
++#include "graphics/host_gpu/renderer/image/image.h"
++#include "graphics/host_gpu/renderer/render.h"
++#include "graphics/host_gpu/renderer/renderContext.h"
++#include "graphics/host_gpu/vulkanCommon.h"
++
++// The XeSS 3 SDK's public headers (MIT, 3rdparty/xess). libxess.dll is loaded at run time: the
++// prototypes only give the function types. Only kyty_emulator has 3rdparty/xess on its include
++// path (CMakeLists.txt); the unit-test targets that compile every renderer source get the stubs
++// at the end of this file.
++#if __has_include(<xess/xess_vk.h>)
++#define KYTY_XESS_HEADERS 1
++#include <xess/xess.h>
++#include <xess/xess_vk.h>
++#else
++#define KYTY_XESS_HEADERS 0
++#endif
++
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <string>
++#include <thread>
++
++#if KYTY_XESS_HEADERS
++
++namespace Libs::Graphics {
++
++namespace {
++
++// ---------------------------------------------------------------------------------------------
++// libxess.dll
++
++struct Api {
++	bool ready = false;
++	decltype(&xessGetVersion)                      get_version         = nullptr;
++	decltype(&xessGetIntelXeFXVersion)             xefx_version        = nullptr;
++	decltype(&xessIsOptimalDriver)                 optimal_driver      = nullptr;
++	decltype(&xessSetLoggingCallback)              set_logging         = nullptr;
++	decltype(&xessVKGetRequiredInstanceExtensions) instance_extensions = nullptr;
++	decltype(&xessVKGetRequiredDeviceExtensions)   device_extensions   = nullptr;
++	decltype(&xessVKGetRequiredDeviceFeatures)     device_features     = nullptr;
++	decltype(&xessVKCreateContext)                 create_context      = nullptr;
++	decltype(&xessVKBuildPipelines)                build_pipelines     = nullptr;
++	decltype(&xessGetPipelineBuildStatus)          build_status        = nullptr;
++	decltype(&xessGetOptimalInputResolution)       optimal_input       = nullptr;
++	decltype(&xessVKInit)                          init                = nullptr;
++	decltype(&xessSetVelocityScale)                set_velocity_scale  = nullptr;
++	decltype(&xessVKExecute)                       execute             = nullptr;
++	decltype(&xessDestroyContext)                  destroy_context     = nullptr;
++};
++
++template <typename T>
++bool Resolve(HMODULE module, const char* name, T& function) {
++	function = reinterpret_cast<T>(reinterpret_cast<void*>(GetProcAddress(module, name)));
++	if (function == nullptr) {
++		std::printf("XeSS: libxess.dll has no %s\n", name);
++	}
++	return function != nullptr;
++}
++
++const Api& GetApi() {
++	static const Api api = [] {
++		Api result;
++		if (!Xess::Requested()) {
++			return result;
++		}
++		// ASTROHYBRID_XESS_PATH: the folder holding libxess.dll; else the game's folder and the
++		// usual DLL search order.
++		HMODULE     module = nullptr;
++		const char* folder = std::getenv("ASTROHYBRID_XESS_PATH");
++		if (folder != nullptr && folder[0] != '\0') {
++			const std::string path = std::string(folder) + "\\libxess.dll";
++			module = LoadLibraryExA(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
++		}
++		if (module == nullptr) {
++			module = LoadLibraryA("libxess.dll");
++		}
++		if (module == nullptr) {
++			std::printf("XeSS: libxess.dll not found (put it next to the game or set "
++			            "ASTROHYBRID_XESS_PATH); the game's own upscaling stays\n");
++			std::fflush(stdout);
++			return result;
++		}
++		result.ready = Resolve(module, "xessGetVersion", result.get_version) &&
++		               Resolve(module, "xessGetIntelXeFXVersion", result.xefx_version) &&
++		               Resolve(module, "xessIsOptimalDriver", result.optimal_driver) &&
++		               Resolve(module, "xessSetLoggingCallback", result.set_logging) &&
++		               Resolve(module, "xessVKGetRequiredInstanceExtensions", result.instance_extensions) &&
++		               Resolve(module, "xessVKGetRequiredDeviceExtensions", result.device_extensions) &&
++		               Resolve(module, "xessVKGetRequiredDeviceFeatures", result.device_features) &&
++		               Resolve(module, "xessVKCreateContext", result.create_context) &&
++		               Resolve(module, "xessVKBuildPipelines", result.build_pipelines) &&
++		               Resolve(module, "xessGetPipelineBuildStatus", result.build_status) &&
++		               Resolve(module, "xessGetOptimalInputResolution", result.optimal_input) &&
++		               Resolve(module, "xessVKInit", result.init) &&
++		               Resolve(module, "xessSetVelocityScale", result.set_velocity_scale) &&
++		               Resolve(module, "xessVKExecute", result.execute) &&
++		               Resolve(module, "xessDestroyContext", result.destroy_context);
++		xess_version_t version {};
++		if (result.ready && result.get_version(&version) == XESS_RESULT_SUCCESS) {
++			std::printf("XeSS: libxess.dll %u.%u.%u loaded\n", version.major, version.minor,
++			            version.patch);
++		}
++		std::fflush(stdout);
++		return result;
++	}();
++	return api;
++}
++
++const char* ResultName(xess_result_t result) {
++	switch (result) {
++		case XESS_RESULT_WARNING_NONEXISTING_FOLDER: return "warning: no dump folder";
++		case XESS_RESULT_WARNING_OLD_DRIVER: return "warning: old driver";
++		case XESS_RESULT_SUCCESS: return "success";
++		case XESS_RESULT_ERROR_UNSUPPORTED_DEVICE: return "unsupported device";
++		case XESS_RESULT_ERROR_UNSUPPORTED_DRIVER: return "unsupported driver";
++		case XESS_RESULT_ERROR_UNINITIALIZED: return "uninitialized";
++		case XESS_RESULT_ERROR_INVALID_ARGUMENT: return "invalid argument";
++		case XESS_RESULT_ERROR_DEVICE_OUT_OF_MEMORY: return "out of device memory";
++		case XESS_RESULT_ERROR_DEVICE: return "device error";
++		case XESS_RESULT_ERROR_NOT_IMPLEMENTED: return "not implemented";
++		case XESS_RESULT_ERROR_INVALID_CONTEXT: return "invalid context";
++		case XESS_RESULT_ERROR_OPERATION_IN_PROGRESS: return "in progress";
++		case XESS_RESULT_ERROR_UNSUPPORTED: return "unsupported";
++		case XESS_RESULT_ERROR_CANT_LOAD_LIBRARY: return "cannot load library";
++		case XESS_RESULT_ERROR_WRONG_CALL_ORDER: return "wrong call order";
++		default: return "unknown error";
++	}
++}
++
++void LogCallback(const char* message, xess_logging_level_t level) {
++	std::printf("XeSS [%s]: %s\n", level >= XESS_LOGGING_LEVEL_ERROR ? "error" : "warning", message);
++	std::fflush(stdout);
++}
++
++// ---------------------------------------------------------------------------------------------
++// Options and per-size contexts.
++
++enum class Fallback : uint32_t {
++	NotLoaded,
++	NoContext,
++	Warming,
++	InitFailed,
++	Bindings,
++	Sizes,
++	NoDepth,
++	NoMotionVectors,
++	ExecuteFailed,
++	Count
++};
++constexpr std::array<const char*, static_cast<size_t>(Fallback::Count)> FALLBACK_NAMES {
++    "not-loaded", "no-context", "warming", "init", "bindings", "sizes", "no-depth", "no-mv", "execute"};
++
++constexpr std::array<xess_quality_settings_t, 7> QUALITIES {
++    XESS_QUALITY_SETTING_AA,          XESS_QUALITY_SETTING_ULTRA_QUALITY_PLUS,
++    XESS_QUALITY_SETTING_ULTRA_QUALITY, XESS_QUALITY_SETTING_QUALITY,
++    XESS_QUALITY_SETTING_BALANCED,    XESS_QUALITY_SETTING_PERFORMANCE,
++    XESS_QUALITY_SETTING_ULTRA_PERFORMANCE};
++
++const char* QualityName(int quality) {
++	switch (quality) {
++		case XESS_QUALITY_SETTING_AA: return "native AA";
++		case XESS_QUALITY_SETTING_ULTRA_QUALITY_PLUS: return "ultra quality plus";
++		case XESS_QUALITY_SETTING_ULTRA_QUALITY: return "ultra quality";
++		case XESS_QUALITY_SETTING_QUALITY: return "quality";
++		case XESS_QUALITY_SETTING_BALANCED: return "balanced";
++		case XESS_QUALITY_SETTING_PERFORMANCE: return "performance";
++		case XESS_QUALITY_SETTING_ULTRA_PERFORMANCE: return "ultra performance";
++		default: return "auto";
++	}
++}
++
++// One XeSS context per input/output size. Its pipelines are built and it is initialised on a
++// worker thread; the game's pass runs until it is ready.
++struct Context {
++	xess_context_handle_t handle = nullptr;
++	uint32_t              in_w = 0, in_h = 0, out_w = 0, out_h = 0;
++	std::atomic<int>      quality {0};
++	std::atomic<int>      status {0}; // 0 preparing, 1 ready, -1 failed
++	std::thread           worker;
++
++	~Context() {
++		// The worker holds a reference too: the last one may be dropped on that thread.
++		if (worker.joinable()) {
++			if (worker.get_id() == std::this_thread::get_id()) {
++				worker.detach();
++			} else {
++				worker.join();
++			}
++		}
++		if (handle != nullptr && GetApi().ready) {
++			GetApi().destroy_context(handle);
++		}
++	}
++};
++
++struct State {
++	uint64_t pass_hash      = 0x2936e5eca99d75e7ull;
++	float    jitter_sign    = 1.0f;
++	bool     depth_inverted = false;
++	int      quality        = 0; // 0: auto, else xess_quality_settings_t
++	bool     log            = false;
++	uint32_t init_flags     = 0;
++
++	// Created at device creation (OnDeviceReady) with its pipeline build started; the first size
++	// takes it over.
++	std::shared_ptr<Context> spare;
++	std::shared_ptr<Context> current;
++	VkInstance               instance = VK_NULL_HANDLE;
++	VkPhysicalDevice         physical = VK_NULL_HANDLE;
++	VkDevice                 device   = VK_NULL_HANDLE;
++
++	uint32_t last_frame = 0;
++	uint64_t executions = 0;
++	std::array<uint64_t, static_cast<size_t>(Fallback::Count)> fallbacks {};
++	int64_t  print_ns = 0;
++	float    last_jitter[2] {};
++};
++
++State& Get() {
++	static State state = [] {
++		State      s;
++		const auto env = [](const char* xess, const char* dlss) -> const char* {
++			const char* value = std::getenv(xess);
++			return value != nullptr ? value : std::getenv(dlss);
++		};
++		if (const char* value = env("ASTROHYBRID_XESS_PASS", "ASTROHYBRID_DLSS_PASS"); value != nullptr) {
++			s.pass_hash = std::strtoull(value, nullptr, 16);
++		}
++		if (const char* value = env("ASTROHYBRID_XESS_JITTER_SIGN", "ASTROHYBRID_DLSS_JITTER_SIGN");
++		    value != nullptr) {
++			s.jitter_sign = std::strtof(value, nullptr) < 0 ? -1.0f : 1.0f;
++		}
++		if (const char* value = env("ASTROHYBRID_XESS_DEPTH_INVERTED", "ASTROHYBRID_DLSS_DEPTH_INVERTED");
++		    value != nullptr) {
++			s.depth_inverted = std::strcmp(value, "0") != 0;
++		}
++		if (const char* value = std::getenv("ASTROHYBRID_XESS_QUALITY"); value != nullptr) {
++			const std::string q = value;
++			s.quality = q == "aa" || q == "native" || q == "dlaa" ? XESS_QUALITY_SETTING_AA
++			            : q == "ultra_quality_plus"             ? XESS_QUALITY_SETTING_ULTRA_QUALITY_PLUS
++			            : q == "ultra_quality"                  ? XESS_QUALITY_SETTING_ULTRA_QUALITY
++			            : q == "quality"                        ? XESS_QUALITY_SETTING_QUALITY
++			            : q == "balanced"                       ? XESS_QUALITY_SETTING_BALANCED
++			            : q == "performance"                    ? XESS_QUALITY_SETTING_PERFORMANCE
++			            : q == "ultra_performance"              ? XESS_QUALITY_SETTING_ULTRA_PERFORMANCE
++			                                                    : 0;
++		}
++		if (const char* value = std::getenv("ASTROHYBRID_XESS_LOG"); value != nullptr) {
++			s.log = std::strcmp(value, "1") == 0;
++		}
++		// HDR colour (the default), low-resolution motion vectors that include the jitter, auto
++		// exposure: as DLSS is created for this pass (dlss.cpp).
++		s.init_flags = XESS_INIT_FLAG_JITTERED_MV | XESS_INIT_FLAG_ENABLE_AUTOEXPOSURE |
++		               (s.depth_inverted ? XESS_INIT_FLAG_INVERTED_DEPTH : 0u);
++		return s;
++	}();
++	return state;
++}
++
++int64_t NowNs() {
++	return std::chrono::duration_cast<std::chrono::nanoseconds>(
++	           std::chrono::steady_clock::now().time_since_epoch())
++	    .count();
++}
++
++void Summary(State& s) {
++	const auto now = NowNs();
++	if (s.print_ns == 0) {
++		s.print_ns = now;
++		return;
++	}
++	if (now - s.print_ns < 10'000'000'000LL) {
++		return;
++	}
++	s.print_ns = now;
++	std::string text;
++	for (size_t i = 0; i < s.fallbacks.size(); i++) {
++		if (s.fallbacks[i] != 0) {
++			text += " " + std::string(FALLBACK_NAMES[i]) + "=" + std::to_string(s.fallbacks[i]);
++		}
++	}
++	const auto& c = s.current;
++	std::printf("XeSS 10s: executions %llu (%ux%u -> %ux%u, %s, jitter %.3f %.3f px) | game pass kept:%s\n",
++	            static_cast<unsigned long long>(s.executions), c ? c->in_w : 0, c ? c->in_h : 0,
++	            c ? c->out_w : 0, c ? c->out_h : 0, c ? QualityName(c->quality.load()) : "-",
++	            static_cast<double>(s.last_jitter[0]), static_cast<double>(s.last_jitter[1]),
++	            text.empty() ? " none" : text.c_str());
++	std::fflush(stdout);
++	s.executions = 0;
++	s.fallbacks  = {};
++}
++
++bool Fail(State& s, Fallback reason) {
++	s.fallbacks[static_cast<size_t>(reason)]++;
++	Summary(s);
++	return false;
++}
++
++std::shared_ptr<Context> CreateContext(State& s) {
++	const auto& api     = GetApi();
++	auto        context = std::make_shared<Context>();
++	const auto  result  = api.create_context(s.instance, s.physical, s.device, &context->handle);
++	if (result != XESS_RESULT_SUCCESS || context->handle == nullptr) {
++		std::printf("XeSS: context creation failed (%s)\n", ResultName(result));
++		std::fflush(stdout);
++		context->handle = nullptr;
++		return nullptr;
++	}
++	if (api.set_logging != nullptr) {
++		api.set_logging(context->handle, s.log ? XESS_LOGGING_LEVEL_WARNING : XESS_LOGGING_LEVEL_ERROR,
++		                LogCallback);
++	}
++	return context;
++}
++
++// The preset whose input range holds the game's input size, closest to its optimal size (or the
++// requested one when it accepts this size).
++int PickQuality(const State& s, xess_context_handle_t handle, uint32_t in_w, uint32_t in_h,
++                uint32_t out_w, uint32_t out_h) {
++	const auto&     api = GetApi();
++	const xess_2d_t output {out_w, out_h};
++	int             best      = 0;
++	uint32_t        best_diff = ~0u;
++	for (const auto quality: QUALITIES) {
++		xess_2d_t optimal {};
++		xess_2d_t minimum {};
++		xess_2d_t maximum {};
++		if (api.optimal_input(handle, &output, quality, &optimal, &minimum, &maximum) !=
++		    XESS_RESULT_SUCCESS) {
++			continue;
++		}
++		if (in_w < minimum.x || in_h < minimum.y || in_w > maximum.x || in_h > maximum.y) {
++			continue;
++		}
++		if (s.quality == quality) {
++			return quality;
++		}
++		const uint32_t diff = optimal.x > in_w ? optimal.x - in_w : in_w - optimal.x;
++		if (diff < best_diff) {
++			best      = quality;
++			best_diff = diff;
++		}
++	}
++	if (s.quality != 0 && best != 0) {
++		std::printf("XeSS: preset %s does not take %ux%u -> %ux%u, using %s\n", QualityName(s.quality),
++		            in_w, in_h, out_w, out_h, QualityName(best));
++	}
++	return best;
++}
++
++// Worker: waits for (or runs) the pipeline build, picks the preset and initialises the context.
++// xessVKInit may upload data through a device queue, so Kyty's queues are held meanwhile.
++void Prepare(const std::shared_ptr<Context>& context, GraphicContext* graphics, bool build_started) {
++	auto&       s   = Get();
++	const auto& api = GetApi();
++	const auto  t0  = NowNs();
++	if (!build_started) {
++		const auto built = api.build_pipelines(context->handle, VK_NULL_HANDLE, true, s.init_flags);
++		if (built != XESS_RESULT_SUCCESS) {
++			std::printf("XeSS: pipeline build failed (%s)\n", ResultName(built));
++			std::fflush(stdout);
++			context->status.store(-1, std::memory_order_release);
++			return;
++		}
++	} else {
++		while (api.build_status(context->handle) == XESS_RESULT_ERROR_OPERATION_IN_PROGRESS) {
++			std::this_thread::sleep_for(std::chrono::milliseconds(5));
++		}
++	}
++	const int quality = PickQuality(s, context->handle, context->in_w, context->in_h, context->out_w,
++	                                context->out_h);
++	if (quality == 0) {
++		std::printf("XeSS: no preset takes %ux%u -> %ux%u; the game's own upscaling stays\n",
++		            context->in_w, context->in_h, context->out_w, context->out_h);
++		std::fflush(stdout);
++		context->status.store(-1, std::memory_order_release);
++		return;
++	}
++	context->quality = quality;
++	xess_vk_init_params_t params {};
++	params.outputResolution = {context->out_w, context->out_h};
++	params.qualitySetting   = static_cast<xess_quality_settings_t>(quality);
++	params.initFlags        = s.init_flags;
++	xess_result_t result    = XESS_RESULT_ERROR_UNKNOWN;
++	{
++		graphics->queue_mutex.Lock();
++		if (graphics->side_queue != nullptr) {
++			graphics->side_queue_mutex.Lock();
++		}
++		result = api.init(context->handle, &params);
++		if (graphics->side_queue != nullptr) {
++			graphics->side_queue_mutex.Unlock();
++		}
++		graphics->queue_mutex.Unlock();
++	}
++	if (result != XESS_RESULT_SUCCESS) {
++		std::printf("XeSS: initialisation failed (%s) for %ux%u -> %ux%u\n", ResultName(result),
++		            context->in_w, context->in_h, context->out_w, context->out_h);
++		std::fflush(stdout);
++		context->status.store(-1, std::memory_order_release);
++		return;
++	}
++	// The game's motion vectors are in UV and point from the previous position to the current
++	// one; XeSS wants pixels from the current to the previous (dlss.h).
++	api.set_velocity_scale(context->handle, -static_cast<float>(context->in_w),
++	                       -static_cast<float>(context->in_h));
++	std::printf("XeSS: Super Resolution ready, %ux%u -> %ux%u, preset %s, depth inverted %d, jitter "
++	            "sign %+.0f (%.0f ms)\n",
++	            context->in_w, context->in_h, context->out_w, context->out_h, QualityName(quality),
++	            s.depth_inverted ? 1 : 0, static_cast<double>(s.jitter_sign),
++	            static_cast<double>(NowNs() - t0) / 1e6);
++	std::fflush(stdout);
++	context->status.store(1, std::memory_order_release);
++}
++
++// ---------------------------------------------------------------------------------------------
++// Device feature merging (Xess::DeviceFeatures).
++
++struct FeatureHeader {
++	VkStructureType sType;
++	void*           pNext;
++};
++
++VkBool32* Bools(void* structure) {
++	return reinterpret_cast<VkBool32*>(static_cast<uint8_t*>(structure) + sizeof(FeatureHeader));
++}
++
++void Or(VkBool32& target, VkBool32 value) {
++	target = (target != VK_FALSE || value != VK_FALSE) ? VK_TRUE : VK_FALSE;
++}
++
++// Sizes of the feature structures XeSS may ask for, so they can be checked against the device and
++// copied (0: unknown).
++size_t FeatureSize(VkStructureType type) {
++	switch (type) {
++#define KYTY_XESS_SIZE(TYPE, STRUCT)                                                                \
++	case TYPE: return sizeof(STRUCT);
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, VkPhysicalDeviceVulkan11Features)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, VkPhysicalDeviceVulkan12Features)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, VkPhysicalDeviceVulkan13Features)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT,
++		               VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES, VkPhysicalDevice16BitStorageFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES,
++		               VkPhysicalDeviceShaderDrawParametersFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES, VkPhysicalDevice8BitStorageFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
++		               VkPhysicalDeviceShaderFloat16Int8Features)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES,
++		               VkPhysicalDeviceShaderAtomicInt64Features)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES,
++		               VkPhysicalDeviceScalarBlockLayoutFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES,
++		               VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
++		               VkPhysicalDeviceBufferDeviceAddressFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES,
++		               VkPhysicalDeviceVulkanMemoryModelFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
++		               VkPhysicalDeviceTimelineSemaphoreFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES,
++		               VkPhysicalDeviceUniformBufferStandardLayoutFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
++		               VkPhysicalDeviceShaderIntegerDotProductFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
++		               VkPhysicalDeviceSubgroupSizeControlFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
++		               VkPhysicalDeviceSynchronization2Features)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
++		               VkPhysicalDeviceDynamicRenderingFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES, VkPhysicalDeviceMaintenance4Features)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES,
++		               VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures)
++		KYTY_XESS_SIZE(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
++		               VkPhysicalDeviceCooperativeMatrixFeaturesKHR)
++#undef KYTY_XESS_SIZE
++		default: return 0;
++	}
++}
++
++struct CoreFeatures {
++	VkPhysicalDeviceFeatures*         v10 = nullptr;
++	VkPhysicalDeviceVulkan11Features* v11 = nullptr;
++	VkPhysicalDeviceVulkan12Features* v12 = nullptr;
++	VkPhysicalDeviceVulkan13Features* v13 = nullptr;
++};
++
++// A structure promoted to Vulkan 1.1/1.2/1.3 must not be chained next to that version's
++// VkPhysicalDeviceVulkan1xFeatures: its fields go there. False: not a promoted structure this
++// knows, or that version's structure is not in the chain.
++bool MergePromoted(const FeatureHeader* source, const CoreFeatures& core) {
++#define KYTY_XESS_FIELD(CORE, STRUCT, FIELD) Or(core.CORE->FIELD, reinterpret_cast<const STRUCT*>(source)->FIELD)
++	switch (source->sType) {
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES:
++			if (core.v11 == nullptr) return false;
++			KYTY_XESS_FIELD(v11, VkPhysicalDevice16BitStorageFeatures, storageBuffer16BitAccess);
++			KYTY_XESS_FIELD(v11, VkPhysicalDevice16BitStorageFeatures, uniformAndStorageBuffer16BitAccess);
++			KYTY_XESS_FIELD(v11, VkPhysicalDevice16BitStorageFeatures, storagePushConstant16);
++			KYTY_XESS_FIELD(v11, VkPhysicalDevice16BitStorageFeatures, storageInputOutput16);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES:
++			if (core.v11 == nullptr) return false;
++			KYTY_XESS_FIELD(v11, VkPhysicalDeviceShaderDrawParametersFeatures, shaderDrawParameters);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDevice8BitStorageFeatures, storageBuffer8BitAccess);
++			KYTY_XESS_FIELD(v12, VkPhysicalDevice8BitStorageFeatures, uniformAndStorageBuffer8BitAccess);
++			KYTY_XESS_FIELD(v12, VkPhysicalDevice8BitStorageFeatures, storagePushConstant8);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceShaderFloat16Int8Features, shaderFloat16);
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceShaderFloat16Int8Features, shaderInt8);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceShaderAtomicInt64Features, shaderBufferInt64Atomics);
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceShaderAtomicInt64Features, shaderSharedInt64Atomics);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceScalarBlockLayoutFeatures, scalarBlockLayout);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures, shaderSubgroupExtendedTypes);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceBufferDeviceAddressFeatures, bufferDeviceAddress);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceVulkanMemoryModelFeatures, vulkanMemoryModel);
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceVulkanMemoryModelFeatures, vulkanMemoryModelDeviceScope);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceTimelineSemaphoreFeatures, timelineSemaphore);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES:
++			if (core.v12 == nullptr) return false;
++			KYTY_XESS_FIELD(v12, VkPhysicalDeviceUniformBufferStandardLayoutFeatures, uniformBufferStandardLayout);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES:
++			if (core.v13 == nullptr) return false;
++			KYTY_XESS_FIELD(v13, VkPhysicalDeviceShaderIntegerDotProductFeatures, shaderIntegerDotProduct);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES:
++			if (core.v13 == nullptr) return false;
++			KYTY_XESS_FIELD(v13, VkPhysicalDeviceSubgroupSizeControlFeatures, subgroupSizeControl);
++			KYTY_XESS_FIELD(v13, VkPhysicalDeviceSubgroupSizeControlFeatures, computeFullSubgroups);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES:
++			if (core.v13 == nullptr) return false;
++			KYTY_XESS_FIELD(v13, VkPhysicalDeviceSynchronization2Features, synchronization2);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES:
++			if (core.v13 == nullptr) return false;
++			KYTY_XESS_FIELD(v13, VkPhysicalDeviceDynamicRenderingFeatures, dynamicRendering);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES:
++			if (core.v13 == nullptr) return false;
++			KYTY_XESS_FIELD(v13, VkPhysicalDeviceMaintenance4Features, maintenance4);
++			return true;
++		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES:
++			if (core.v13 == nullptr) return false;
++			KYTY_XESS_FIELD(v13, VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures,
++			                shaderDemoteToHelperInvocation);
++			return true;
++		default: return false;
++	}
++#undef KYTY_XESS_FIELD
++}
++
++} // namespace
++
++// ---------------------------------------------------------------------------------------------
++
++namespace Xess {
++
++bool Requested() {
++	static const bool requested = [] {
++		const char* value = std::getenv("ASTROHYBRID_XESS");
++		return value != nullptr && std::strcmp(value, "1") == 0;
++	}();
++	return requested;
++}
++
++std::vector<const char*> InstanceExtensions() {
++	std::vector<const char*> names;
++	const auto&              api = GetApi();
++	if (!api.ready) {
++		return names;
++	}
++	uint32_t           count       = 0;
++	const char* const* extensions  = nullptr;
++	uint32_t           min_version = 0;
++	const auto         result      = api.instance_extensions(&count, &extensions, &min_version);
++	if (result != XESS_RESULT_SUCCESS) {
++		std::printf("XeSS: no Vulkan instance requirements (%s)\n", ResultName(result));
++		std::fflush(stdout);
++		return names;
++	}
++	for (uint32_t i = 0; i < count; i++) {
++		std::printf("XeSS: instance extension %s\n", extensions[i]);
++		names.push_back(extensions[i]);
++	}
++	if (min_version > VK_API_VERSION_1_3) {
++		std::printf("XeSS: needs Vulkan %u.%u, Kyty creates 1.3\n", VK_API_VERSION_MAJOR(min_version),
++		            VK_API_VERSION_MINOR(min_version));
++	}
++	std::fflush(stdout);
++	return names;
++}
++
++std::vector<const char*> DeviceExtensions(VkInstance instance, VkPhysicalDevice physical) {
++	std::vector<const char*> names;
++	const auto&              api = GetApi();
++	if (!api.ready) {
++		return names;
++	}
++	uint32_t           count      = 0;
++	const char* const* extensions = nullptr;
++	const auto         result     = api.device_extensions(instance, physical, &count, &extensions);
++	if (result != XESS_RESULT_SUCCESS) {
++		std::printf("XeSS: this GPU cannot run XeSS (%s); the game's own upscaling stays\n",
++		            ResultName(result));
++		std::fflush(stdout);
++		return names;
++	}
++	for (uint32_t i = 0; i < count; i++) {
++		names.push_back(extensions[i]);
++	}
++	return names;
++}
++
++struct DeviceFeatures::Impl {
++	std::vector<std::unique_ptr<uint8_t[]>> copies;
++};
++
++DeviceFeatures::DeviceFeatures(): m_impl(std::make_unique<Impl>()) {}
++
++DeviceFeatures::~DeviceFeatures() = default;
++
++void DeviceFeatures::Merge(VkInstance instance, VkPhysicalDevice physical, VkDeviceCreateInfo& info,
++                           VkPhysicalDeviceFeatures& features) {
++	const auto& api = GetApi();
++	if (!api.ready) {
++		return;
++	}
++	void*      requested = nullptr;
++	const auto result    = api.device_features(instance, physical, &requested);
++	if (result != XESS_RESULT_SUCCESS) {
++		std::printf("XeSS: no device feature requirements (%s)\n", ResultName(result));
++		std::fflush(stdout);
++		return;
++	}
++	CoreFeatures core;
++	core.v10 = &features;
++	for (auto* node = static_cast<FeatureHeader*>(const_cast<void*>(info.pNext)); node != nullptr;
++	     node       = static_cast<FeatureHeader*>(node->pNext)) {
++		switch (node->sType) {
++			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES:
++				core.v11 = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(node);
++				break;
++			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:
++				core.v12 = reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(node);
++				break;
++			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES:
++				core.v13 = reinterpret_cast<VkPhysicalDeviceVulkan13Features*>(node);
++				break;
++			default: break;
++		}
++	}
++	const auto find = [&](VkStructureType type) -> FeatureHeader* {
++		for (auto* node = static_cast<FeatureHeader*>(const_cast<void*>(info.pNext)); node != nullptr;
++		     node       = static_cast<FeatureHeader*>(node->pNext)) {
++			if (node->sType == type) {
++				return node;
++			}
++		}
++		return nullptr;
++	};
++
++	// XeSS's chain is walked first: appending copies to Kyty's chain must not change it.
++	std::vector<FeatureHeader*> nodes;
++	for (auto* node = static_cast<FeatureHeader*>(requested); node != nullptr;
++	     node       = static_cast<FeatureHeader*>(node->pNext)) {
++		nodes.push_back(node);
++	}
++	for (auto* node: nodes) {
++		// What the device supports of it: only those features are turned on.
++		if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2) {
++			VkPhysicalDeviceFeatures2 supported {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
++			VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2(physical, &supported);
++			const auto* wanted = reinterpret_cast<const VkPhysicalDeviceFeatures2*>(node);
++			auto*       target = reinterpret_cast<VkBool32*>(&features);
++			const auto* want   = reinterpret_cast<const VkBool32*>(&wanted->features);
++			const auto* have   = reinterpret_cast<const VkBool32*>(&supported.features);
++			for (size_t i = 0; i < sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32); i++) {
++				Or(target[i], want[i] != VK_FALSE && have[i] != VK_FALSE ? VK_TRUE : VK_FALSE);
++			}
++			continue;
++		}
++		const size_t size = FeatureSize(node->sType);
++		if (size == 0) {
++			// Unknown to this build: chained as XeSS gave it, unless Kyty has one.
++			if (find(node->sType) == nullptr) {
++				std::printf("XeSS: device feature structure %d chained unchecked\n",
++				            static_cast<int>(node->sType));
++				node->pNext = const_cast<void*>(info.pNext);
++				info.pNext  = node;
++			}
++			continue;
++		}
++		auto copy = std::make_unique<uint8_t[]>(size);
++		std::memcpy(copy.get(), node, size);
++		auto* wanted = reinterpret_cast<FeatureHeader*>(copy.get());
++		{
++			auto query = std::make_unique<uint8_t[]>(size);
++			std::memset(query.get(), 0, size);
++			reinterpret_cast<FeatureHeader*>(query.get())->sType = node->sType;
++			VkPhysicalDeviceFeatures2 chain {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
++			chain.pNext = query.get();
++			VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2(physical, &chain);
++			auto*       want  = Bools(wanted);
++			const auto* have  = Bools(query.get());
++			const auto  count = (size - sizeof(FeatureHeader)) / sizeof(VkBool32);
++			for (size_t i = 0; i < count; i++) {
++				want[i] = want[i] != VK_FALSE && have[i] != VK_FALSE ? VK_TRUE : VK_FALSE;
++			}
++		}
++		if (auto* existing = find(node->sType); existing != nullptr) {
++			auto*       target = Bools(existing);
++			const auto* want   = Bools(wanted);
++			for (size_t i = 0; i < (size - sizeof(FeatureHeader)) / sizeof(VkBool32); i++) {
++				Or(target[i], want[i]);
++			}
++			continue;
++		}
++		if (MergePromoted(wanted, core)) {
++			continue;
++		}
++		wanted->pNext = const_cast<void*>(info.pNext);
++		info.pNext    = wanted;
++		m_impl->copies.push_back(std::move(copy));
++	}
++	std::printf("XeSS: device features merged\n");
++	std::fflush(stdout);
++}
++
++void OnDeviceReady(VkInstance instance, VkPhysicalDevice physical, VkDevice device) {
++	const auto& api = GetApi();
++	if (!api.ready) {
++		return;
++	}
++	auto& s    = Get();
++	s.instance = instance;
++	s.physical = physical;
++	s.device   = device;
++	auto context = CreateContext(s);
++	if (context == nullptr) {
++		return;
++	}
++	xess_version_t xefx {};
++	if (api.xefx_version(context->handle, &xefx) == XESS_RESULT_SUCCESS && xefx.major != 0) {
++		std::printf("XeSS: Intel XeFX %u.%u.%u (XMX path)\n", xefx.major, xefx.minor, xefx.patch);
++	}
++	if (api.optimal_driver(context->handle) == XESS_RESULT_WARNING_OLD_DRIVER) {
++		std::printf("XeSS: the graphics driver is older than XeSS recommends\n");
++	}
++	// Non-blocking: the pipelines compile while the game boots.
++	const auto result = api.build_pipelines(context->handle, VK_NULL_HANDLE, false, s.init_flags);
++	if (result != XESS_RESULT_SUCCESS) {
++		std::printf("XeSS: pipeline build failed to start (%s)\n", ResultName(result));
++		std::fflush(stdout);
++		return;
++	}
++	std::printf("XeSS: context created, pipelines building\n");
++	std::fflush(stdout);
++	s.spare = std::move(context);
++}
++
++} // namespace Xess
++
++bool RenderExecutor::TryXessUpscale(CommandBuffer& buffer, PreparedBindings& pixel, ImageId output) {
++	if (!Xess::Requested() || pixel.runtime == nullptr || !*pixel.runtime) {
++		return false;
++	}
++	auto& s = Get();
++	if (pixel.runtime->program->shader_hash != s.pass_hash) {
++		return false;
++	}
++	const auto& api = GetApi();
++	if (!api.ready) {
++		return Fail(s, Fallback::NotLoaded);
++	}
++	if (s.device == VK_NULL_HANDLE) {
++		return Fail(s, Fallback::NoContext);
++	}
++	// The pass's bindings: motion vectors, colour, history; its constants (dlss.h).
++	if (pixel.images.size() < 2 || !output || pixel.buffer_sources.empty() ||
++	    pixel.buffer_sources[0].address == 0 || pixel.buffer_sources[0].size < 56) {
++		return Fail(s, Fallback::Bindings);
++	}
++	const auto* cb = reinterpret_cast<const uint32_t*>(pixel.buffer_sources[0].address);
++	float       jitter_uv[2];
++	std::memcpy(jitter_uv, cb, sizeof(jitter_uv));
++	const uint32_t out_w = cb[4], out_h = cb[5], in_w = cb[6], in_h = cb[7], frame = cb[11];
++	if (cb[13] == 0) {
++		return Fail(s, Fallback::NoMotionVectors);
++	}
++	auto&      cache    = m_context.GetTextureCache();
++	const auto mv_id    = pixel.images[0].image_id;
++	const auto color_id = pixel.images[1].image_id;
++	const auto depth_id = UpscalerDepthFor(mv_id);
++	if (!depth_id || cache.m_slot_images.try_get(depth_id) == nullptr) {
++		return Fail(s, Fallback::NoDepth);
++	}
++	auto&      mv    = cache.GetImage(mv_id);
++	auto&      color = cache.GetImage(color_id);
++	auto&      depth = cache.GetImage(depth_id);
++	auto&      out   = cache.GetImage(output);
++	const auto same  = [](const Image& image, uint32_t w, uint32_t h) {
++		return image.info.extent.width == w && image.info.extent.height == h &&
++		       image.backing.image != nullptr && image.info.samples == 1;
++	};
++	if (!same(mv, in_w, in_h) || !same(color, in_w, in_h) || !same(depth, in_w, in_h) ||
++	    !same(out, out_w, out_h) || !depth.info.IsDepth() ||
++	    !(out.backing.usage & vk::ImageUsageFlagBits::eStorage)) {
++		return Fail(s, Fallback::Sizes);
++	}
++
++	// A context for this size: the spare one from device creation, else a new one; both get
++	// ready on a worker while the game's pass keeps running.
++	auto& graphics = m_context.GetGraphics();
++	if (s.current == nullptr || s.current->in_w != in_w || s.current->in_h != in_h ||
++	    s.current->out_w != out_w || s.current->out_h != out_h) {
++		std::shared_ptr<Context> context;
++		bool                     build_started = false;
++		if (s.spare != nullptr) {
++			context       = std::move(s.spare);
++			build_started = true;
++		} else {
++			context = CreateContext(s);
++		}
++		if (context == nullptr) {
++			return Fail(s, Fallback::NoContext);
++		}
++		if (s.current != nullptr) {
++			// Destroyed once this command buffer completed: its earlier executions did too.
++			auto old = std::move(s.current);
++			m_context.GetCommandScheduler().DeferOperation([old]() mutable { old.reset(); });
++		}
++		context->in_w   = in_w;
++		context->in_h   = in_h;
++		context->out_w  = out_w;
++		context->out_h  = out_h;
++		auto* raw       = context.get();
++		auto* target    = &graphics;
++		raw->worker     = std::thread(
++            [context, target, build_started]() { Prepare(context, target, build_started); });
++		s.current    = std::move(context);
++		s.last_frame = 0;
++	}
++	const int status = s.current->status.load(std::memory_order_acquire);
++	if (status == 0) {
++		return Fail(s, Fallback::Warming);
++	}
++	if (status < 0) {
++		return Fail(s, Fallback::InitFailed);
++	}
++
++	// Native recording: outside rendering, the recorder drained (CommandBuffer::Handle). Layouts
++	// as XeSS needs them: inputs sampled, output storage (GENERAL), compute stage.
++	buffer.EndRendering();
++	const auto cmd = buffer.Handle();
++	mv.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {}, cmd);
++	color.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {},
++	              cmd);
++	depth.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {},
++	              cmd);
++	out.Transit(vk::ImageLayout::eGeneral,
++	            vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite, {},
++	            cmd);
++
++	// Views for this execution, destroyed once the command buffer completed.
++	const auto                   device = graphics.device;
++	std::array<vk::ImageView, 4> views {};
++	const auto make_view = [&](const Image& image, vk::ImageAspectFlags aspect) {
++		vk::ImageViewCreateInfo view_info {};
++		view_info.image            = image.backing.image;
++		view_info.viewType         = vk::ImageViewType::e2D;
++		view_info.format           = image.backing.format;
++		view_info.subresourceRange = vk::ImageSubresourceRange {aspect, 0, 1, 0, 1};
++		vk::ImageView view;
++		return device.createImageView(&view_info, nullptr, &view) == vk::Result::eSuccess ? view
++		                                                                                   : vk::ImageView {};
++	};
++	views[0] = make_view(color, vk::ImageAspectFlagBits::eColor);
++	views[1] = make_view(mv, vk::ImageAspectFlagBits::eColor);
++	views[2] = make_view(depth, vk::ImageAspectFlagBits::eDepth);
++	views[3] = make_view(out, vk::ImageAspectFlagBits::eColor);
++	const auto resource = [](const Image& image, vk::ImageView view, vk::ImageAspectFlags aspect) {
++		xess_vk_image_view_info info {};
++		info.imageView        = static_cast<VkImageView>(view);
++		info.image            = static_cast<VkImage>(image.backing.image);
++		info.subresourceRange = {static_cast<VkImageAspectFlags>(aspect), 0, 1, 0, 1};
++		info.format           = static_cast<VkFormat>(image.backing.format);
++		info.width            = image.info.extent.width;
++		info.height           = image.info.extent.height;
++		return info;
++	};
++	bool execute_ok = views[0] && views[1] && views[2] && views[3];
++	if (execute_ok) {
++		xess_vk_execute_params_t params {};
++		params.colorTexture    = resource(color, views[0], vk::ImageAspectFlagBits::eColor);
++		params.velocityTexture = resource(mv, views[1], vk::ImageAspectFlagBits::eColor);
++		params.depthTexture    = resource(depth, views[2], vk::ImageAspectFlagBits::eDepth);
++		params.outputTexture   = resource(out, views[3], vk::ImageAspectFlagBits::eColor);
++		// Jitter in input pixels, as for DLSS (dlss.h).
++		params.jitterOffsetX = s.jitter_sign * jitter_uv[0] * static_cast<float>(in_w);
++		params.jitterOffsetY = s.jitter_sign * jitter_uv[1] * static_cast<float>(in_h);
++		params.exposureScale = 1.0f;
++		params.resetHistory  = (s.last_frame == 0 || frame != s.last_frame + 1) ? 1u : 0u;
++		params.inputWidth    = in_w;
++		params.inputHeight   = in_h;
++		s.last_frame         = frame;
++		s.last_jitter[0]     = params.jitterOffsetX;
++		s.last_jitter[1]     = params.jitterOffsetY;
++		const auto result = api.execute(s.current->handle, static_cast<VkCommandBuffer>(cmd), &params);
++		if (result != XESS_RESULT_SUCCESS) {
++			static std::atomic<uint32_t> logged {0};
++			if (logged.fetch_add(1) < 8) {
++				std::printf("XeSS: execution failed (%s)\n", ResultName(result));
++				std::fflush(stdout);
++			}
++			execute_ok = false;
++		}
++	}
++	buffer.ForgetBoundState();
++	m_context.GetCommandScheduler().DeferOperation([device, views]() {
++		for (const auto view: views) {
++			if (view) {
++				device.destroyImageView(view);
++			}
++		}
++	});
++	if (!execute_ok) {
++		// The layouts changed, nothing was written: the game's pass still draws the output.
++		return Fail(s, Fallback::ExecuteFailed);
++	}
++	// The output now holds XeSS's image: a GPU write of the target, as the draw's would be.
++	out.NoteContentWrite();
++	cache.CommitGpuWrite(out);
++	s.executions++;
++	Summary(s);
++	return true;
++}
++
++} // namespace Libs::Graphics
++
++#else // KYTY_XESS_HEADERS
++
++// Without the SDK headers (unit-test targets): XeSS is never requested and the game's pass runs.
++namespace Libs::Graphics {
++
++namespace Xess {
++
++bool Requested() {
++	return false;
++}
++
++std::vector<const char*> InstanceExtensions() {
++	return {};
++}
++
++std::vector<const char*> DeviceExtensions(VkInstance /*instance*/, VkPhysicalDevice /*physical*/) {
++	return {};
++}
++
++struct DeviceFeatures::Impl {};
++
++DeviceFeatures::DeviceFeatures(): m_impl(std::make_unique<Impl>()) {}
++
++DeviceFeatures::~DeviceFeatures() = default;
++
++void DeviceFeatures::Merge(VkInstance /*instance*/, VkPhysicalDevice /*physical*/,
++                           VkDeviceCreateInfo& /*info*/, VkPhysicalDeviceFeatures& /*features*/) {}
++
++void OnDeviceReady(VkInstance /*instance*/, VkPhysicalDevice /*physical*/, VkDevice /*device*/) {}
++
++} // namespace Xess
++
++bool RenderExecutor::TryXessUpscale(CommandBuffer& /*buffer*/, PreparedBindings& /*pixel*/,
++                                    ImageId /*output*/) {
++	return false;
++}
++
++} // namespace Libs::Graphics
++
++#endif // KYTY_XESS_HEADERS
+diff --git a/src/graphics/host_gpu/renderer/xess.h b/src/graphics/host_gpu/renderer/xess.h
+new file mode 100644
+index 00000000..da1341f8
+--- /dev/null
++++ b/src/graphics/host_gpu/renderer/xess.h
+@@ -0,0 +1,74 @@
++#ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_XESS_H_
++#define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_XESS_H_
++
++#include <vulkan/vulkan.h>
++
++#include <cstdint>
++#include <memory>
++#include <vector>
++
++// ASTROHYBRID_XESS=1 (default 0): Intel XeSS Super Resolution (XeSS 3 SDK, Vulkan path) in place of
++// Astro Bot's own temporal upscale pass (RenderExecutor::TryXessUpscale, xess.cpp). It replaces the
++// same pass as ASTROHYBRID_DLSS (dlss.h: pixel shader 2936e5eca99d75e7) with the same inputs: the
++// SMAA-resolved colour, the game's UV motion vectors (previous to current, jitter included), the
++// depth attachment the G-buffer draws used, and the jitter and sizes from the pass's constants.
++// XeSS writes the game's output target, which every later pass reads.
++//
++// Unlike DLSS it runs on every GPU with DP4a (Intel Arc and Iris Xe use their XMX/DP4a paths,
++// NVIDIA GTX 10 and newer, AMD RDNA) and needs no CUDA address window. Runtime: libxess.dll from
++// the XeSS SDK (https://github.com/intel/xess, redistributable) next to the game or in
++// ASTROHYBRID_XESS_PATH; it is loaded at run time, so a build without it still starts and keeps
++// the game's pass. XeSS frame generation and Xe Low Latency are D3D12-only in the SDK, so this
++// Vulkan port has XeSS Super Resolution only.
++//
++// The XeSS context is created with the device and builds its pipelines in the background; until
++// they are ready (and whenever anything is missing or inconsistent: no libxess.dll, an unsupported
++// device, another size, no depth, the game not using motion vectors this frame) the game's own
++// pass runs. ASTROHYBRID_DLSS and ASTROHYBRID_FSR (dlss.h) take precedence: XeSS runs only when
++// neither is set.
++//
++// Options: ASTROHYBRID_XESS_QUALITY=auto|aa|ultra_quality_plus|ultra_quality|quality|balanced|
++// performance|ultra_performance (default auto: the preset whose input range holds the game's
++// input size, closest to its optimal size; the game decides the input size itself);
++// ASTROHYBRID_XESS_JITTER_SIGN=1|-1 (default ASTROHYBRID_DLSS_JITTER_SIGN, else 1);
++// ASTROHYBRID_XESS_DEPTH_INVERTED=1|0 (default ASTROHYBRID_DLSS_DEPTH_INVERTED, else 0);
++// ASTROHYBRID_XESS_PASS (hex hash, default the DLSS pass); ASTROHYBRID_XESS_LOG=1 (XeSS's own
++// warnings and errors on the console). One "XeSS 10s:" console line every 10 s with executions
++// and fallbacks by reason.
++namespace Libs::Graphics::Xess {
++
++[[nodiscard]] bool Requested();
++
++// Before instance creation: the instance extensions XeSS needs (empty when not requested or
++// libxess.dll is missing).
++[[nodiscard]] std::vector<const char*> InstanceExtensions();
++
++// After the physical device is chosen: the device extensions XeSS needs.
++[[nodiscard]] std::vector<const char*> DeviceExtensions(VkInstance instance, VkPhysicalDevice physical);
++
++// Device creation: the features XeSS needs, merged into a VkDeviceCreateInfo chain. Kyty enables
++// VkPhysicalDeviceFeatures through pEnabledFeatures and the Vulkan 1.1/1.2/1.3 feature structures:
++// XeSS's requests go into those (promoted extension structures into their core fields), other
++// structures are appended; only features the device supports are turned on. Keep the object
++// alive until vkCreateDevice returned.
++class DeviceFeatures final {
++public:
++	DeviceFeatures();
++	~DeviceFeatures();
++	DeviceFeatures(const DeviceFeatures&)            = delete;
++	DeviceFeatures& operator=(const DeviceFeatures&) = delete;
++
++	void Merge(VkInstance instance, VkPhysicalDevice physical, VkDeviceCreateInfo& info,
++	           VkPhysicalDeviceFeatures& features);
++
++private:
++	struct Impl;
++	std::unique_ptr<Impl> m_impl;
++};
++
++// After device creation: creates the XeSS context and starts its pipeline build.
++void OnDeviceReady(VkInstance instance, VkPhysicalDevice physical, VkDevice device);
++
++} // namespace Libs::Graphics::Xess
++
++#endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_XESS_H_
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index b781f4cd..c9d9f517 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -34,6 +34,7 @@
+ #include "graphics/presentation/window.h"
+ #include "graphics/presentation/window/lowLatency.h"
+ #include "graphics/host_gpu/renderer/dlss.h"
++#include "graphics/host_gpu/renderer/xess.h"
+ #include "graphics/host_gpu/renderer/frameGen.h"
+ #include "graphics/host_gpu/renderer/fsr.h"
+ #include "graphics/presentation/window/windowInternal.h"
+@@ -1518,6 +1519,16 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 	create_info.ppEnabledExtensionNames = device_extensions.data();
+ 	create_info.pEnabledFeatures        = &device_features;
+ 
++	// ASTROHYBRID_XESS (renderer/xess.h): the features XeSS needs, merged into this chain; the
++	// merger owns the structures it appends until the device exists.
++	Xess::DeviceFeatures xess_features;
++	if (Xess::Requested()) {
++		xess_features.Merge(static_cast<VkInstance>(graphics.instance),
++		                    static_cast<VkPhysicalDevice>(physical_device),
++		                    reinterpret_cast<VkDeviceCreateInfo&>(create_info),
++		                    reinterpret_cast<VkPhysicalDeviceFeatures&>(device_features));
++	}
++
+ 	vk::Device device = nullptr;
+ 
+ 	auto result = physical_device.createDevice(&create_info, nullptr, &device);
+@@ -1694,6 +1705,15 @@ static void VulkanGetExtensions(VulkanExtensions& r) {
+ 		}
+ 	}
+ 
++	// ASTROHYBRID_XESS (renderer/xess.h): XeSS's instance extensions, where available.
++	for (const auto* name: Xess::InstanceExtensions()) {
++		if (HasExtension(r.available_extensions, name) && !HasExtension(r.required_extensions, name)) {
++			r.required_extensions.push_back(name);
++		} else if (!HasExtension(r.available_extensions, name)) {
++			std::printf("XeSS: instance extension %s unavailable\n", name);
++		}
++	}
++
+ 	if (HasExtension(r.available_extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
+ 		r.required_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+ 	} else {
+@@ -2270,6 +2290,16 @@ void WindowContext::CreateVulkan() {
+ 				}
+ 			}
+ 		}
++		// ASTROHYBRID_XESS (renderer/xess.h): XeSS's device extensions, where available.
++		for (const auto* name: Xess::DeviceExtensions(static_cast<VkInstance>(graphic_ctx.instance),
++		                                              static_cast<VkPhysicalDevice>(graphic_ctx.physical_device))) {
++			if (HasExtension(available_extensions, name) && !HasExtension(device_extensions, name)) {
++				std::printf("XeSS: device extension %s enabled\n", name);
++				device_extensions.push_back(name);
++			} else if (!HasExtension(available_extensions, name)) {
++				std::printf("XeSS: device extension %s unavailable\n", name);
++			}
++		}
+ 		// ASTROHYBRID_LOW_LATENCY (lowLatency.h): VK_NV_low_latency2 with present IDs.
+ 		if (LowLatency::WantExtensions(
+ 		        HasExtension(available_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME),
+@@ -2311,6 +2341,9 @@ void WindowContext::CreateVulkan() {
+ 		LowLatency::OnDeviceCreated(static_cast<VkDevice>(graphic_ctx.device));
+ 	}
+ 	FrameGen::OnDeviceReady();
++	Xess::OnDeviceReady(static_cast<VkInstance>(graphic_ctx.instance),
++	                    static_cast<VkPhysicalDevice>(graphic_ctx.physical_device),
++	                    static_cast<VkDevice>(graphic_ctx.device));
+ 	// Diagnostic only (KYTY_GPU_OP_PROFILE / KYTY_GPU_OP_COUNTERS): wraps dispatcher entries.
+ 	GpuOpProfiler::InstallHooks(graphic_ctx);
+ 	// KYTY_CP_RECORDER_VERIFY ownership hooks wrap the GpuOpProfiler's.
+-- 
+2.55.0.windows.5
+
