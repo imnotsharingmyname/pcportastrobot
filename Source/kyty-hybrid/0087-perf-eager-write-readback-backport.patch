@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] perf: backport eager readback learning for CPU writes
+
+Adapt the eager-write portion of upstream a3458ee70853ea504f9fdcf2b5a43a130c3dcc33.
+Upstream authors: Jetsku and Claude Opus 5.5 (see original commit).
+Upstream preset 9b87d056114a038c762f4da95d72e6d13138110e measured
+2.75 ms/flip saved in sponge_dirty_bath with a 256-page hot set.
+The pinned engine already supports that capacity; do not enlarge the
+staging ring or import unrelated changes. Keep the switch off by default.
+
+---
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -306,8 +306,15 @@
+ // the GPU; the bytes the write sees and the order against newer writers are the same. Other
+ // CPU-dirty transitions (emulator writes reported through InvalidateMemory, direct HandleFault
+ // calls) still drain: nothing faults again after them.
+-Live::Switch g_readback_side_writes("KYTY_READBACK_SIDE_WRITES", Live::ParseDefaultOn);
+-std::atomic<uint64_t> g_readback_side_writes_copies {0};
++Live::Switch g_readback_side_writes("KYTY_READBACK_SIDE_WRITES", Live::ParseDefaultOn);
++
++// Backport the eager-write policy from Jetsku/KytyPS5 a3458ee7.
++// Learn pages that the CPU writes after GPU ownership, just as for read faults.
++// Later GPU writers of those pages can schedule the existing eager readback;
++// publication, ownership and synchronization remain on the original paths.
++// Default off until the hybrid's game scenes have been benchmarked.
++Live::Switch g_readback_eager_writes("KYTY_READBACK_EAGER_WRITES", Live::ParseDefaultOff);
++std::atomic<uint64_t> g_readback_side_writes_copies {0};
+ 
+ // KYTY_READ_FAULT_PUBLISHED (live, default off; =1 on, =verify): a guest thread's read fault on a
+ // page whose bytes the GPU owns does not wait for the GPU. When the faulting instruction is a
+@@ -2081,10 +2088,10 @@
+ 	}
+ 	if (!side_path) {
+ 		diag_path("drain-nonside");
+-		gpu.SendCommandSync([&, this, vaddr, size, is_write, gpu_thread] {
+-			if (!is_write) {
+-				NoteEagerRead(vaddr, size, gpu_thread);
+-			}
++		gpu.SendCommandSync([&, this, vaddr, size, is_write, gpu_thread] {
++			if (!is_write || g_readback_eager_writes.On()) {
++				NoteEagerRead(vaddr, size, gpu_thread);
++			}
+ 			CpGaps::Note(is_write ? CpGaps::Event::DrainWrite : CpGaps::Event::DrainOther);
+ 			ReadMemoryDrain(vaddr, size, is_write, trace);
+ 		});
+@@ -2127,10 +2134,10 @@
+ 	std::shared_ptr<SideReadback> issued;
+ 	auto                          result    = SideIssueResult::Other;
+ 	const auto                    sync_mark = diag ? ReadFaultDiag::NowNs() : 0;
+-	gpu.SendCommandSync([&, this, vaddr, size, is_write] {
+-		if (!is_write) {
+-			NoteEagerRead(vaddr, size, false);
+-		}
++	gpu.SendCommandSync([&, this, vaddr, size, is_write] {
++		if (!is_write || g_readback_eager_writes.On()) {
++			NoteEagerRead(vaddr, size, false);
++		}
+ 		result = TryIssueSideReadback(vaddr, size, issued);
+ 		if ((result == SideIssueResult::CurrentWriter || result == SideIssueResult::Unbounded) &&
+ 		    (g_readback_flush_side.On() || is_write)) {
+-- 
+2.55.0
