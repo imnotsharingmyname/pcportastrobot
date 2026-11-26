@@ -56,10 +56,10 @@
           <TextBlock Classes="muted" Margin="30,4,0,10"
                      Text="Samples the game's stacks into Logs when it produces no output for two minutes." />
 
-          <CheckBox x:Name="ShaderCacheBox" Content="Persistent Shader Cache (eliminates compile hitches)"
+          <CheckBox x:Name="ShaderCacheBox" Content="Persistent Shader Cache (reduces compile hitches)"
                     IsCheckedChanged="OnCheckCommitted" />
           <TextBlock Classes="muted" Margin="30,4,0,10"
-                     Text="On keeps Kyty's _PipelineCache between runs; off clears it and disables the background save, so shaders compile again on the next launch." />
+                     Text="On keeps Kyty's _PipelineCache between runs; off bypasses persistence without deleting existing cache files." />
 
           <CheckBox x:Name="DrawPrepBox" Content="Draw Prep Tuning (reduces CP spin with background apps)"
                     IsCheckedChanged="OnCheckCommitted" />

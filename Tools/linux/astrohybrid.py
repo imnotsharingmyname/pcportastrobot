@@ -204,6 +204,21 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def configure_hybrid_cache(env: dict[str, str]) -> None:
+    """Use the patched Kyty cache title fallback when running without its loader."""
+    if env.get("ASTROHYBRID_SHADER_CACHE") == "0":
+        # In the hybrid there is no Kyty title metadata. An empty fallback ID
+        # disables the normal persisted driver cache rather than deleting files.
+        env["ASTROHYBRID_CACHE_TITLE_ID"] = ""
+        env["KYTY_PROGRAM_CACHE"] = "0"
+        env["KYTY_SHADER_PRECOMPILE"] = "0"
+        env["KYTY_PIPELINE_JOURNAL"] = "0"
+        env["KYTY_PIPELINE_LIST"] = "0"
+        env["KYTY_PIPELINE_LIST_PREPARE"] = "0"
+    else:
+        env.setdefault("ASTROHYBRID_CACHE_TITLE_ID", TITLE_ID)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     run = RUN_HYBRID if args.hybrid else RUN
     binary = run / (args.exe or "AstroBot")
@@ -235,6 +250,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         env.setdefault("KYTY_UPLOAD_DMA_COMPUTE", "1")
     for name, value in args.env:
         env[name] = value
+    if args.hybrid:
+        configure_hybrid_cache(env)
     log(f"== launching {binary}" + (" (hybrid)" if args.hybrid else ""))
     # Negative niceness (higher priority) needs privileges; without them the game
     # still runs, just at the normal level.
