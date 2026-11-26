@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] perf(draw prep): avoid locked claim attempts for ready heads
+
+---
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/window.h b/src/graphics/host_gpu/renderer/drawPrep/window.h
+--- a/src/graphics/host_gpu/renderer/drawPrep/window.h
++++ b/src/graphics/host_gpu/renderer/drawPrep/window.h
+@@ -64,6 +64,23 @@
+ 		return m_slots[seq & m_mask].payload;
+ 	}
+ 
++	// A completed/claimed slot needs only an acquire load, not a locked
++	// read-modify-write on a worker's cache line. On a racing claim the
++	// failed CAS acquires the observed state, including Done.
++	enum class HeadResult { SelfClaimed, Done, Pending };
++
++	[[nodiscard]] HeadResult ClaimOrObserveHead() noexcept {
++		const auto head = Head();
++		auto& state = m_slots[head & m_mask].state;
++		auto observed = state.load(std::memory_order_acquire);
++		if (observed == Encode(head, State::Published) &&
++		    state.compare_exchange_strong(observed, Encode(head, State::Claimed),
++		                                  std::memory_order_acq_rel, std::memory_order_acquire)) {
++			return HeadResult::SelfClaimed;
++		}
++		return observed == Encode(head, State::Done) ? HeadResult::Done : HeadResult::Pending;
++	}
++
+ 	// Claims the head for the producer when no worker has; true when it did.
+ 	[[nodiscard]] bool TryClaimHead() noexcept {
+ 		const auto head     = Head();
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+@@ -1489,7 +1489,8 @@
+ 	auto& slot = window.HeadPayload();
+ 	CommitStats::StepMark(CommitStats::Step::GapDrawOp);
+ 	const auto stats_start = CommitStats::Now();
+-	if (window.TryClaimHead()) {
++	const auto head_result = window.ClaimOrObserveHead();
++	if (head_result == Window<Slot>::HeadResult::SelfClaimed) {
+ 		// No worker has started it: prepare it here, with the exact clean predicate.
+ 		const CpGaps::Scope gap(CpGaps::Cat::HeadSelf);
+ 		PrepareSlot(m_renderer.GetPipelineCache(), slot, true);
+@@ -1498,7 +1499,7 @@
+ 		if (stats_start != 0) {
+ 			CommitStats::NoteHead(CommitStats::Now() - stats_start, 0);
+ 		}
+-	} else if (window.HeadDone()) {
++	} else if (head_result == Window<Slot>::HeadResult::Done || window.HeadDone()) {
+ 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepReady);
+ 	} else {
+ 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitWaits);
+diff --git a/tests/DrawPrepTests.cpp b/tests/DrawPrepTests.cpp
+--- a/tests/DrawPrepTests.cpp
++++ b/tests/DrawPrepTests.cpp
+@@ -780,11 +780,16 @@
+ 	auto*    item = window.TryClaim(seq);
+ 	Check(item != nullptr && seq == 0 && item->input == 0, "a worker claims the oldest slot");
+ 	Check(!window.TryClaimHead(), "the producer cannot claim a worker's slot");
++	Check(window.ClaimOrObserveHead() == DrawPrep::Window<Item>::HeadResult::Pending,
++	      "observing a worker's claimed slot reports pending");
+ 	Check(!window.HeadDone(), "a claimed slot is not done");
+ 	window.Complete(seq);
+ 	Check(window.HeadDone(), "a completed head is done");
++	Check(window.ClaimOrObserveHead() == DrawPrep::Window<Item>::HeadResult::Done,
++	      "observing a completed slot does not claim it again");
+ 	window.Retire();
+-	Check(window.TryClaimHead(), "the producer claims an unclaimed head");
++	Check(window.ClaimOrObserveHead() == DrawPrep::Window<Item>::HeadResult::SelfClaimed,
++	      "the producer claims an unclaimed head");
+ 	window.Retire();
+ 	auto* third = window.TryClaim(seq);
+ 	Check(third != nullptr && seq == 2, "workers skip positions the producer took");
+@@ -832,14 +837,17 @@
+ 	bool     result_ok    = true;
+ 	const auto retire_head = [&] {
+ 		auto& item = window.HeadPayload();
+-		if (window.TryClaimHead()) {
++		const auto result = window.ClaimOrObserveHead();
++		if (result == DrawPrep::Window<Item>::HeadResult::SelfClaimed) {
+ 			item.output      = Work(item.input);
+ 			item.prepared_by = 0;
+ 			item.preparations++;
+ 			self++;
+ 		} else {
+-			while (!window.HeadDone()) {
+-				std::this_thread::yield();
++			if (result != DrawPrep::Window<Item>::HeadResult::Done) {
++				while (!window.HeadDone()) {
++					std::this_thread::yield();
++				}
+ 			}
+ 			by_workers++;
+ 		}
+-- 
+2.55.0
