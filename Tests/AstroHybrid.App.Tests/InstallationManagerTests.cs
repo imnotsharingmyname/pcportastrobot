@@ -57,6 +57,22 @@ namespace AstroHybrid.App.Tests
             Assert.Equal(marker, InstallationManager.ReadKytyVersion(_root));
         }
 
+        [Fact]
+        public async System.Threading.Tasks.Task InstallationStateUsesLatestSharedSource()
+        {
+            var settingsManager = new SettingsManager(_root);
+            var settings = settingsManager.Load();
+            settings.GameDumpPath = Path.Combine(_root, "old.zar");
+            settingsManager.Save(settings);
+            var manager = new InstallationManager(_root, settingsManager);
+            Assert.Equal(settings.GameDumpPath, (await manager.GetInstallationStateAsync()).GameDumpPath);
+
+            var newSource = Path.Combine(_root, "new.zar");
+            settings.GameDumpPath = newSource;
+            settingsManager.Save(settings);
+            Assert.Equal(newSource, (await manager.GetInstallationStateAsync()).GameDumpPath);
+        }
+
         public void Dispose()
         {
             if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
