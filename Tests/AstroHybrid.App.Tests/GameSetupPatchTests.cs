@@ -45,6 +45,41 @@ namespace AstroHybrid.App.Tests
             Assert.True(setup.SetFixed1080pCap("AstroBot.exe", enable: true));
         }
 
+        [Fact]
+        public void Fixed1080pPatchMatchesAcrossReadBoundaryAndPreservesOtherBytes()
+        {
+            string exe = Path.Combine(_runHybrid, "AstroBot.exe");
+            byte[] original = { 0x44, 0x03, 0x73, 0x08, 0x44, 0x89, 0x73, 0x0C };
+            byte[] patched = { 0x45, 0x31, 0xF6, 0x90, 0x44, 0x89, 0x73, 0x0C };
+            var data = new byte[128 * 1024];
+            int offset = 64 * 1024 + 3;
+            Buffer.BlockCopy(original, 0, data, offset, original.Length);
+            File.WriteAllBytes(exe, data);
+
+            var setup = new GameSetup(_root);
+            Assert.True(setup.SetFixed1080pCap("AstroBot.exe", enable: true));
+            var expected = (byte[])data.Clone();
+            Buffer.BlockCopy(patched, 0, expected, offset, patched.Length);
+            Assert.Equal(expected, File.ReadAllBytes(exe));
+
+            Assert.True(setup.SetFixed1080pCap("AstroBot.exe", enable: false));
+            Assert.Equal(data, File.ReadAllBytes(exe));
+        }
+
+        [Fact]
+        public void Fixed1080pPatchDoesNotModifyDuplicateSignatures()
+        {
+            string exe = Path.Combine(_runHybrid, "AstroBot.exe");
+            byte[] original = { 0x44, 0x03, 0x73, 0x08, 0x44, 0x89, 0x73, 0x0C };
+            var data = new byte[128 * 1024];
+            Buffer.BlockCopy(original, 0, data, 10, original.Length);
+            Buffer.BlockCopy(original, 0, data, data.Length - original.Length, original.Length);
+            File.WriteAllBytes(exe, data);
+
+            Assert.False(new GameSetup(_root).SetFixed1080pCap("AstroBot.exe", enable: true));
+            Assert.Equal(data, File.ReadAllBytes(exe));
+        }
+
         public void Dispose()
         {
             if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
