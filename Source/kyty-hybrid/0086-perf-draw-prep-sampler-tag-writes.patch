@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] Avoid redundant sampler and texture tag initialization during draw preparation
+
+---
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
+--- a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
+@@ -156,7 +156,8 @@
+ bool PlanSamplers(SamplerCache& cache, const CompiledShaderInfo& program,
+                   const ResourceSnapshot& resources, StagePlan& stage) {
+ 	const auto count = program.info.samplers.size();
+-	stage.samplers.assign(count, vk::Sampler {});
++	// Each valid plan overwrites every sampler; keep the existing storage.
++	stage.samplers.resize(count);
+ 	uint32_t absent = 0;
+ 	for (size_t i = 0; i < count; i++) {
+ 		const auto snapshot_index = program.info.samplers[i].snapshot_index;
+@@ -188,7 +189,7 @@
+ 	}
+ 	stage.texture_hashes.resize(count);
+ 	if (memo != nullptr) {
+-		stage.texture_tags.assign(count, 0);
++		stage.texture_tags.resize(count);
+ 	}
+ 	uint32_t hints = 0;
+ 	for (size_t i = 0; i < count; i++) {
+@@ -198,10 +199,11 @@
+ 		}
+ 		const auto key          = TextureBindingMemo::MakeKey(program.info.images[i], descriptor.fields);
+ 		stage.texture_hashes[i] = TextureBindingMemo::Hash(key);
+-		uint64_t tag            = 0;
+-		if (memo != nullptr && memo->FindHint(key, stage.texture_hashes[i], tag)) {
+-			stage.texture_tags[i] = tag;
+-			hints++;
++		if (memo != nullptr) {
++			uint64_t tag = 0;
++			const bool hit = memo->FindHint(key, stage.texture_hashes[i], tag);
++			stage.texture_tags[i] = hit ? tag : 0;
++			hints += hit ? 1u : 0u;
+ 		}
+ 	}
+ 	stage.texture_tags_valid = memo != nullptr;
+-- 
+2.55.0
