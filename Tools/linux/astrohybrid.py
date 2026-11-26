@@ -227,6 +227,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         env.setdefault("KYTY_GPU_HOST_MODULE", "libs/libAstroHybridHost.prx")
         env.setdefault("KYTY_GPU_WIDTH", "1920")
         env.setdefault("KYTY_GPU_HEIGHT", "1080")
+        # Give the Kyty command-processor thread a physical core of its own (Linux patch 0002):
+        # ~+11% in Sky Garden, which is bound by that thread. KYTY_CPU_RESERVE=off (or --env) opts out.
+        env.setdefault("KYTY_CPU_RESERVE", "cp")
     for name, value in args.env:
         env[name] = value
     log(f"== launching {binary}" + (" (hybrid)" if args.hybrid else ""))

@@ -14,6 +14,7 @@
 #   KYTY_PGO=generate   instrumented build; run it with KYTY_PGO_FILE=<file.profraw> (written every
 #                       10 s, Tools/linux/pgo/pgo_dump.cpp), then
 #                       llvm-profdata merge --text -o Tools/linux/pgo/<name>.proftext <file.profraw>
+#   KYTY_JOBS           parallel compile jobs (default: nproc; lower it on PCs short of RAM)
 #   KYTY_PGO_PROFILE    profile to use (.proftext or .profdata; default: last Tools/linux/pgo/*.proftext by name)
 # A profile matches the source it was recorded with; after big Kyty changes record a new one.
 set -euo pipefail
@@ -71,7 +72,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja "${PGO_ARGS[@]}" \
   -DBUILD_TESTING=OFF
 
 echo "== building the emulator objects"
-cmake --build "$BUILD" --target kyty_emulator --parallel "$(nproc)"
+cmake --build "$BUILD" --target kyty_emulator --parallel "${KYTY_JOBS:-$(nproc)}"
 
 echo "== linking kyty_gpu.so"
 KYTY_EXTRA_OBJS=$EXTRA_OBJS python3 "$ROOT/Tools/linux/build-kyty-gpu.py" --build "$BUILD" --out "$ROOT/Build/kyty-gpu"

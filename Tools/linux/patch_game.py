@@ -39,6 +39,21 @@ SOFT_ASSERT = (
 ULTRAWIDE = ("ultrawide render aspect", "398ee33f", "8ee31840")
 
 
+LIGHTING = [
+    ("non-tiled lighting", "4584f60f84f10800004531f64c8d3d", "4584f6e9f2080000904531f64c8d3d"),
+    ("lighting shaders off", "0fb682a00700008887e4050000", "b80000000090908887e4050000"),
+]
+CMDBUF_TABLE_16 = "1000000010000000100000001000000010000000100020003000400008000000"
+BASE_PATCHES = [
+    ("cmdbuf_worker_mib_table", "0700000007000000040000000400000006000000100020003000400008000000", CMDBUF_TABLE_16),
+    ("cmdbuf_worker_mib_table_16", "0800000008000000080000000800000008000000100020003000400008000000", CMDBUF_TABLE_16),
+    ("cmdbuf_null_memcpy_guard1", "4531FFEB0F49C1E4024D29E74983E7FC4D897E18488B7318", "4531FFEB2649C1E4024D29E74983E7FC4D897E18488B7318"),
+    ("cmdbuf_null_memcpy_guard2", "4531FFEB0F49C1E4024D29E74983E7FC4D897E18488B7328", "4531FFEB5849C1E4024D29E74983E7FC4D897E18488B7328"),
+    ("cmdbuf_null_memcpy_guard3", "4531FFEB134A8D04A5000000004929C74983E7FC4D897E18488B7320", "4531FFEB634A8D04A5000000004929C74983E7FC4D897E18488B7320"),
+    ("garlic_pool_plus_256mib", "B80000C08748C785", "B80000C09748C785"),
+]
+
+
 def log(message: str) -> None:
     print(message, flush=True)
 
@@ -103,8 +118,23 @@ def main(argv: list[str]) -> int:
     if not base_path.is_file():
         raise SystemExit(f"{base_path} is missing; run setup first")
 
-    base = base_path.read_bytes()
-    lighting = load_toml_patches(Path(args.patches), ["non_tiled_lighting", "gi_probes_off"])
+    base = bytearray(base_path.read_bytes())
+    # Same base patches as the Windows setup (AstroHybrid.App/Services/GameSetup.cs): 16 MiB worker
+    # command buffers, NULL-memcpy guards (#47, #50, #6, #159) and the Garlic pool +256 MiB (#166).
+    for name, original, patched in BASE_PATCHES:
+        count = apply_all(base, name, bytes.fromhex(original), bytes.fromhex(patched))
+        log(f"==   {name}: {count} match(es)")
+    base_path.write_bytes(base)
+    base = bytes(base)
+    # The toml patterns are the bare 6-byte JE (17 matches in 01.019.000: patching all of them breaks
+    # unrelated branches, e.g. an empty std::function throw at ps_logo). Use the Windows setup's unique
+    # patterns (GameSetup.cs FasterLightingPatches) and require exactly one match.
+    lighting = [(name, bytes.fromhex(o), bytes.fromhex(n)) for name, o, n in LIGHTING]
+    for name, original, _ in lighting:
+        if base.count(original) != 1:
+            log(f"==   faster lighting: '{name}' found {base.count(original)} times; variant skipped")
+            lighting = []
+            break
     if not lighting:
         log("== no lighting patches found; only the plain variants will be written")
 

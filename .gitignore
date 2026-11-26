@@ -28,3 +28,5 @@
 /AstroBot Launcher.exe
 /work/
 /Reddit post/
+__pycache__/
+*.pyc
