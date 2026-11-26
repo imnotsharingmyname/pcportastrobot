@@ -86,11 +86,14 @@ foreach ($f in 'nvngx_dlss.license.txt', 'streamline.license.txt', 'reflex.licen
     Copy-Item (Join-Path $src $f) $run
     Copy-Item (Join-Path $src $f) (Join-Path $stage 'licenses')
 }
+# The shader/pipeline list (keys only, no game code: pipelineList.h) is what the launcher's shader prep
+# and KYTY_PIPELINE_LIST precompile from on a fresh install. 1.2.25-1.2.29 shipped without it because
+# this copy was optional, and every new install then compiled its shaders during play (heavy stutter).
 $pl = Join-Path $src 'PipelineLists'
-if (Test-Path $pl) {
-    New-Item -ItemType Directory -Force (Join-Path $run 'PipelineLists') | Out-Null
-    Copy-Item (Join-Path $pl '*.kyplst') (Join-Path $run 'PipelineLists') -ErrorAction SilentlyContinue
-}
+$lists = @(Get-ChildItem $pl -Filter '*.kyplst' -File -ErrorAction SilentlyContinue)
+if (-not ($lists | Where-Object Name -eq 'PPSA21567.kyplst')) { throw "Build\RunHybrid\PipelineLists\PPSA21567.kyplst is missing: fresh installs would compile every shader during play" }
+New-Item -ItemType Directory -Force (Join-Path $run 'PipelineLists') | Out-Null
+$lists | Copy-Item -Destination (Join-Path $run 'PipelineLists')
 # Intel XeSS Super Resolution (ASTROHYBRID_XESS): libxess.dll from the XeSS SDK's bin folder
 # (https://github.com/intel/xess), redistributable unmodified under the Intel Simplified Software
 # License; put it and that licence (as xess.license.txt) in Build\RunHybrid. Optional: without it

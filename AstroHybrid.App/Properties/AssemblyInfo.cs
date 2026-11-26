@@ -13,5 +13,5 @@ using System.Runtime.InteropServices;
 [assembly: ComVisible(false)]
 [assembly: InternalsVisibleTo("AstroHybrid.App.Tests")]
 [assembly: Guid("8f4e5b2a-7c3d-4a1e-9b6f-2d8e4c7a9f1b")]
-[assembly: AssemblyVersion("1.2.29.0")]
-[assembly: AssemblyFileVersion("1.2.29.0")]
+[assembly: AssemblyVersion("1.2.30.0")]
+[assembly: AssemblyFileVersion("1.2.30.0")]
