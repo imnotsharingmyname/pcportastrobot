@@ -95,15 +95,19 @@ def route(sink: str, game: str) -> bool:
     if current is None:
         return moved
     existing = set(current)
+    added = []
     for source, target in sorted(wanted - existing):
         result = run(["pw-link", source, target])
-        if result is None or result.returncode != 0:
-            # A concurrent session manager may have already made this link.
-            # The readback below is authoritative.
-            continue
+        if result is not None and result.returncode == 0:
+            added.append((source, target))
 
     current = links(game)
     if current is None or not wanted.issubset(set(current)):
+        # Roll back links we created for channels that already had a route.
+        # Do not remove a channel's only connection or a pre-existing link.
+        for source, target in added:
+            if any(old_source == source for old_source, _ in existing):
+                run(["pw-link", "-d", source, target])
         return moved
 
     stereo_sources = {source for source, _ in wanted}
