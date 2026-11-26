@@ -230,6 +230,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         # Give the Kyty command-processor thread a physical core of its own (Linux patch 0002):
         # ~+11% in Sky Garden, which is bound by that thread. KYTY_CPU_RESERVE=off (or --env) opts out.
         env.setdefault("KYTY_CPU_RESERVE", "cp")
+        # Run Kyty's upload DMA on an async compute queue (Linux patch 0004): RADV exposes no
+        # transfer-only queue, so it was off on AMD. ~+7% at 4K. KYTY_UPLOAD_DMA_COMPUTE=0 (or --env) opts out.
+        env.setdefault("KYTY_UPLOAD_DMA_COMPUTE", "1")
     for name, value in args.env:
         env[name] = value
     log(f"== launching {binary}" + (" (hybrid)" if args.hybrid else ""))

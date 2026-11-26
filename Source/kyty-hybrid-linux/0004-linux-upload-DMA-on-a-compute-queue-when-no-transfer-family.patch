@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Craig <6146447+dev-kreg@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 15:32:15 -0600
+Subject: [PATCH] linux: upload DMA on a compute queue when no transfer-only
+ family exists
+
+RADV exposes no transfer-only queue family (its SDMA engines are not
+offered to Vulkan), so KYTY_UPLOAD_DMA found no queue and the upload DMA
+path (off-CP staging copy of guest bytes plus deferred write protections)
+stayed off on AMD under Linux.
+
+KYTY_UPLOAD_DMA_COMPUTE=1 (default off) falls back to a queue of a
+compute family other than the graphics one. UploadDma only records buffer
+copies and timeline signals, which any transfer-capable family runs. The
+fallback skips FSR FG's family when FG took a separate one, since a family
+may appear in only one VkDeviceQueueCreateInfo; upload DMA then stays off.
+
+Sky Garden, RADV, 4K, 7 interleaved rounds: 38.2 -> 40.8 fps.
+---
+ .../presentation/window/vulkanWindow.cpp      | 23 ++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index 4542a7bd..8710ac4c 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -810,6 +810,27 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 				break;
+ 			}
+ 		}
++		// KYTY_UPLOAD_DMA_COMPUTE=1 (default off): with no transfer-only family (RADV exposes its
++		// SDMA engines to Vulkan on no current GPU), take a queue of a compute family other than the
++		// graphics one. UploadDma only records buffer copies and timeline signals, which any
++		// transfer-capable family runs; the ring and the shared buffers are concurrent across the
++		// two families either way. What moves off the command processor is the same as with SDMA:
++		// the staging copy of guest bytes and the deferred write protections (KYTY_DEFER_PROTECTS).
++		// Not FSR FG's family when it took a separate one (RADV's graphics family has one queue):
++		// a family may appear in only one VkDeviceQueueCreateInfo; upload DMA then stays off.
++		const auto* compute_env = std::getenv("KYTY_UPLOAD_DMA_COMPUTE");
++		if (graphics.transfer_queue_family == static_cast<uint32_t>(-1) && compute_env != nullptr &&
++		    compute_env[0] == '1') {
++			for (uint32_t family = 0; family < count; family++) {
++				const auto flags = families[family].queueFlags;
++				if (family != queue_family && family != g_fsr_queue_family && families[family].queueCount != 0 &&
++				    (flags & vk::QueueFlagBits::eTransfer) && (flags & vk::QueueFlagBits::eCompute) &&
++				    !(flags & vk::QueueFlagBits::eGraphics)) {
++					graphics.transfer_queue_family = family;
++					break;
++				}
++			}
++		}
+ 	}
+ 	uint32_t queue_create_count = 1;
+ 	if (graphics.transfer_queue_family != static_cast<uint32_t>(-1)) {
+@@ -819,7 +840,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
+ 		transfer.pQueuePriorities = queue_priorities.data();
+ 	}
+ 	if (g_fsr_queue_count != 0 && g_fsr_queue_family != queue_family) {
+-		// A compute family: never the transfer-only family above.
++		// A compute family: never the upload DMA family above (that one excludes it).
+ 		auto& fsr_queues            = queue_create_infos[queue_create_count++];
+ 		fsr_queues.queueFamilyIndex = g_fsr_queue_family;
+ 		fsr_queues.queueCount       = g_fsr_queue_count;
+-- 
+2.56.1
+
