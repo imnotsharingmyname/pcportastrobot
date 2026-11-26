@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] perf: compare descriptor reuse arrays with one type and bounds check
+
+---
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptorSetReuse.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptorSetReuse.cpp
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptorSetReuse.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptorSetReuse.cpp
+@@ -2,7 +2,8 @@
+ 
+ #include "common/assert.h"
+ 
+-#include <xxhash.h>
++#include <algorithm>
++#include <xxhash.h>
+ 
+ namespace Libs::Graphics {
+ 
+@@ -43,19 +44,23 @@
+ 	for (const auto& write: writes) {
+ 		Mix(hash, (static_cast<uint64_t>(write.dstBinding) << 32u) ^ write.descriptorCount);
+ 		Mix(hash, (static_cast<uint64_t>(write.descriptorType) << 32u) ^ write.dstArrayElement);
+-		for (uint32_t i = 0; i < write.descriptorCount; i++) {
+-			if (IsBufferDescriptor(write.descriptorType) && write.pBufferInfo != nullptr) {
+-				const auto& info = write.pBufferInfo[i];
+-				Mix(hash, HandleBits(info.buffer));
+-				Mix(hash, info.offset);
+-				Mix(hash, info.range);
+-			} else if (IsImageDescriptor(write.descriptorType) && write.pImageInfo != nullptr) {
+-				const auto& info = write.pImageInfo[i];
+-				Mix(hash, HandleBits(info.sampler));
+-				Mix(hash, HandleBits(info.imageView));
+-				Mix(hash, static_cast<uint64_t>(info.imageLayout));
+-			}
+-		}
++		// A Vulkan write has one descriptor type for its entire array.
++		// Classify once and retain the original field mixing order.
++		if (IsBufferDescriptor(write.descriptorType) && write.pBufferInfo != nullptr) {
++			for (uint32_t i = 0; i < write.descriptorCount; i++) {
++				const auto& info = write.pBufferInfo[i];
++				Mix(hash, HandleBits(info.buffer));
++				Mix(hash, info.offset);
++				Mix(hash, info.range);
++			}
++		} else if (IsImageDescriptor(write.descriptorType) && write.pImageInfo != nullptr) {
++			for (uint32_t i = 0; i < write.descriptorCount; i++) {
++				const auto& info = write.pImageInfo[i];
++				Mix(hash, HandleBits(info.sampler));
++				Mix(hash, HandleBits(info.imageView));
++				Mix(hash, static_cast<uint64_t>(info.imageLayout));
++			}
++		}
+ 	}
+ 	return hash;
+ }
+@@ -77,17 +82,25 @@
+ 		    write.descriptorType != old.descriptorType) {
+ 			return false;
+ 		}
+-		for (uint32_t j = 0; j < write.descriptorCount; j++) {
+-			if (IsBufferDescriptor(write.descriptorType)) {
+-				if (buffer_index >= entry.buffers.size() ||
+-				    !(write.pBufferInfo[j] == entry.buffers[buffer_index++])) {
+-					return false;
+-				}
+-			} else if (image_index >= entry.images.size() ||
+-			           !(write.pImageInfo[j] == entry.images[image_index++])) {
+-				return false;
+-			}
+-		}
++		const size_t count = write.descriptorCount;
++		// Supported() already checked the descriptor type and info pointer.
++		// Bound the whole slice once; compare every element using Vulkan-Hpp
++		// equality (not raw bytes, which could include padding).
++		if (IsBufferDescriptor(write.descriptorType)) {
++			if (count > entry.buffers.size() - buffer_index ||
++			    !std::equal(write.pBufferInfo, write.pBufferInfo + count,
++			                entry.buffers.begin() + buffer_index)) {
++				return false;
++			}
++			buffer_index += count;
++		} else {
++			if (count > entry.images.size() - image_index ||
++			    !std::equal(write.pImageInfo, write.pImageInfo + count,
++			                entry.images.begin() + image_index)) {
++				return false;
++			}
++			image_index += count;
++		}
+ 	}
+ 	return buffer_index == entry.buffers.size() && image_index == entry.images.size();
+ }
+-- 
+2.55.0
