@@ -46,58 +46,75 @@ def output_ports(game: str) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip().startswith(prefix)]
 
 
-def links(game: str) -> list[tuple[str, str]]:
+def links(game: str) -> list[tuple[str, str]] | None:
     result = run(["pw-link", "-l"])
     if result is None or result.returncode != 0:
-        return []
+        return None
     found: list[tuple[str, str]] = []
     source: str | None = None
     for line in result.stdout.splitlines():
         stripped = line.strip()
-        if stripped.startswith(game + ":output_"):
-            source = stripped
-        elif source is not None and stripped.startswith("|->"):
-            found.append((source, stripped[3:].strip()))
-            source = None
+        if stripped.startswith("|->"):
+            if source is not None:
+                found.append((source, stripped[3:].strip()))
+        elif stripped.startswith("|<-"):
+            continue
+        else:
+            # Every port heading resets the source; one output can have multiple links.
+            source = stripped if stripped.startswith(game + ":output_") else None
     return found
 
 
 def route(sink: str, game: str) -> bool:
-    ports = output_ports(game)
-    if not ports:
-        return False
-
-    # One Pulse sink-input move covers PulseAudio hosts; PipeWire filter chains may ignore it,
-    # so fix the graph below as well.
+    # PulseAudio-only systems do not have pw-link. Do not require its ports
+    # before attempting to move the stream via PulseAudio.
+    moved = False
     result = run(["pactl", "list", "sink-inputs"])
     if result is not None and result.returncode == 0:
-        for block in result.stdout.split("\n\n"):
+        for block in re.split(r"(?m)(?=^Sink Input #)", result.stdout):
             if f'application.name = "{game}"' not in block:
                 continue
             match = re.search(r"Sink Input #(\d+)", block)
             if match:
-                run(["pactl", "move-sink-input", match.group(1), sink])
+                move = run(["pactl", "move-sink-input", match.group(1), sink])
+                moved |= move is not None and move.returncode == 0
+
+    ports = set(output_ports(game))
+    if not ports:
+        return moved
 
     wanted = {
-        f"{sink}:playback_FL": f"{game}:output_FL",
-        f"{sink}:playback_FR": f"{game}:output_FR",
+        (f"{game}:output_FL", f"{sink}:playback_FL"),
+        (f"{game}:output_FR", f"{sink}:playback_FR"),
     }
-    for source, target in links(game):
-        if target not in wanted:
-            run(["pw-link", "-d", source, target])
-
-    existing = set(links(game))
-    connected = 0
-    for target, source in wanted.items():
-        if source not in ports:
-            continue
-        if (source, target) in existing:
-            connected += 1
-            continue
+    # Leave non-stereo/unknown port layouts untouched. Never disconnect the
+    # existing graph until BOTH desired stereo links have been established.
+    if not {source for source, _ in wanted}.issubset(ports):
+        return moved
+    current = links(game)
+    if current is None:
+        return moved
+    existing = set(current)
+    added = []
+    for source, target in sorted(wanted - existing):
         result = run(["pw-link", source, target])
         if result is not None and result.returncode == 0:
-            connected += 1
-    return connected > 0
+            added.append((source, target))
+
+    current = links(game)
+    if current is None or not wanted.issubset(set(current)):
+        # Roll back links we created for channels that already had a route.
+        # Do not remove a channel's only connection or a pre-existing link.
+        for source, target in added:
+            if any(old_source == source for old_source, _ in existing):
+                run(["pw-link", "-d", source, target])
+        return moved
+
+    stereo_sources = {source for source, _ in wanted}
+    for source, target in current:
+        if source in stereo_sources and (source, target) not in wanted:
+            run(["pw-link", "-d", source, target])
+    return True
 
 
 def main() -> int:
