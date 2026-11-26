@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] Remove bounded buffer-cache GC candidate heap allocations
+
+---
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -4967,21 +4967,22 @@
+ 		return;
+ 	}
+ 	const auto            limit_tick = std::prev(newer)->second;
+-	std::vector<BufferId> candidates;
+-	size_t                scanned = 0;
++	std::array<BufferId, 64> candidates {};
++	size_t candidate_count = 0;
++	size_t scanned = 0;
+ 	m_lru_cache.ForEachItemBelow(limit_tick, [&](BufferId id) {
+ 		const auto& buffer = m_slot_buffers[id];
+ 		if (!buffer.is_deleted && !m_gpu_modified_ranges.Intersects(buffer.CpuAddress(), buffer.Size())) {
+-			candidates.push_back(id);
+-		}
+-		return ++scanned >= 4096 || candidates.size() >= 64;
+-	});
+-	if (candidates.empty()) {
++			candidates[candidate_count++] = id;
++		}
++		return ++scanned >= 4096 || candidate_count >= candidates.size();
++	});
++	if (candidate_count == 0) {
+ 		return;
+ 	}
+ 	// As the collector below: settle pending side readbacks before the ownership checks.
+ 	CompleteAllSideReadbacks();
+-	for (const auto id: candidates) {
++	for (const auto id: std::span(candidates).first(candidate_count)) {
+ 		if (IsBufferInvalid(id)) {
+ 			continue;
+ 		}
+@@ -5057,8 +5058,9 @@
+ 	const uint64_t age        = std::min<uint64_t>(aggressive ? 80 : 160, tick);
+ 	const size_t   limit      = aggressive ? 64 : 32;
+ 
+-	std::vector<BufferId> dirty_buffers;
+-	size_t                retire_count = 0;
++	std::array<BufferId, 64> dirty_buffers {};
++	size_t dirty_count = 0;
++	size_t retire_count = 0;
+ 	m_lru_cache.ForEachItemBelow(tick - age, [&](BufferId id) {
+ 		auto& buffer = m_slot_buffers[id];
+ 		EXIT_IF(buffer.is_deleted);
+@@ -5070,7 +5072,7 @@
+ 		}
+ 		if (dirty) {
+ 			EXIT_IF(!DownloadBufferMemory(buffer, buffer.CpuAddress(), buffer.Size()));
+-			dirty_buffers.push_back(id);
++			dirty_buffers[dirty_count++] = id;
+ 		} else {
+ 			m_memory_tracker.UntrackMemory(buffer.CpuAddress(), buffer.Size());
+ 			DeleteBuffer(id);
+@@ -5078,7 +5080,7 @@
+ 		}
+ 		return ++retire_count == limit;
+ 	});
+-	if (dirty_buffers.empty()) {
++	if (dirty_count == 0) {
+ 		return;
+ 	}
+ 
+@@ -5086,7 +5088,7 @@
+ 	const auto completion_tick = m_scheduler.CurrentTick();
+ 	m_scheduler.Wait(completion_tick);
+ 	m_scheduler.WaitPriorityOperations(completion_tick);
+-	for (const auto id: dirty_buffers) {
++	for (const auto id: std::span(dirty_buffers).first(dirty_count)) {
+ 		auto& buffer = m_slot_buffers[id];
+ 		m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());
+ 		if (m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size()) ||
+-- 
+2.55.0
