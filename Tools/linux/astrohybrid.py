@@ -124,10 +124,25 @@ def link_or_copy(source: Path, target: Path) -> None:
 
 def make_app0(game: Path, run: Path) -> None:
     """Give the title an app0 that does not write converted modules into the dump."""
+    game = game.resolve()
     app0 = run / "app0"
+    # Never rebuild into the game source itself, even through a symlink.
+    target_path = app0.resolve()
+    if target_path == game or target_path in game.parents or game in target_path.parents:
+        fail("The game source and generated app0 directory must not overlap.")
+    if app0.is_symlink():
+        app0.unlink()
     app0.mkdir(parents=True, exist_ok=True)
 
-    for entry in game.iterdir():
+    entries = list(game.iterdir())
+    names = {entry.name for entry in entries}
+    # Entries from a previous source that no longer exist must not be read
+    # from the old dump. Only remove stale symlinks owned by this layout.
+    for old in app0.iterdir():
+        if old.name not in names and old.is_symlink():
+            old.unlink()
+
+    for entry in entries:
         target = app0 / entry.name
         if entry.name == "sce_module":
             continue  # copied below so the relinker can write the guest modules here
@@ -193,6 +208,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if args.hybrid:
         if not (RUN / "AstroBot").is_file():
             fail("Build/Run/AstroBot is missing; run 'setup' without --hybrid first")
+        linked_eboot = RUN / "app0" / "eboot.bin"
+        if not linked_eboot.is_file() or linked_eboot.resolve() != (game / "eboot.bin").resolve():
+            fail("The base runtime belongs to a different or moved dump; run 'setup' without --hybrid for this game folder first.")
         subprocess.run([sys.executable, str(ROOT / "Tools" / "linux" / "make-run-hybrid.py")],
                        check=True)
         subprocess.run([sys.executable, str(ROOT / "Tools" / "linux" / "patch_game.py"),

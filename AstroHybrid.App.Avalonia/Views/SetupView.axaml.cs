@@ -101,6 +101,12 @@ public partial class SetupView : UserControl, IPageRefresh
 
     private async void Install(object? sender, RoutedEventArgs e)
     {
+        if (_backend.GameRunning)
+        {
+            _backend.SetStatus("Stop the game before rebuilding the runtime");
+            return;
+        }
+        if (_backend.IsBusy) return;
         var path = GamePathBox.Text?.Trim() ?? "";
         if (!Directory.Exists(path))
         {
@@ -114,17 +120,16 @@ public partial class SetupView : UserControl, IPageRefresh
 
         try
         {
-            if (!File.Exists(Path.Combine(_backend.RunDirectory, "AstroBot")))
+            // Install / rebuild explicitly regenerates the base executable
+            // and app0 links for the selected source, even on an existing install.
+            Append("== relinking the base runtime");
+            _backend.SetStatus("Building the base runtime…", true);
+            var baseResult = await _backend.SetupAsync(path, false, Append);
+            if (!baseResult.Success)
             {
-                Append("== relinking the base runtime");
-                _backend.SetStatus("Building the base runtime…", true);
-                var baseResult = await _backend.SetupAsync(path, false, Append);
-                if (!baseResult.Success)
-                {
-                    Append($"Base setup failed (exit {baseResult.ExitCode}).");
-                    _backend.SetStatus($"Base setup failed (exit {baseResult.ExitCode})");
-                    return;
-                }
+                Append($"Base setup failed (exit {baseResult.ExitCode}).");
+                _backend.SetStatus($"Base setup failed (exit {baseResult.ExitCode})");
+                return;
             }
 
             Append("== laying out the hybrid runtime");
