@@ -1,12 +1,18 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From a0e3a255a22d61c29e41bc4de65b29979c5db885 Mon Sep 17 00:00:00 2001
 From: AstroHybrid <noreply@localhost>
+Date: Thu, 26 Nov 2026 11:42:59 +0000
 Subject: [PATCH] Honor zero-spin draw-preparation worker settings
 
 ---
+ .../host_gpu/renderer/drawPrep/workerGate.h        | 14 ++++++++------
+ tests/DrawPrepTests.cpp                            |  9 +++++++++
+ 2 files changed, 17 insertions(+), 6 deletions(-)
+
 diff --git a/src/graphics/host_gpu/renderer/drawPrep/workerGate.h b/src/graphics/host_gpu/renderer/drawPrep/workerGate.h
+index 54147091..f6f611ff 100644
 --- a/src/graphics/host_gpu/renderer/drawPrep/workerGate.h
 +++ b/src/graphics/host_gpu/renderer/drawPrep/workerGate.h
-@@ -211,7 +211,7 @@
+@@ -211,7 +211,7 @@ void RunPreparationWorker(WorkerGate& gate, WindowT& window, uint32_t index, uin
                            OnColdWake&& on_cold_wake) {
  	const bool hot        = gate.Hot(index);
  	const auto spin_limit = hot ? hot_spin_ns : cold_spin_ns;
@@ -15,7 +21,7 @@ diff --git a/src/graphics/host_gpu/renderer/drawPrep/workerGate.h b/src/graphics
  	uint32_t   spins      = 0;
  	while (!stop.load(std::memory_order_acquire)) {
  		uint64_t seq = 0;
-@@ -220,13 +220,15 @@
+@@ -220,13 +220,15 @@ void RunPreparationWorker(WorkerGate& gate, WindowT& window, uint32_t index, uin
  				on_cold_wake();
  			}
  			prepare(*slot, seq);
@@ -35,7 +41,7 @@ diff --git a/src/graphics/host_gpu/renderer/drawPrep/workerGate.h b/src/graphics
  		}
  		if (hot) {
  			gate.ParkHot([&window] { return window.HasClaimable(); }, stop);
-@@ -234,7 +236,7 @@
+@@ -234,7 +236,7 @@ void RunPreparationWorker(WorkerGate& gate, WindowT& window, uint32_t index, uin
  			gate.ParkCold([&window, &gate] { return window.Unclaimed() >= gate.WakeBacklog(); },
  			              stop);
  		}
@@ -45,9 +51,10 @@ diff --git a/src/graphics/host_gpu/renderer/drawPrep/workerGate.h b/src/graphics
  }
  
 diff --git a/tests/DrawPrepTests.cpp b/tests/DrawPrepTests.cpp
+index bdf8a492..23995442 100644
 --- a/tests/DrawPrepTests.cpp
 +++ b/tests/DrawPrepTests.cpp
-@@ -2008,6 +2008,15 @@
+@@ -2016,6 +2016,15 @@ int main(int argc, char** argv) {
  	TestWorkerGateBasics();
  	TestAwaitHead();
  	TestWorkerGateStress();
@@ -64,4 +71,5 @@ diff --git a/tests/DrawPrepTests.cpp b/tests/DrawPrepTests.cpp
  	TestColdTokenStress();
  	TestStealStress();
 -- 
-2.55.0
+2.55.0.windows.5
+

@@ -1,24 +1,29 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 9517a52d652d34acb6cbeb2daa037f8b5c51abc1 Mon Sep 17 00:00:00 2001
 From: AstroHybrid <noreply@localhost>
-Subject: [PATCH] perf(draw prep): reuse shader data vectors without redundant writes
+Date: Thu, 26 Nov 2026 11:42:58 +0000
+Subject: [PATCH] perf(draw prep): reuse shader data vectors without redundant
+ writes
 
 ---
+ .../host_gpu/renderer/drawPrep/bindingPlan.cpp      | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
 diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
+index 45a7df72..ba1af8ed 100644
 --- a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
 +++ b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
-@@ -109,11 +109,16 @@
+@@ -109,11 +109,16 @@ bool PlanShaderData(const CompiledShaderInfo& program, const ResourceSnapshot& r
  	     layout.MipStatsOffsetDword() + layout.mip_stats_count > dwords)) {
  		return false;
  	}
 -	shader_data.clear();
 -	shader_data.reserve(dwords);
 -	AppendUserShaderData(program, resources, shader_data);
--	shader_data.resize(dwords);
--	std::fill(shader_data.begin() + layout.memory_offset_dword, shader_data.end(), 0);
 +	// Reset() deliberately keeps the stage's allocation and size. Overwrite
 +	// the surviving user-data prefix directly and zero the remaining words
 +	// once, rather than clearing, appending, resizing and zeroing again.
-+	shader_data.resize(dwords);
+ 	shader_data.resize(dwords);
+-	std::fill(shader_data.begin() + layout.memory_offset_dword, shader_data.end(), 0);
 +	const auto prefix = std::min<size_t>(layout.user_data_registers.size(),
 +	                                    layout.memory_offset_dword);
 +	for (size_t i = 0; i < prefix; ++i) {
@@ -29,4 +34,5 @@ diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp b/src/graph
  	return true;
  }
 -- 
-2.55.0
+2.55.0.windows.5
+

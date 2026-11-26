@@ -1,12 +1,17 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From bb33275f905608ac1cebbaece5fd6e54f48ee155 Mon Sep 17 00:00:00 2001
 From: AstroHybrid <noreply@localhost>
+Date: Thu, 26 Nov 2026 11:42:58 +0000
 Subject: [PATCH] fix(perf): classify shader upload site-cache hits as reuse
 
 ---
+ src/graphics/host_gpu/renderer/pipeline/descriptors.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
 diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+index e7fa0596..4ac09d8f 100644
 --- a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
 +++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
-@@ -1342,9 +1342,11 @@
+@@ -1346,7 +1346,9 @@ vk::DescriptorBufferInfo RenderExecutor::UploadShaderData(std::span<const uint32
  				Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderUploadReuseHits);
  				Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderUploadBytesAvoided,
  				                          data.size_bytes());
@@ -17,7 +22,6 @@ diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graph
  			}
  			const auto allocation = NativeUpload(m_context, data);
  			last.words.assign(data.begin(), data.end());
- 			last.allocation = allocation;
- 			// The upload may have submitted (ring wrap): the allocation belongs to the tick after it.
 -- 
-2.55.0
+2.55.0.windows.5
+

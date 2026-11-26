@@ -1,12 +1,18 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 8079383e75d076a72d3a25c69898bc69f0736f82 Mon Sep 17 00:00:00 2001
 From: AstroHybrid <noreply@localhost>
-Subject: [PATCH] Avoid redundant sampler and texture tag initialization during draw preparation
+Date: Thu, 26 Nov 2026 11:43:00 +0000
+Subject: [PATCH] Avoid redundant sampler and texture tag initialization during
+ draw preparation
 
 ---
+ .../host_gpu/renderer/drawPrep/bindingPlan.cpp     | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
 diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
+index ba1af8ed..641b4d37 100644
 --- a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
 +++ b/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp
-@@ -156,7 +156,8 @@
+@@ -161,7 +161,8 @@ vk::Sampler FindPlanSampler(SamplerCache& cache, const ShaderSamplerResource& de
  bool PlanSamplers(SamplerCache& cache, const CompiledShaderInfo& program,
                    const ResourceSnapshot& resources, StagePlan& stage) {
  	const auto count = program.info.samplers.size();
@@ -16,7 +22,7 @@ diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp b/src/graph
  	uint32_t absent = 0;
  	for (size_t i = 0; i < count; i++) {
  		const auto snapshot_index = program.info.samplers[i].snapshot_index;
-@@ -188,7 +189,7 @@
+@@ -193,7 +194,7 @@ bool PlanTextureHashes(const CompiledShaderInfo& program, const ResourceSnapshot
  	}
  	stage.texture_hashes.resize(count);
  	if (memo != nullptr) {
@@ -25,7 +31,7 @@ diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp b/src/graph
  	}
  	uint32_t hints = 0;
  	for (size_t i = 0; i < count; i++) {
-@@ -198,10 +199,11 @@
+@@ -203,10 +204,11 @@ bool PlanTextureHashes(const CompiledShaderInfo& program, const ResourceSnapshot
  		}
  		const auto key          = TextureBindingMemo::MakeKey(program.info.images[i], descriptor.fields);
  		stage.texture_hashes[i] = TextureBindingMemo::Hash(key);
@@ -42,4 +48,5 @@ diff --git a/src/graphics/host_gpu/renderer/drawPrep/bindingPlan.cpp b/src/graph
  	}
  	stage.texture_tags_valid = memo != nullptr;
 -- 
-2.55.0
+2.55.0.windows.5
+

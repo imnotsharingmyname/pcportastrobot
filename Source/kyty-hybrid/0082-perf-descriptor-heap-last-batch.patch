@@ -1,55 +1,58 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From cc9a41610d2b2d1a2b9a9793dd35f77421d7cf1f Mon Sep 17 00:00:00 2001
 From: AstroHybrid <noreply@localhost>
-Subject: [PATCH] Avoid repeated descriptor heap map lookups for the same layout
+Date: Thu, 26 Nov 2026 11:42:59 +0000
+Subject: [PATCH] Avoid repeated descriptor heap map lookups for the same
+ layout
 
 ---
+ .../host_gpu/renderer/pipeline/descriptorHeap.cpp      | 10 +++++++++-
+ .../host_gpu/renderer/pipeline/descriptorHeap.h        |  3 +++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.cpp
+index 5b69611b..99493483 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.cpp
+@@ -56,7 +56,11 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
+ 	KYTY_PROFILER_FUNCTION();
+ 	EXIT_IF(layout == nullptr);
+ 
+-	auto& batch = m_sets[layout];
++	if (m_last_layout != layout || m_last_batch == nullptr) {
++		m_last_batch = &m_sets[layout];
++		m_last_layout = layout;
++	}
++	auto& batch = *m_last_batch;
+ 	if (batch.size != 0) {
+ 		return batch.sets[--batch.size];
+ 	}
+@@ -73,8 +77,12 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
+ 		CreateDescriptorPool();
+ 	}
+ 
++	m_last_batch = nullptr;
++	m_last_layout = nullptr;
+ 	m_sets.clear();
+ 	auto& fresh_batch = m_sets[layout];
++	m_last_batch = &fresh_batch;
++	m_last_layout = layout;
+ 	EXIT_IF(!Allocate(layout, fresh_batch));
+ 	return fresh_batch.sets[--fresh_batch.size];
+ }
 diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.h b/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.h
+index 2fb83ae5..7b6ec924 100644
 --- a/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.h
 +++ b/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.h
-@@ -37,7 +37,10 @@
- 	MasterSemaphore&                                    m_master_semaphore;
+@@ -38,6 +38,9 @@ private:
  	vk::DescriptorPool                                  m_current_pool = nullptr;
  	std::deque<std::pair<vk::DescriptorPool, uint64_t>> m_pending_pools;
--	std::unordered_map<vk::DescriptorSetLayout, Batch>  m_sets;
-+	std::unordered_map<vk::DescriptorSetLayout, Batch>  m_sets;
+ 	std::unordered_map<vk::DescriptorSetLayout, Batch>  m_sets;
 +	// Node references survive unordered_map rehash; invalidate before clear.
 +	vk::DescriptorSetLayout m_last_layout = nullptr;
 +	Batch* m_last_batch = nullptr;
  };
  
  } // namespace Libs::Graphics
-diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.cpp
---- a/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.cpp
-+++ b/src/graphics/host_gpu/renderer/pipeline/descriptorHeap.cpp
-@@ -56,8 +56,12 @@
- 	KYTY_PROFILER_FUNCTION();
- 	EXIT_IF(layout == nullptr);
- 
--	auto& batch = m_sets[layout];
--	if (batch.size != 0) {
-+	if (m_last_layout != layout || m_last_batch == nullptr) {
-+		m_last_batch = &m_sets[layout];
-+		m_last_layout = layout;
-+	}
-+	auto& batch = *m_last_batch;
-+	if (batch.size != 0) {
- 		return batch.sets[--batch.size];
- 	}
- 	if (Allocate(layout, batch)) {
-@@ -73,8 +77,12 @@
- 		CreateDescriptorPool();
- 	}
- 
--	m_sets.clear();
--	auto& fresh_batch = m_sets[layout];
-+	m_last_batch = nullptr;
-+	m_last_layout = nullptr;
-+	m_sets.clear();
-+	auto& fresh_batch = m_sets[layout];
-+	m_last_batch = &fresh_batch;
-+	m_last_layout = layout;
- 	EXIT_IF(!Allocate(layout, fresh_batch));
- 	return fresh_batch.sets[--fresh_batch.size];
- }
 -- 
-2.55.0
+2.55.0.windows.5
+

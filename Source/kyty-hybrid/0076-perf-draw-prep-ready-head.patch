@@ -1,12 +1,42 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 4c4bc63c38b296fb6858f124c22f1a89e96a30fa Mon Sep 17 00:00:00 2001
 From: AstroHybrid <noreply@localhost>
+Date: Thu, 26 Nov 2026 11:42:58 +0000
 Subject: [PATCH] perf(draw prep): avoid locked claim attempts for ready heads
 
 ---
+ .../host_gpu/renderer/drawPrep/drawPrep.cpp     |  5 +++--
+ .../host_gpu/renderer/drawPrep/window.h         | 17 +++++++++++++++++
+ tests/DrawPrepTests.cpp                         | 16 ++++++++++++----
+ 3 files changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+index 8ec061a6..e207ee4e 100644
+--- a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
++++ b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
+@@ -1491,7 +1491,8 @@ Engine::Slot& Engine::ReadyHead() {
+ 	auto& slot = window.HeadPayload();
+ 	CommitStats::StepMark(CommitStats::Step::GapDrawOp);
+ 	const auto stats_start = CommitStats::Now();
+-	if (window.TryClaimHead()) {
++	const auto head_result = window.ClaimOrObserveHead();
++	if (head_result == Window<Slot>::HeadResult::SelfClaimed) {
+ 		// No worker has started it: prepare it here, with the exact clean predicate.
+ 		const CpGaps::Scope gap(CpGaps::Cat::HeadSelf);
+ 		PrepareSlot(m_renderer.GetPipelineCache(), slot, true);
+@@ -1500,7 +1501,7 @@ Engine::Slot& Engine::ReadyHead() {
+ 		if (stats_start != 0) {
+ 			CommitStats::NoteHead(CommitStats::Now() - stats_start, 0);
+ 		}
+-	} else if (window.HeadDone()) {
++	} else if (head_result == Window<Slot>::HeadResult::Done || window.HeadDone()) {
+ 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepReady);
+ 	} else {
+ 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitWaits);
 diff --git a/src/graphics/host_gpu/renderer/drawPrep/window.h b/src/graphics/host_gpu/renderer/drawPrep/window.h
+index be1aaab4..bb2a4e8b 100644
 --- a/src/graphics/host_gpu/renderer/drawPrep/window.h
 +++ b/src/graphics/host_gpu/renderer/drawPrep/window.h
-@@ -64,6 +64,23 @@
+@@ -64,6 +64,23 @@ public:
  		return m_slots[seq & m_mask].payload;
  	}
  
@@ -30,32 +60,11 @@ diff --git a/src/graphics/host_gpu/renderer/drawPrep/window.h b/src/graphics/hos
  	// Claims the head for the producer when no worker has; true when it did.
  	[[nodiscard]] bool TryClaimHead() noexcept {
  		const auto head     = Head();
-diff --git a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
---- a/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
-+++ b/src/graphics/host_gpu/renderer/drawPrep/drawPrep.cpp
-@@ -1489,7 +1489,8 @@
- 	auto& slot = window.HeadPayload();
- 	CommitStats::StepMark(CommitStats::Step::GapDrawOp);
- 	const auto stats_start = CommitStats::Now();
--	if (window.TryClaimHead()) {
-+	const auto head_result = window.ClaimOrObserveHead();
-+	if (head_result == Window<Slot>::HeadResult::SelfClaimed) {
- 		// No worker has started it: prepare it here, with the exact clean predicate.
- 		const CpGaps::Scope gap(CpGaps::Cat::HeadSelf);
- 		PrepareSlot(m_renderer.GetPipelineCache(), slot, true);
-@@ -1498,7 +1499,7 @@
- 		if (stats_start != 0) {
- 			CommitStats::NoteHead(CommitStats::Now() - stats_start, 0);
- 		}
--	} else if (window.HeadDone()) {
-+	} else if (head_result == Window<Slot>::HeadResult::Done || window.HeadDone()) {
- 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepReady);
- 	} else {
- 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitWaits);
 diff --git a/tests/DrawPrepTests.cpp b/tests/DrawPrepTests.cpp
+index e11cbd97..bdf8a492 100644
 --- a/tests/DrawPrepTests.cpp
 +++ b/tests/DrawPrepTests.cpp
-@@ -780,11 +780,16 @@
+@@ -780,11 +780,16 @@ void TestWindowSingleThread() {
  	auto*    item = window.TryClaim(seq);
  	Check(item != nullptr && seq == 0 && item->input == 0, "a worker claims the oldest slot");
  	Check(!window.TryClaimHead(), "the producer cannot claim a worker's slot");
@@ -73,7 +82,7 @@ diff --git a/tests/DrawPrepTests.cpp b/tests/DrawPrepTests.cpp
  	window.Retire();
  	auto* third = window.TryClaim(seq);
  	Check(third != nullptr && seq == 2, "workers skip positions the producer took");
-@@ -832,14 +837,17 @@
+@@ -832,14 +837,17 @@ void TestWindowConcurrent(uint32_t capacity, uint32_t workers, uint64_t items) {
  	bool     result_ok    = true;
  	const auto retire_head = [&] {
  		auto& item = window.HeadPayload();
@@ -95,4 +104,5 @@ diff --git a/tests/DrawPrepTests.cpp b/tests/DrawPrepTests.cpp
  			by_workers++;
  		}
 -- 
-2.55.0
+2.55.0.windows.5
+

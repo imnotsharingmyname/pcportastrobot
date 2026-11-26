@@ -1,12 +1,19 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 3abf02aba2da135e63d6505ea6a66e903d276862 Mon Sep 17 00:00:00 2001
 From: AstroHybrid <noreply@localhost>
-Subject: [PATCH] perf(memory tracker): streamline single-region signature queries
+Date: Thu, 26 Nov 2026 11:42:58 +0000
+Subject: [PATCH] perf(memory tracker): streamline single-region signature
+ queries
 
 ---
+ src/graphics/host_gpu/memoryTracker.h | 23 +++++++++++++++++------
+ tests/MemoryTrackerTests.cpp          | 16 ++++++++++++++++
+ 2 files changed, 33 insertions(+), 6 deletions(-)
+
 diff --git a/src/graphics/host_gpu/memoryTracker.h b/src/graphics/host_gpu/memoryTracker.h
+index 05910a66..83324d4a 100644
 --- a/src/graphics/host_gpu/memoryTracker.h
 +++ b/src/graphics/host_gpu/memoryTracker.h
-@@ -378,16 +378,27 @@
+@@ -378,14 +378,25 @@ private:
  		if (size == 0 || vaddr >= TRACKER_ADDRESS_SIZE || size > TRACKER_ADDRESS_SIZE - vaddr) {
  			return 0;
  		}
@@ -15,11 +22,6 @@ diff --git a/src/graphics/host_gpu/memoryTracker.h b/src/graphics/host_gpu/memor
 -		for (auto index = vaddr / TRACKER_REGION_SIZE; index <= last; index++) {
 -			const auto* manager = m_regions[index].load(std::memory_order_acquire);
 -			if (manager == nullptr) {
--				return 0;
--			}
--			sum += value(*manager);
--		}
--		return sum;
 +		const auto first = vaddr / TRACKER_REGION_SIZE;
 +		const auto last  = (vaddr + size - 1) / TRACKER_REGION_SIZE;
 +		const auto* manager = m_regions[first].load(std::memory_order_acquire);
@@ -36,24 +38,21 @@ diff --git a/src/graphics/host_gpu/memoryTracker.h b/src/graphics/host_gpu/memor
 +		for (auto index = first + 1; index <= last; index++) {
 +			const auto* next = m_regions[index].load(std::memory_order_acquire);
 +			if (next == nullptr) {
-+				return 0;
-+			}
+ 				return 0;
+ 			}
+-			sum += value(*manager);
 +			sum += value(*next);
-+		}
-+		return sum;
+ 		}
+ 		return sum;
  	}
- 	inline static thread_local const MemoryTracker* s_upload_owner = nullptr;
- 
 diff --git a/tests/MemoryTrackerTests.cpp b/tests/MemoryTrackerTests.cpp
+index 2c4e953d..ba21e8cc 100644
 --- a/tests/MemoryTrackerTests.cpp
 +++ b/tests/MemoryTrackerTests.cpp
-@@ -2113,8 +2113,24 @@
-   UploadAll(tracker, boundary - page_size, page_size * 2);
+@@ -2114,6 +2114,22 @@ void TestRangeSignatureAcrossRegions() {
    const auto both = span();
    Check(both != 0, "a range over two existing regions has no signature");
--  const auto first_only = tracker.RangeSignature(boundary - page_size, page_size);
--  WriteFault(tracker, boundary + 8);
-+  const auto first_only = tracker.RangeSignature(boundary - page_size, page_size);
+   const auto first_only = tracker.RangeSignature(boundary - page_size, page_size);
 +  const auto second_only = tracker.RangeSignature(boundary, page_size);
 +  const auto first_dirty = tracker.RangeDirtiedSignature(boundary - page_size, page_size);
 +  const auto second_dirty = tracker.RangeDirtiedSignature(boundary, page_size);
@@ -70,9 +69,9 @@ diff --git a/tests/MemoryTrackerTests.cpp b/tests/MemoryTrackerTests.cpp
 +            tracker.RangeSignature(TRACKER_ADDRESS_SIZE - 1, 2) == 0 &&
 +            tracker.RangeDirtiedSignature(TRACKER_ADDRESS_SIZE - 1, 2) == 0,
 +        "invalid ranges must have no signature");
-+  WriteFault(tracker, boundary + 8);
+   WriteFault(tracker, boundary + 8);
    const auto second = span();
    Check(second > both && tracker.RangeSignature(boundary - page_size, page_size) == first_only,
-         "a change in the second region kept the two-region signature or moved the first's");
 -- 
-2.55.0
+2.55.0.windows.5
+
