@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] Honor zero-spin draw-preparation worker settings
+
+---
+diff --git a/src/graphics/host_gpu/renderer/drawPrep/workerGate.h b/src/graphics/host_gpu/renderer/drawPrep/workerGate.h
+--- a/src/graphics/host_gpu/renderer/drawPrep/workerGate.h
++++ b/src/graphics/host_gpu/renderer/drawPrep/workerGate.h
+@@ -211,7 +211,7 @@
+                           OnColdWake&& on_cold_wake) {
+ 	const bool hot        = gate.Hot(index);
+ 	const auto spin_limit = hot ? hot_spin_ns : cold_spin_ns;
+-	auto       idle_start = WorkerNowNs();
++	auto       idle_start = spin_limit != 0 ? WorkerNowNs() : uint64_t {0};
+ 	uint32_t   spins      = 0;
+ 	while (!stop.load(std::memory_order_acquire)) {
+ 		uint64_t seq = 0;
+@@ -220,13 +220,15 @@
+ 				on_cold_wake();
+ 			}
+ 			prepare(*slot, seq);
+-			idle_start = WorkerNowNs();
++			idle_start = spin_limit != 0 ? WorkerNowNs() : uint64_t {0};
+ 			spins      = 0;
+ 			continue;
+ 		}
+-		WorkerRelax();
+-		if ((++spins & 255u) != 0u || WorkerNowNs() - idle_start < spin_limit) {
+-			continue;
++		if (spin_limit != 0) {
++			WorkerRelax();
++			if ((++spins & 255u) != 0u || WorkerNowNs() - idle_start < spin_limit) {
++				continue;
++			}
+ 		}
+ 		if (hot) {
+ 			gate.ParkHot([&window] { return window.HasClaimable(); }, stop);
+@@ -234,7 +236,7 @@
+ 			gate.ParkCold([&window, &gate] { return window.Unclaimed() >= gate.WakeBacklog(); },
+ 			              stop);
+ 		}
+-		idle_start = WorkerNowNs();
++		idle_start = spin_limit != 0 ? WorkerNowNs() : uint64_t {0};
+ 	}
+ }
+ 
+diff --git a/tests/DrawPrepTests.cpp b/tests/DrawPrepTests.cpp
+--- a/tests/DrawPrepTests.cpp
++++ b/tests/DrawPrepTests.cpp
+@@ -2008,6 +2008,15 @@
+ 	TestWorkerGateBasics();
+ 	TestAwaitHead();
+ 	TestWorkerGateStress();
++	{
++		PipelineConfig config;
++		config.hot = 1;
++		config.hot_spin_ns = 0;
++		config.cold_spin_ns = 0;
++		config.cold_token = true;
++		const auto result = RunPipeline(config, UniformShape(10000, 2000, 2000, 97, true));
++		Check(result.ok, "zero-spin workers preserve ordered exactly-once preparation");
++	}
+ 	TestColdTokenStranded();
+ 	TestColdTokenStress();
+ 	TestStealStress();
+-- 
+2.55.0
