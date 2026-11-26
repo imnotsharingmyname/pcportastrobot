@@ -851,20 +851,21 @@ namespace AstroHybrid.App.ViewModels
         private string DescribeExitFailure(int exitCode)
         {
             string logSnippet = "";
-            try
+            foreach (var logName in new[] { "hybrid-run.err.log", "hybrid-run.out.log" })
             {
-                foreach (var logName in new[] { "hybrid-run.err.log", "hybrid-run.out.log" })
+                try
                 {
                     var path = Path.Combine(_rootDirectory, "Logs", logName);
                     if (!File.Exists(path)) continue;
-                    var hint = HintFromLog(File.ReadAllText(path), Settings.GameVersion, out bool wholeMessage);
+                    var hint = HintFromLog(ReadCrashLogSample(path), Settings.GameVersion, out bool wholeMessage);
                     if (hint == null) continue;
                     if (wholeMessage) return hint;
                     logSnippet = hint;
                     break;
                 }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
-            catch { }
 
             if (exitCode == 321 && string.IsNullOrEmpty(logSnippet))
                 logSnippet = "Renderer initialization or runtime failure (code 321). Make sure your GPU supports Vulkan VK_EXT_mesh_shader and drivers are up to date.";
@@ -875,6 +876,48 @@ namespace AstroHybrid.App.ViewModels
 
             if (string.IsNullOrEmpty(logSnippet)) return "";
             return $"Astro Bot exited with code {exitCode}.\n\n{logSnippet}\n\nLogs are in Logs\\hybrid-run.out.log and Logs\\hybrid-run.err.log (or use 'Export Support Logs' on the Installation page).";
+        }
+
+        // Preserve startup failures and final crash messages without loading multi-GB
+        // session logs into RAM on the UI thread. The full logs remain on disk.
+        public static string ReadCrashLogSample(string path)
+        {
+            const int sampleBytes = 128 * 1024;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            var length = stream.Length;
+            var head = new byte[(int)Math.Min(length, length <= sampleBytes * 2L ? length : sampleBytes)];
+            int ReadSample(byte[] buffer)
+            {
+                int read = 0;
+                while (read < buffer.Length)
+                {
+                    int count = stream.Read(buffer, read, buffer.Length - read);
+                    if (count == 0) break;
+                    read += count;
+                }
+                return read;
+            }
+            if (length <= sampleBytes * 2L)
+            {
+                var count = ReadSample(head);
+                using var reader = new StreamReader(new MemoryStream(head, 0, count), true);
+                return reader.ReadToEnd();
+            }
+
+            // Detect the BOM from the beginning; decode the tail in the same encoding.
+            int headCount = ReadSample(head);
+            using var headReader = new StreamReader(new MemoryStream(head, 0, headCount), true);
+            var first = headReader.ReadToEnd();
+            var encoding = headReader.CurrentEncoding;
+            long tailOffset = length - sampleBytes;
+            int alignment = encoding.CodePage == 12000 || encoding.CodePage == 12001 ? 4 :
+                            encoding.CodePage == 1200 || encoding.CodePage == 1201 ? 2 : 1;
+            tailOffset -= tailOffset % alignment;
+            stream.Position = tailOffset;
+            var tail = new byte[(int)(length - tailOffset)];
+            int tailCount = ReadSample(tail);
+            return first + "\n--- middle of log omitted ---\n" + encoding.GetString(tail, 0, tailCount);
         }
 
         // Turns the text of a game log into advice for the player, or null when nothing known is in it.
