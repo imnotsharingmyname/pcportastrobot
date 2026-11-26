@@ -126,9 +126,11 @@ public sealed class Backend
     }
 
 
-    public Backend()
+    public Backend() : this(FindRoot()) { }
+
+    internal Backend(string root)
     {
-        Root = FindRoot();
+        Root = Path.GetFullPath(root);
         Script = Path.Combine(Root, "Tools", "linux", "astrohybrid.py");
         Python = "python3";
     }
@@ -162,7 +164,8 @@ public sealed class Backend
     public bool Fsr3ProviderReady => File.Exists(
         Path.Combine(HybridDirectory, "fsr3", "libamd_fidelityfx_fsr3_vk.so"));
 
-    public bool GameRunning => _game is { HasExited: false };
+    // Keep ownership until output has drained and exit cleanup has completed.
+    public bool GameRunning => _game is not null;
 
     public async Task<ProcessResult> CheckAsync(string gamePath, Action<string>? onLine = null,
         CancellationToken cancellationToken = default) =>
@@ -376,54 +379,62 @@ public sealed class Backend
         }
         start.Environment["PYTHONUNBUFFERED"] = "1";
 
-        var process = new Process { StartInfo = start, EnableRaisingEvents = true };
+        var process = new Process { StartInfo = start };
         process.OutputDataReceived += (_, e) => Emit(e.Data);
         process.ErrorDataReceived += (_, e) => Emit(e.Data);
-        process.Exited += (_, _) =>
-        {
-            var code = 0;
-            try
-            {
-                code = process.ExitCode;
-            }
-            catch
-            {
-                // The process may already be disposed.
-            }
-
-            var stopped = _stopping;
-            _stopping = false;
-            if (ReferenceEquals(_game, process))
-            {
-                _game = null;
-            }
-
-            StopWatchdog();
-            process.Dispose();
-            GameRunningChanged?.Invoke(false);
-            SetStatus(stopped ? "Game stopped" : code == 0 ? "Game exited" : $"Game exited (code {code})");
-        };
 
         try
         {
+            if (!process.Start())
+                throw new InvalidOperationException("Could not start game process");
             _game = process;
-            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
             if (settings.HangWatchdog)
             {
                 StartWatchdog();
             }
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
             SetStatus("Running");
             GameRunningChanged?.Invoke(true);
+            // An immediate exit cannot dispose the Process before the readers
+            // have started. WaitForExitAsync also waits for asynchronous output.
+            _ = ObserveGameExitAsync(process);
         }
         catch (Exception exception)
         {
+            StopWatchdog();
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+            catch { }
             _game = null;
+            _stopping = false;
             process.Dispose();
             SetStatus($"Launch failed: {exception.Message}");
             GameRunningChanged?.Invoke(false);
         }
+    }
+
+    private async Task ObserveGameExitAsync(Process process)
+    {
+        string status;
+        try
+        {
+            await process.WaitForExitAsync();
+            status = _stopping ? "Game stopped" : process.ExitCode == 0
+                ? "Game exited" : $"Game exited (code {process.ExitCode})";
+        }
+        catch (Exception exception)
+        {
+            status = $"Game process monitoring failed: {exception.Message}";
+        }
+        finally
+        {
+            StopWatchdog();
+            _stopping = false;
+            _game = null;
+            process.Dispose();
+        }
+        SetStatus(status);
+        GameRunningChanged?.Invoke(false);
     }
 
     public void StopGame()
@@ -968,10 +979,12 @@ public sealed class Backend
     private void CheckHang()
     {
         var process = _game;
-        if (_hangReported || process is null || process.HasExited)
+        if (_hangReported || process is null)
         {
             return;
         }
+        try { if (process.HasExited) return; }
+        catch (InvalidOperationException) { return; }
 
         if ((DateTime.UtcNow - _lastOutput).TotalSeconds < 120)
         {
@@ -983,7 +996,8 @@ public sealed class Backend
         GameOutput?.Invoke(path is null
             ? "Hang watchdog: the game stopped producing output and no report could be written."
             : $"Hang watchdog: no output for two minutes; report written to {path}");
-        SetStatus("Hang watchdog: diagnostics recorded");
+        if (ReferenceEquals(_game, process))
+            SetStatus("Hang watchdog: diagnostics recorded");
     }
 
     private string? WriteHangReport(Process process)
@@ -1067,8 +1081,12 @@ public sealed class Backend
         {
             return;
         }
-        output.AppendLine(line);
-        onLine?.Invoke(line);
+        // Stdout and stderr callbacks can run at the same time.
+        lock (output)
+        {
+            output.AppendLine(line);
+            onLine?.Invoke(line);
+        }
     }
 
     private static IEnumerable<KeyValuePair<string, string>> ParseEnv(string text)
