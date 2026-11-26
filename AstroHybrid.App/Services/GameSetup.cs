@@ -787,22 +787,58 @@ namespace AstroHybrid.App.Services
             }
 
             void RememberState() => Fixed1080pStates[cacheKey] = new Fixed1080pState(new FileInfo(path), enable);
-            var bytes = File.ReadAllBytes(path);
             byte[] orig    = Hex("440373084489730C"); // add r14d, [rbx+0x8]; mov [rbx+0xc], r14d
             byte[] patched = Hex("4531F6904489730C"); // xor r14d, r14d; nop; mov [rbx+0xc], r14d
             byte[] find    = enable ? orig : patched;
             byte[] replace = enable ? patched : orig;
-            int off = FindUnique(bytes, find, out int count);
-            if (off < 0)
+
+            // The relinked executable can be large. Scan with a bounded buffer and
+            // write only the four changed bytes, rather than loading and rewriting it.
+            long off;
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
             {
-                RememberState();
-                return false; // Already in requested state or non-matching game version
+                off = FindUniqueInStream(stream, find);
+                if (off >= 0)
+                {
+                    stream.Position = off;
+                    stream.Write(replace, 0, 4);
+                    stream.Flush();
+                }
             }
-            Buffer.BlockCopy(replace, 0, bytes, off, 4);
-            File.WriteAllBytes(path, bytes);
-            RememberState();
+            RememberState(); // File metadata is stable after the write handle closes.
+            if (off < 0) return false; // Already in requested state or non-matching game version
             log($"fixed_1080p {(enable ? "enabled" : "disabled")} on {exeName} at 0x{off:x}");
             return true;
+        }
+
+        // Match the existing FindUnique semantics, including overlapping matches
+        // and refusing to patch a non-unique signature. Retain enough bytes to
+        // catch a pattern spanning two reads.
+        private static long FindUniqueInStream(Stream stream, byte[] pattern)
+        {
+            var buffer = new byte[64 * 1024 + pattern.Length - 1];
+            long found = -1;
+            int carry = 0;
+            int read;
+            while ((read = stream.Read(buffer, carry, buffer.Length - carry)) > 0)
+            {
+                int available = carry + read;
+                long start = stream.Position - available;
+                int limit = available - pattern.Length;
+                for (int i = 0; i <= limit; i++)
+                {
+                    i = Array.IndexOf(buffer, pattern[0], i, limit - i + 1);
+                    if (i < 0) break;
+                    int j = 1;
+                    while (j < pattern.Length && buffer[i + j] == pattern[j]) j++;
+                    if (j != pattern.Length) continue;
+                    if (found >= 0) return -1;
+                    found = start + i;
+                }
+                carry = Math.Min(pattern.Length - 1, available);
+                Buffer.BlockCopy(buffer, available - carry, buffer, 0, carry);
+            }
+            return found;
         }
 
         public bool UpgradeCommandBufferTable(string exeName, Action<string>? log = null)
