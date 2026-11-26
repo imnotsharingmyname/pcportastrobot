@@ -1052,18 +1052,12 @@ public sealed class Backend
                 start.ArgumentList.Add("-batch");
                 start.ArgumentList.Add("-ex");
                 start.ArgumentList.Add("thread apply all bt");
-                using var gdb = Process.Start(start);
-                if (gdb is not null)
-                {
-                    var output = gdb.StandardOutput.ReadToEnd();
-                    gdb.WaitForExit(10000);
-                    report.AppendLine("-- gdb");
-                    report.AppendLine(output);
-                }
+                report.AppendLine("-- gdb");
+                report.AppendLine(CollectDebuggerOutput(start, TimeSpan.FromSeconds(10)));
             }
-            catch
+            catch (Exception exception)
             {
-                report.AppendLine("-- gdb not available");
+                report.AppendLine($"-- gdb diagnostics failed: {exception.Message}");
             }
 
             File.WriteAllText(path, report.ToString());
@@ -1073,6 +1067,36 @@ public sealed class Backend
         {
             return null;
         }
+    }
+
+    // Capture both pipes concurrently: a full stderr pipe must not block gdb.
+    // Keep waiting for output within the same deadline as the process exit.
+    internal static string CollectDebuggerOutput(ProcessStartInfo start, TimeSpan timeout)
+    {
+        using var debugger = Process.Start(start);
+        if (debugger is null) return "(could not start debugger)";
+
+        var stdout = debugger.StandardOutput.ReadToEndAsync();
+        var stderr = debugger.StandardError.ReadToEndAsync();
+        var exit = debugger.WaitForExitAsync();
+        var complete = Task.WhenAll(stdout, stderr, exit);
+        if (!complete.Wait(timeout))
+        {
+            // In particular, do not leave a hung debugger attached to a game.
+            try { if (!debugger.HasExited) debugger.Kill(entireProcessTree: true); }
+            catch (Exception ex) when (ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception)
+            {
+                return $"(debugger timed out; termination failed: {ex.Message})";
+            }
+
+            // Allow a short, bounded interval for termination and pipe drainage.
+            // A descendant may have inherited a pipe, so never wait indefinitely.
+            if (!complete.Wait(TimeSpan.FromSeconds(1)))
+                return "(debugger timed out; output incomplete)";
+            return "(debugger timed out)" + Environment.NewLine + stdout.Result + stderr.Result;
+        }
+
+        return $"(debugger exit {debugger.ExitCode})" + Environment.NewLine + stdout.Result + stderr.Result;
     }
 
     private static void Append(string? line, StringBuilder output, Action<string>? onLine)
