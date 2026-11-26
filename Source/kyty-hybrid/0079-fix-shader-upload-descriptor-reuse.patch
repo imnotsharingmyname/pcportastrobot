@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] fix(perf): classify shader upload site-cache hits as reuse
+
+---
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+@@ -1342,9 +1342,11 @@
+ 				Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderUploadReuseHits);
+ 				Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderUploadBytesAvoided,
+ 				                          data.size_bytes());
+-				return last.allocation;
++				// A same-tick cache hit is not a new upload. Let descriptor reuse
++				// and push-shadow comparisons recognize its existing allocation.
++				return reused(last.allocation);
+ 			}
+ 			const auto allocation = NativeUpload(m_context, data);
+ 			last.words.assign(data.begin(), data.end());
+ 			last.allocation = allocation;
+ 			// The upload may have submitted (ring wrap): the allocation belongs to the tick after it.
+-- 
+2.55.0
