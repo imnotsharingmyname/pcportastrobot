@@ -61,7 +61,7 @@ Command line: `AstroHybrid.exe --setup "<dump folder or .zar>"` runs setup headl
 
 - **Upscaling & Frame Generation (NVIDIA & AMD):**
   - **NVIDIA DLSS Super Resolution** (Quality / Balanced / Performance / DLAA) on any RTX GPU, **DLSS Frame Generation (2x)** on RTX 40-series+, **Multi Frame Generation (3x / 4x)** on RTX 50-series, **Adaptive Frame Generation**, and **NVIDIA Reflex**.
-  - **AMD FSR** upscaling (FSR 4 / 3.1 / 2) and **FSR Frame Generation** for AMD, Intel, and non-RTX GPUs.
+  - **AMD FSR** upscaling (FSR 4 / 3.1 / 2) and **FSR Frame Generation** for AMD, Intel, and non-RTX GPUs. FSR 4.1.2 runs on Radeon RX 9000 and, through the AMD FSR SDK 2.4 runtime's INT8 model, on RX 6000 / 7000 (verified on an RX 6800 XT); other GPUs get FSR 3.1.
 - **60+ FPS & Real-Time Game Speed:** Full real-time game speed at any frame rate (no slow motion below 60 FPS), with stable cloth and physics simulation.
 - **Pre-Launch Shader Prep & Stability:** Smooth shader preparation before gameplay, VSync default, and stability guards.
 - **Windows & Native Linux Support:** Full Windows launcher (`AstroHybrid.exe`) with built-in auto-updater and **RecompLauncher** integration, plus native Linux support.

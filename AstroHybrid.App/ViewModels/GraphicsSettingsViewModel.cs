@@ -318,14 +318,17 @@ namespace AstroHybrid.App.ViewModels
             ? "XeSS replaces the game's temporal upscale pass with Intel's, on this GPU's XMX engines. It builds its shaders while the game starts; until then the game's own upscaling shows. Intel's frame generation (XeSS-FG) is D3D12-only; AMD FSR frame generation (below) works together with XeSS."
             : "XeSS replaces the game's temporal upscale pass with Intel's (DP4a path on this GPU). It builds its shaders while the game starts; until then the game's own upscaling shows.";
 
-        // FSR 4 (machine learning) runs on Radeon RX 9000 cards; the renderer falls back to FSR 3.1 elsewhere.
+        // FSR 4.1.2 (machine learning) runs on Radeon RX 9000 cards and, through the AMD FSR SDK 2.4 runtime's
+        // INT8 model, on RX 6000 / RX 7000 (verified on an RX 6800 XT); the renderer falls back to FSR 3.1 elsewhere.
         private string FsrVersionNote
         {
             get
             {
                 var name = _mainViewModel.HardwareInfo?.GpuName ?? "";
-                bool rdna4 = name.IndexOf("RX 90", StringComparison.OrdinalIgnoreCase) >= 0;
-                return rdna4 ? "FSR 4 on this card" : "FSR 3.1 on this card (FSR 4 needs a Radeon RX 9000)";
+                bool fsr4 = name.IndexOf("RX 90", StringComparison.OrdinalIgnoreCase) >= 0
+                         || name.IndexOf("RX 7", StringComparison.OrdinalIgnoreCase) >= 0
+                         || name.IndexOf("RX 6", StringComparison.OrdinalIgnoreCase) >= 0;
+                return fsr4 ? "FSR 4 on this card" : "FSR 3.1 on this card (FSR 4 needs a Radeon RX 6000 or newer)";
             }
         }
 
