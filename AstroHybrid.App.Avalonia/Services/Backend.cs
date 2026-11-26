@@ -126,9 +126,11 @@ public sealed class Backend
     }
 
 
-    public Backend()
+    public Backend() : this(FindRoot()) { }
+
+    internal Backend(string root)
     {
-        Root = FindRoot();
+        Root = Path.GetFullPath(root);
         Script = Path.Combine(Root, "Tools", "linux", "astrohybrid.py");
         Python = "python3";
     }
@@ -937,8 +939,6 @@ public sealed class Backend
             catch
             {
             }
-            // Wait for the killed process and its output readers before disposing it.
-            await process.WaitForExitAsync();
             throw;
         }
 
