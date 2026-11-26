@@ -157,17 +157,22 @@ public sealed class UpdateService
 
     public async Task<bool> DownloadAndApplyAsync(UpdateInfo info, Action<double, string>? progress = null)
     {
-        var temporary = Path.Combine(Path.GetTempPath(), "astrohybrid-update");
-        Directory.CreateDirectory(temporary);
-        var package = Path.Combine(temporary, info.Asset.Name);
-
+        string? temporary = null;
         try
         {
+            if (info.Asset.Size <= 0 || info.Asset.Size >= MaxAssetBytes)
+                throw new InvalidDataException("Invalid update package size");
+
+            // Use a private directory for each attempt, including concurrent launcher instances.
+            temporary = Directory.CreateTempSubdirectory("astrohybrid-update-").FullName;
+            var package = Path.Combine(temporary, "package");
             progress?.Invoke(0, "Starting download…");
             using (var response = await Http.GetAsync(info.Asset.Url, HttpCompletionOption.ResponseHeadersRead))
             {
                 response.EnsureSuccessStatusCode();
                 var total = response.Content.Headers.ContentLength ?? info.Asset.Size;
+                if (total != info.Asset.Size)
+                    throw new InvalidDataException("Update package size does not match release metadata");
                 await using var source = await response.Content.ReadAsStreamAsync();
                 await using var target = File.Create(package);
 
@@ -176,16 +181,20 @@ public sealed class UpdateService
                 int count;
                 while ((count = await source.ReadAsync(buffer)) > 0)
                 {
-                    await target.WriteAsync(buffer.AsMemory(0, count));
                     read += count;
+                    if (read > total)
+                        throw new InvalidDataException("Update package exceeded its advertised size");
+                    await target.WriteAsync(buffer.AsMemory(0, count));
                     if (total > 0)
                     {
                         progress?.Invoke((double)read / total, $"Downloading… {read * 100 / total}%");
                     }
                 }
+                if (read != total)
+                    throw new InvalidDataException("Incomplete update package");
             }
 
-            if (info.Asset.Sha256 is { Length: 64 } expected)
+            if (info.Asset.Sha256 is { } expected)
             {
                 progress?.Invoke(1, "Verifying…");
                 await using var stream = File.OpenRead(package);
@@ -248,36 +257,9 @@ public sealed class UpdateService
             }
 
             progress?.Invoke(1, "Installing…");
-            var backup = current + ".bak";
-            File.Copy(current, backup, true);
-            try
-            {
-                File.Copy(launcher, current, true);
-                if (!OperatingSystem.IsWindows())
-                {
-                    File.SetUnixFileMode(current,
-                        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-                        UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-                        UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-                }
-            }
-            catch
-            {
-                File.Copy(backup, current, true);
-                progress?.Invoke(0, "Installing failed; the previous launcher was restored");
-                return false;
-            }
+            ReplaceLauncher(launcher, current);
 
-            progress?.Invoke(1, "Update installed. Restart the launcher.");
-            try
-            {
-                File.Delete(package);
-                Directory.Delete(extracted, true);
-            }
-            catch
-            {
-                // Cleanup is best effort.
-            }
+            progress?.Invoke(1, "Launcher update installed. Restart the launcher.");
 
             return true;
         }
@@ -285,6 +267,44 @@ public sealed class UpdateService
         {
             progress?.Invoke(0, $"Update failed: {exception.Message}");
             return false;
+        }
+        finally
+        {
+            if (temporary is not null)
+            {
+                try { Directory.Delete(temporary, true); }
+                catch { /* Cleanup is best effort. */ }
+            }
+        }
+    }
+
+    internal static void ReplaceLauncher(string launcher, string current)
+    {
+        // Linux rejects opening an executing ELF for writing (ETXTBSY).
+        // Stage both files beside the current binary, then rename on the same filesystem.
+        // The running process keeps its old inode until it exits.
+        var suffix = "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var staged = current + suffix;
+        var backupStaged = current + ".bak" + suffix;
+        try
+        {
+            File.Copy(launcher, staged);
+            File.Copy(current, backupStaged);
+            if (!OperatingSystem.IsWindows())
+            {
+                var mode = File.GetUnixFileMode(current);
+                File.SetUnixFileMode(staged, mode);
+                File.SetUnixFileMode(backupStaged, mode);
+            }
+
+            File.Move(backupStaged, current + ".bak", overwrite: true);
+            File.Move(staged, current, overwrite: true);
+        }
+        finally
+        {
+            // Never overwrite the executing inode, even on an error.
+            try { File.Delete(staged); } catch { }
+            try { File.Delete(backupStaged); } catch { }
         }
     }
 }
