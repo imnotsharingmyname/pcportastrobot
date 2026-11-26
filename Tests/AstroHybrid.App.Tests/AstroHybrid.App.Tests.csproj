@@ -44,6 +44,9 @@
     <Compile Include="SetupWizardViewModelTests.cs" />
     <Compile Include="GameSourceTests.cs" />
     <Compile Include="ArchiveSetupTests.cs" />
+    <Compile Include="BuildManagerTests.cs" />
+    <Compile Include="InstallationManagerTests.cs" />
+    <Compile Include="GameSetupPatchTests.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AstroHybrid.App\AstroHybrid.App.csproj">

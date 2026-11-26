@@ -18,11 +18,11 @@ The launcher expects a ZIP file with the following naming convention:
 ### 1. Build the Launcher
 
 ```powershell
-# Build in Release configuration
-msbuild AstroHybrid.App/AstroHybrid.App.csproj /p:Configuration=Release
+# Restore and rebuild in Release configuration so updated package dependencies replace stale output DLLs
+msbuild AstroHybrid.App/AstroHybrid.App.csproj /t:Restore,Rebuild /p:Configuration=Release
 ```
 
-The built files will be in `AstroHybrid.App/bin/Release/`
+The built files will be in `AstroHybrid.App/bin/Release/`. The release script audits every bundled managed assembly reference against the copied DLL versions and generated binding redirects, and stops if a stale dependency would cause an assembly load failure. The same audit can be run separately with `Tests/test_managed_dependencies.ps1 -AppDir AstroHybrid.App/bin/Release`.
 
 ### 2. Create the Release Package
 
@@ -49,6 +49,10 @@ Get-ChildItem $buildDir -File | Where-Object { $_.Extension -in '.exe', '.dll', 
 
 # Copy the generated config (has binding redirects)
 Copy-Item "$buildDir\AstroHybrid.exe.config" $stageDir
+
+# Audit the exact staged managed dependencies before creating the archive
+powershell -NoProfile -ExecutionPolicy Bypass -File Tests/test_managed_dependencies.ps1 -AppDir $stageDir
+if ($LASTEXITCODE -ne 0) { throw "Managed dependency audit failed" }
 
 # Create ZIP
 Add-Type -AssemblyName System.IO.Compression.FileSystem

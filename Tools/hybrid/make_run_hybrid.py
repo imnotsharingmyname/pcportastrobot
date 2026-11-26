@@ -162,9 +162,10 @@ def setup_game_layout(game, output):
         raise ValueError("The runtime layout must not overwrite or be created inside the source dump")
     if not game.is_dir():
         raise FileNotFoundError(f"missing game dump: {game}")
-    archive = game / "app0.zar"
+    source_archive = game / "app0.zar"
+    archive = source_archive.resolve()
     has_archive = archive.is_file() and archive.stat().st_size > 0
-    if os.path.lexists(archive) and not has_archive:
+    if os.path.lexists(source_archive) and not has_archive:
         raise ValueError(f"not a usable archive: {archive}")
     data = game / "data"
     if not has_archive and not data.is_dir():

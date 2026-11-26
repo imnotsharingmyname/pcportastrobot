@@ -67,6 +67,13 @@ class ZarLayoutTests(unittest.TestCase):
         layout.remove_generated_path(output / "app0.zar")
         self.assertEqual(source.read_bytes(), b"external archive")
 
+    def test_broken_source_archive_symlink_is_rejected(self):
+        game = self.dump("broken-source")
+        (game / "app0.zar").unlink()
+        (game / "app0.zar").symlink_to("../missing.zar")
+        with self.assertRaisesRegex(ValueError, "not a usable archive"):
+            layout.setup_game_layout(game, self.outputs[0])
+
     def test_repeated_layout_is_idempotent(self):
         game = self.dump("repeat")
         output = self.outputs[0]

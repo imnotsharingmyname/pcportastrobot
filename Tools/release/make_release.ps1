@@ -38,6 +38,8 @@ foreach ($node in $redirects) {
         throw "$($identity.name).dll is $actual but the config redirects to $($redirect.newVersion): rebuild the app (msbuild /t:Rebuild) so bin\Release has the restored package DLLs"
     }
 }
+# Reject stale dependency DLLs before they reach a release. Package upgrades can otherwise leave the old copies in bin\Release.
+& (Join-Path $root 'Tests\test_managed_dependencies.ps1') -AppDir $stage
 Copy-Item (Join-Path $root 'Run-AstroHybrid.bat') $stage
 # RecompLauncher reads it from the top of the zip, next to AstroHybrid.exe.
 Copy-Item (Join-Path $root 'recomplauncher.json') $stage
@@ -64,8 +66,15 @@ Copy-Item (Join-Path $root 'Build\anyps5\core\relinker\relinker.exe') (Join-Path
 $src = Join-Path $root 'Build\RunHybrid'
 New-Item -ItemType Directory -Force (Join-Path $run 'libs') | Out-Null
 Get-ChildItem (Join-Path $src 'libs') -File | ForEach-Object {
-    $bytes = [IO.File]::ReadAllBytes($_.FullName)
-    if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "not a Windows module: $($_.Name)" }
+    $signature = [byte[]](0, 0)
+    $stream = [IO.File]::OpenRead($_.FullName)
+    try {
+        if ($stream.Read($signature, 0, 2) -ne 2) { throw "not a Windows module: $($_.Name)" }
+    }
+    finally {
+        $stream.Dispose()
+    }
+    if ($signature[0] -ne 0x4D -or $signature[1] -ne 0x5A) { throw "not a Windows module: $($_.Name)" }
     Copy-Item $_.FullName (Join-Path $run 'libs')
 }
 $runtime = 'kyty_gpu.dll', 'astrohybrid_host.dll', 'u59-preset.cmd', 'u59-preset.json',

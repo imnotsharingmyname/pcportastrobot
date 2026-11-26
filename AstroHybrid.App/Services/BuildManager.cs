@@ -10,7 +10,7 @@ namespace AstroHybrid.App.Services
     public class BuildManager
     {
         private readonly string _rootDirectory;
-        private readonly string _pythonPath;
+        private string? _pythonPath;
 
         public event Action<string>? ProgressChanged;
         public event Action<int>? ProgressPercentChanged;
@@ -18,9 +18,11 @@ namespace AstroHybrid.App.Services
 
         public BuildManager(string rootDirectory)
         {
+            // Release startup never needs the development Python toolchain; resolve it only for a development build.
             _rootDirectory = rootDirectory;
-            _pythonPath = FindPython();
         }
+
+        private string PythonPath => _pythonPath ??= FindPython();
 
         private string FindPython()
         {
@@ -91,7 +93,7 @@ namespace AstroHybrid.App.Services
                     ["ASTROHYBRID_KYTY_GPU"] = "pgo"
                 };
 
-                var success = await RunProcessAsync(_pythonPath, $"-I \"{scriptPath}\"", _rootDirectory, envVars, progress);
+                var success = await RunProcessAsync(PythonPath, $"-I \"{scriptPath}\"", _rootDirectory, envVars, progress);
                 if (!success)
                 {
                     ErrorOccurred?.Invoke("Failed to build RunHybrid. Check the logs for details.");
@@ -131,7 +133,7 @@ namespace AstroHybrid.App.Services
             // Check Python
             try
             {
-                var psi = new ProcessStartInfo(_pythonPath, "--version")
+                var psi = new ProcessStartInfo(PythonPath, "--version")
                 {
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
@@ -311,27 +313,21 @@ namespace AstroHybrid.App.Services
             ProgressPercentChanged?.Invoke(percent);
         }
 
-        private static Task WaitForExitAsync(Process process, int timeoutMs = -1)
+        private static async Task<bool> WaitForExitAsync(Process process, int timeoutMs = -1)
         {
-            var tcs = new TaskCompletionSource<bool>();
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             process.EnableRaisingEvents = true;
             process.Exited += (sender, e) => tcs.TrySetResult(true);
+            if (process.HasExited) return true;
 
-            if (timeoutMs > 0)
+            if (timeoutMs <= 0)
             {
-                var completed = process.WaitForExit(timeoutMs);
-                if (!completed)
-                {
-                    tcs.TrySetResult(false);
-                }
+                await tcs.Task;
+                return true;
             }
 
-            if (process.HasExited)
-            {
-                tcs.TrySetResult(true);
-            }
-
-            return tcs.Task;
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+            return completed == tcs.Task;
         }
     }
 }

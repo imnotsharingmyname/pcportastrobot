@@ -56,7 +56,9 @@ namespace AstroHybrid.App.Services
             _settingsManager.Save(settings);
 
             // Build environment variables from settings
-            var envVars = BuildEnvironmentVariables(settings, hardware);
+            var launchSettings = new SettingsManager(_rootDirectory).Load();
+            var selectedGpuName = hardware?.SelectedGpu?.Name;
+            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName));
 
             if (ShaderPrep.Needed(runHybridPath))
             {
@@ -227,7 +229,9 @@ namespace AstroHybrid.App.Services
             settings.LastLaunched = DateTime.Now;
             _settingsManager.Save(settings);
 
-            var envVars = BuildEnvironmentVariables(settings, hardware);
+            var launchSettings = new SettingsManager(_rootDirectory).Load();
+            var selectedGpuName = hardware?.SelectedGpu?.Name;
+            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName));
             // DLSS-specific overrides
             envVars["ASTROHYBRID_DLSS"] = "1";
             envVars["ASTROHYBRID_CUDA_HOLE"] = "1";
@@ -280,7 +284,9 @@ namespace AstroHybrid.App.Services
             settings.LastLaunched = DateTime.Now;
             _settingsManager.Save(settings);
 
-            var envVars = BuildEnvironmentVariables(settings, hardware);
+            var launchSettings = new SettingsManager(_rootDirectory).Load();
+            var selectedGpuName = hardware?.SelectedGpu?.Name;
+            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName));
             // Frame Gen specific overrides
             envVars["ASTROHYBRID_DLSSG"] = "1";
             envVars["ASTROHYBRID_CUDA_HOLE"] = "1";
@@ -314,7 +320,7 @@ namespace AstroHybrid.App.Services
             return await tcs.Task;
         }
 
-        private Dictionary<string, string> BuildEnvironmentVariables(AppSettings settings, HardwareInfo? hardware)
+        private Dictionary<string, string> BuildEnvironmentVariables(AppSettings settings, string? selectedGpuName)
         {
             var env = new Dictionary<string, string>();
 
@@ -322,10 +328,9 @@ namespace AstroHybrid.App.Services
             // 0047) and the AnyPS5 renderer. A name, not an index: this list comes from Windows, whose
             // order need not be Vulkan's. An automatic choice passes the selected GPU (discrete preferred)
             // to ensure the renderer picks the right card on dual-GPU laptops (issue #206).
-            var gpu = hardware?.SelectedGpu;
-            if (hardware != null && gpu != null)
+            if (selectedGpuName != null)
             {
-                env["ANYPS5_GPU"] = GpuMatchToken(gpu.Name);
+                env["ANYPS5_GPU"] = GpuMatchToken(selectedGpuName);
             }
 
             // Lighting/renderer selection

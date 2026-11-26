@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -63,6 +64,22 @@ namespace AstroHybrid.App.Services
         private readonly string _root;
         private readonly string _runHybrid;
         private readonly string _relinker;
+        private static readonly ConcurrentDictionary<string, Fixed1080pState> Fixed1080pStates =
+            new ConcurrentDictionary<string, Fixed1080pState>(StringComparer.OrdinalIgnoreCase);
+
+        private sealed class Fixed1080pState
+        {
+            internal readonly long Length;
+            internal readonly long LastWriteTimeUtcTicks;
+            internal readonly bool Enabled;
+
+            internal Fixed1080pState(FileInfo file, bool enabled)
+            {
+                Length = file.Length;
+                LastWriteTimeUtcTicks = file.LastWriteTimeUtc.Ticks;
+                Enabled = enabled;
+            }
+        }
 
         public GameSetup(string rootDirectory)
         {
@@ -242,58 +259,83 @@ namespace AstroHybrid.App.Services
         {
             bool ShouldWrite(string name) => overwriteExisting || !File.Exists(Path.Combine(_runHybrid, name + ".exe"));
 
-            var ultrawide = (byte[])baseBytes.Clone();
-            features.Ultrawide = ApplyAllOccurrences(ultrawide, UltrawidePatches, log);
-            if (features.Ultrawide && ShouldWrite("AstroBot-Ultrawide"))
-                WriteVariant(ultrawide, "AstroBot-Ultrawide");
-
-            var superUltrawide = (byte[])baseBytes.Clone();
-            features.SuperUltrawide = ApplyAllOccurrences(superUltrawide, SuperUltrawidePatches, log);
-            if (features.SuperUltrawide && ShouldWrite("AstroBot-SuperUltrawide"))
-                WriteVariant(superUltrawide, "AstroBot-SuperUltrawide");
-
-            var nonRt = (byte[])baseBytes.Clone();
-            features.FasterLighting = ApplyAll(nonRt, FasterLightingPatches, log);
-            if (!features.FasterLighting)
+            // Preserve known feature flags when an existing variant is merely being skipped during repair.
+            if (!features.Ultrawide || ShouldWrite("AstroBot-Ultrawide"))
             {
-                var patched0107 = Patch0107.Apply(baseBytes, log);
-                if (patched0107 != null)
-                {
-                    nonRt = patched0107;
-                    features.FasterLighting = true;
-                }
+                var ultrawide = (byte[])baseBytes.Clone();
+                features.Ultrawide = ApplyAllOccurrences(ultrawide, UltrawidePatches, log);
+                if (features.Ultrawide && ShouldWrite("AstroBot-Ultrawide"))
+                    WriteVariant(ultrawide, "AstroBot-Ultrawide");
             }
-            if (features.FasterLighting)
+
+            if (!features.SuperUltrawide || ShouldWrite("AstroBot-SuperUltrawide"))
             {
-                if (ShouldWrite("AstroBot-NonRT"))
-                    WriteVariant(nonRt, "AstroBot-NonRT");
+                var superUltrawide = (byte[])baseBytes.Clone();
+                features.SuperUltrawide = ApplyAllOccurrences(superUltrawide, SuperUltrawidePatches, log);
+                if (features.SuperUltrawide && ShouldWrite("AstroBot-SuperUltrawide"))
+                    WriteVariant(superUltrawide, "AstroBot-SuperUltrawide");
+            }
 
-                var nonRtUltrawide = (byte[])nonRt.Clone();
-                bool hasNonRtUltrawide = features.Ultrawide && ApplyAllOccurrences(nonRtUltrawide, UltrawidePatches, log);
-                if (hasNonRtUltrawide && ShouldWrite("AstroBot-NonRT-Ultrawide"))
-                    WriteVariant(nonRtUltrawide, "AstroBot-NonRT-Ultrawide");
-
-                var nonRtSuperUltrawide = (byte[])nonRt.Clone();
-                bool hasNonRtSuperUltrawide = features.SuperUltrawide && ApplyAllOccurrences(nonRtSuperUltrawide, SuperUltrawidePatches, log);
-                if (hasNonRtSuperUltrawide && ShouldWrite("AstroBot-NonRT-SuperUltrawide"))
-                    WriteVariant(nonRtSuperUltrawide, "AstroBot-NonRT-SuperUltrawide");
-
-                var soft = (byte[])nonRt.Clone();
-                if (ApplyAll(soft, SoftAssertPatches, log) && ShouldWrite("AstroBot-NonRT-SoftAssert"))
-                    WriteVariant(soft, "AstroBot-NonRT-SoftAssert");
-
-                if (hasNonRtUltrawide)
+            var nonRtNames = new[]
+            {
+                "AstroBot-NonRT", "AstroBot-NonRT-Ultrawide", "AstroBot-NonRT-SuperUltrawide",
+                "AstroBot-NonRT-SoftAssert", "AstroBot-NonRT-Ultrawide-SoftAssert",
+                "AstroBot-NonRT-SuperUltrawide-SoftAssert"
+            };
+            if (!features.FasterLighting || nonRtNames.Any(ShouldWrite))
+            {
+                var nonRt = (byte[])baseBytes.Clone();
+                features.FasterLighting = ApplyAll(nonRt, FasterLightingPatches, log);
+                if (!features.FasterLighting)
                 {
-                    var softUltrawide = (byte[])nonRtUltrawide.Clone();
-                    if (ApplyAll(softUltrawide, SoftAssertPatches, log) && ShouldWrite("AstroBot-NonRT-Ultrawide-SoftAssert"))
-                        WriteVariant(softUltrawide, "AstroBot-NonRT-Ultrawide-SoftAssert");
+                    var patched0107 = Patch0107.Apply(baseBytes, log);
+                    if (patched0107 != null)
+                    {
+                        nonRt = patched0107;
+                        features.FasterLighting = true;
+                    }
                 }
-
-                if (hasNonRtSuperUltrawide)
+                if (features.FasterLighting)
                 {
-                    var softSuperUltrawide = (byte[])nonRtSuperUltrawide.Clone();
-                    if (ApplyAll(softSuperUltrawide, SoftAssertPatches, log) && ShouldWrite("AstroBot-NonRT-SuperUltrawide-SoftAssert"))
-                        WriteVariant(softSuperUltrawide, "AstroBot-NonRT-SuperUltrawide-SoftAssert");
+                    if (ShouldWrite("AstroBot-NonRT"))
+                        WriteVariant(nonRt, "AstroBot-NonRT");
+
+                    if (features.Ultrawide &&
+                        (ShouldWrite("AstroBot-NonRT-Ultrawide") || ShouldWrite("AstroBot-NonRT-Ultrawide-SoftAssert")))
+                    {
+                        var nonRtUltrawide = (byte[])nonRt.Clone();
+                        bool hasNonRtUltrawide = ApplyAllOccurrences(nonRtUltrawide, UltrawidePatches, log);
+                        if (hasNonRtUltrawide && ShouldWrite("AstroBot-NonRT-Ultrawide"))
+                            WriteVariant(nonRtUltrawide, "AstroBot-NonRT-Ultrawide");
+                        if (hasNonRtUltrawide && ShouldWrite("AstroBot-NonRT-Ultrawide-SoftAssert"))
+                        {
+                            var softUltrawide = (byte[])nonRtUltrawide.Clone();
+                            if (ApplyAll(softUltrawide, SoftAssertPatches, log))
+                                WriteVariant(softUltrawide, "AstroBot-NonRT-Ultrawide-SoftAssert");
+                        }
+                    }
+
+                    if (features.SuperUltrawide &&
+                        (ShouldWrite("AstroBot-NonRT-SuperUltrawide") || ShouldWrite("AstroBot-NonRT-SuperUltrawide-SoftAssert")))
+                    {
+                        var nonRtSuperUltrawide = (byte[])nonRt.Clone();
+                        bool hasNonRtSuperUltrawide = ApplyAllOccurrences(nonRtSuperUltrawide, SuperUltrawidePatches, log);
+                        if (hasNonRtSuperUltrawide && ShouldWrite("AstroBot-NonRT-SuperUltrawide"))
+                            WriteVariant(nonRtSuperUltrawide, "AstroBot-NonRT-SuperUltrawide");
+                        if (hasNonRtSuperUltrawide && ShouldWrite("AstroBot-NonRT-SuperUltrawide-SoftAssert"))
+                        {
+                            var softSuperUltrawide = (byte[])nonRtSuperUltrawide.Clone();
+                            if (ApplyAll(softSuperUltrawide, SoftAssertPatches, log))
+                                WriteVariant(softSuperUltrawide, "AstroBot-NonRT-SuperUltrawide-SoftAssert");
+                        }
+                    }
+
+                    if (ShouldWrite("AstroBot-NonRT-SoftAssert"))
+                    {
+                        var soft = (byte[])nonRt.Clone();
+                        if (ApplyAll(soft, SoftAssertPatches, log))
+                            WriteVariant(soft, "AstroBot-NonRT-SoftAssert");
+                    }
                 }
             }
         }
@@ -734,7 +776,17 @@ namespace AstroHybrid.App.Services
         {
             log ??= _ => { };
             string path = Path.Combine(_root, "Build", "RunHybrid", exeName);
-            if (!File.Exists(path)) return false;
+            var file = new FileInfo(path);
+            if (!file.Exists) return false;
+            string cacheKey = file.FullName;
+            if (Fixed1080pStates.TryGetValue(cacheKey, out var cached) &&
+                cached.Enabled == enable && cached.Length == file.Length &&
+                cached.LastWriteTimeUtcTicks == file.LastWriteTimeUtc.Ticks)
+            {
+                return false;
+            }
+
+            void RememberState() => Fixed1080pStates[cacheKey] = new Fixed1080pState(new FileInfo(path), enable);
             var bytes = File.ReadAllBytes(path);
             byte[] orig    = Hex("440373084489730C"); // add r14d, [rbx+0x8]; mov [rbx+0xc], r14d
             byte[] patched = Hex("4531F6904489730C"); // xor r14d, r14d; nop; mov [rbx+0xc], r14d
@@ -743,10 +795,12 @@ namespace AstroHybrid.App.Services
             int off = FindUnique(bytes, find, out int count);
             if (off < 0)
             {
+                RememberState();
                 return false; // Already in requested state or non-matching game version
             }
             Buffer.BlockCopy(replace, 0, bytes, off, 4);
             File.WriteAllBytes(path, bytes);
+            RememberState();
             log($"fixed_1080p {(enable ? "enabled" : "disabled")} on {exeName} at 0x{off:x}");
             return true;
         }
