@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Management;
+using System.Linq;
 
 namespace AstroHybrid.App.Services
 {
@@ -20,16 +21,34 @@ namespace AstroHybrid.App.Services
 
         private static string MarkerPath(string runHybrid) => Path.Combine(runHybrid, "_PipelineCache", MarkerFile);
 
-        public static bool Needed(string runHybrid)
+        // Use the launcher's chosen executable, with the same fallback order as the batch file.
+        public static string? ExecutablePath(string runHybrid, IReadOnlyDictionary<string, string> variables)
+        {
+            var chosen = EffectiveValue(variables, "ASTROHYBRID_EXE");
+            if (!string.IsNullOrEmpty(chosen))
+            {
+                var path = Path.Combine(runHybrid, chosen);
+                return File.Exists(path) ? path : null;
+            }
+            return new[] { "AstroBot-NonRT-SoftAssert.exe", "AstroBot-NonRT.exe", "AstroBot.exe" }
+                .Select(name => Path.Combine(runHybrid, name))
+                .FirstOrDefault(File.Exists);
+        }
+
+        private static string? EffectiveValue(IReadOnlyDictionary<string, string> variables, string name) =>
+            variables.TryGetValue(name, out var value) ? value : Environment.GetEnvironmentVariable(name);
+
+        public static bool Needed(string runHybrid, IReadOnlyDictionary<string, string> variables)
         {
             try
             {
-                if (Environment.GetEnvironmentVariable("ASTROHYBRID_SHADER_PREP") == "0" ||
-                    Environment.GetEnvironmentVariable("ASTROHYBRID_SHADER_LIST") == "0")
+                if (EffectiveValue(variables, "ASTROHYBRID_SHADER_PREP") == "0" ||
+                    EffectiveValue(variables, "ASTROHYBRID_SHADER_LIST") == "0" ||
+                    EffectiveValue(variables, "ASTROHYBRID_SHADER_CACHE") == "0")
                     return false;
-                if (!File.Exists(ListPath(runHybrid))) return false;
+                if (!File.Exists(ListPath(runHybrid)) || ExecutablePath(runHybrid, variables) == null) return false;
                 var marker = MarkerPath(runHybrid);
-                return !File.Exists(marker) || File.ReadAllText(marker).Trim() != Key(runHybrid);
+                return !File.Exists(marker) || File.ReadAllText(marker).Trim() != Key(runHybrid, variables);
             }
             catch
             {
@@ -37,23 +56,26 @@ namespace AstroHybrid.App.Services
             }
         }
 
-        public static void MarkDone(string runHybrid)
+        public static void MarkDone(string runHybrid, IReadOnlyDictionary<string, string> variables)
         {
             try
             {
                 Directory.CreateDirectory(Path.Combine(runHybrid, "_PipelineCache"));
-                File.WriteAllText(MarkerPath(runHybrid), Key(runHybrid));
+                File.WriteAllText(MarkerPath(runHybrid), Key(runHybrid, variables));
             }
             catch { }
         }
 
-        private static string Key(string runHybrid)
+        private static string Key(string runHybrid, IReadOnlyDictionary<string, string> variables)
         {
             var dll = new FileInfo(Path.Combine(runHybrid, "kyty_gpu.dll"));
             var list = new FileInfo(ListPath(runHybrid));
             var preset = new FileInfo(Path.Combine(runHybrid, "u59-preset.json"));
             string Stamp(FileInfo f) => f.Exists ? $"{f.Length}:{f.LastWriteTimeUtc.Ticks}" : "none";
-            return $"renderer {Stamp(dll)} | list {Stamp(list)} | preset {Stamp(preset)} | drivers {Drivers()}";
+            var executable = ExecutablePath(runHybrid, variables);
+            var variant = executable == null ? "none" : $"{Path.GetFileName(executable)} {Stamp(new FileInfo(executable))}";
+            var gpu = EffectiveValue(variables, "ANYPS5_GPU") ?? "auto";
+            return $"renderer {Stamp(dll)} | list {Stamp(list)} | preset {Stamp(preset)} | variant {variant} | gpu {gpu} | drivers {Drivers()}";
         }
 
         private static string Drivers()
