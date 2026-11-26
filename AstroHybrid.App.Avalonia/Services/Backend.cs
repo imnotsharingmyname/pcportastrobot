@@ -288,8 +288,8 @@ public sealed class Backend
             arguments.Add("ASTROHYBRID_SKIP_INTRO");
             arguments.Add("1");
         }
-        // Disabling persistence must not erase a warm cache; the explicit
-        // Clear Shader Cache action remains available for that.
+        // Disabling persistence must not erase a warm cache. Retain it
+        // so re-enabling persistence can reuse the previous cache.
         arguments.Add("--env");
         arguments.Add("ASTROHYBRID_SHADER_CACHE");
         arguments.Add(settings.ShaderCache ? "1" : "0");
