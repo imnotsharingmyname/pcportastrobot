@@ -27,6 +27,28 @@ namespace AstroHybrid.App.Tests
         }
 
         [Fact]
+        public void ReadsAlternatingCompressedAndRawBlocksWithReusedBuffers()
+        {
+            int block = ZArchiveFixture.BlockSize;
+            var random = new byte[block];
+            new Random(42).NextBytes(random);
+            var data = new byte[3 * block + 17];
+            Buffer.BlockCopy(random, 0, data, block, block);
+            for (int i = 2 * block; i < data.Length; i++) data[i] = 0xA5;
+            var path = ZArchiveFixture.Create(_root, new Dictionary<string, byte[]>
+            {
+                ["mixed.bin"] = data
+            }, compressed: true);
+
+            using var reader = ZArchiveReader.Open(path);
+            var entry = reader.Entries["mixed.bin"];
+            Assert.Equal(data, reader.ReadEntry(entry, CancellationToken.None));
+            var output = Path.Combine(_root, "extract");
+            reader.ExtractEntry(entry, output, null, CancellationToken.None);
+            Assert.Equal(data, File.ReadAllBytes(Path.Combine(output, "mixed.bin")));
+        }
+
+        [Fact]
         public void ValidationProgressIsMonotonicAndComplete()
         {
             var path = ZArchiveFixture.Create(_root, ZArchiveFixture.ValidFiles(8));
