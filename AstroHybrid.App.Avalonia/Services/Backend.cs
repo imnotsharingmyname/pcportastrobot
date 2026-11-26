@@ -288,15 +288,11 @@ public sealed class Backend
             arguments.Add("ASTROHYBRID_SKIP_INTRO");
             arguments.Add("1");
         }
-        if (!settings.ShaderCache)
-        {
-            // Kyty persists its pipeline cache in _PipelineCache; clearing it here and
-            // disabling the background save makes the next run compile from scratch.
-            ClearPipelineCache();
-            arguments.Add("--env");
-            arguments.Add("KYTY_PIPELINE_CACHE_SAVE");
-            arguments.Add("0");
-        }
+        // Disabling persistence must not erase a warm cache; the explicit
+        // Clear Shader Cache action remains available for that.
+        arguments.Add("--env");
+        arguments.Add("ASTROHYBRID_SHADER_CACHE");
+        arguments.Add(settings.ShaderCache ? "1" : "0");
         if (!settings.DrawPrep)
         {
             arguments.Add("--env");
