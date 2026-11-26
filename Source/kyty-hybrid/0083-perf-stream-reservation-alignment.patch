@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] Avoid integer division for power-of-two stream buffer alignment
+
+---
+diff --git a/src/graphics/host_gpu/renderer/cache/streamBuffer.cpp b/src/graphics/host_gpu/renderer/cache/streamBuffer.cpp
+--- a/src/graphics/host_gpu/renderer/cache/streamBuffer.cpp
++++ b/src/graphics/host_gpu/renderer/cache/streamBuffer.cpp
+@@ -54,8 +54,19 @@
+ 		result = value;
+ 		return true;
+ 	}
+-	const auto aligned = Common::AlignUp(value, alignment);
+-	if (aligned < value) {
++	// Vulkan buffer and atom alignments are commonly powers of two.
++	// Avoid a variable integer divide for those stream-ring reservations.
++	const auto mask = alignment - 1;
++	if ((alignment & mask) == 0) {
++		const auto padding = (uint64_t {0} - value) & mask;
++		if (padding > UINT64_MAX - value) {
++			return false;
++		}
++		result = value + padding;
++		return true;
++	}
++	const auto aligned = Common::AlignUp(value, alignment);
++	if (aligned < value) {
+ 		return false;
+ 	}
+ 	result = aligned;
+-- 
+2.55.0
