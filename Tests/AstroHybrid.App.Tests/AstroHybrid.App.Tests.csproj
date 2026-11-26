@@ -46,6 +46,7 @@
     <Compile Include="ArchiveSetupTests.cs" />
     <Compile Include="BuildManagerTests.cs" />
     <Compile Include="InstallationManagerTests.cs" />
+    <Compile Include="CrashLogTests.cs" />
     <Compile Include="GameSetupPatchTests.cs" />
     <Compile Include="ShaderPrepTests.cs" />
   </ItemGroup>
