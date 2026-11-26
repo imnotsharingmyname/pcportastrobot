@@ -297,6 +297,56 @@ namespace AstroHybrid.App.Services
                 throw new RefusedException("every load segment looks encrypted (this dump is not decrypted): " + string.Join(", ", encrypted));
         }
 
+        private const uint PtDynamic = 2;
+        private const long DtStrtab = 5;
+        private const long DtOsStrtab = 0x61000035;
+        private const int MaxDynamicTags = 4096;
+
+        // Checks an unwrapped ELF the way the relinker will: its PT_DYNAMIC table must name a string table
+        // (DT_STRTAB or the PS5 DT_OS_STRTAB). Returns null when it does, otherwise what is wrong.
+        public static string? DescribeUnreadableDynamicTable(string elfPath)
+        {
+            using var stream = new FileStream(elfPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new BinaryReader(stream);
+            if (stream.Length < 0x40) return "the unwrapped ELF is truncated";
+            stream.Position = 0x20;
+            long programOffset = reader.ReadInt64();
+            stream.Position = 0x36;
+            ushort entrySize = reader.ReadUInt16();
+            ushort count = reader.ReadUInt16();
+            if (entrySize != 56 || programOffset < 0x40 || programOffset + (long)count * 56 > stream.Length)
+                return "the unwrapped ELF has an invalid program header table";
+            for (int index = 0; index < count; index++)
+            {
+                stream.Position = programOffset + index * 56L;
+                if (reader.ReadUInt32() != PtDynamic) continue;
+                stream.Position = programOffset + index * 56L + 8;
+                long offset = reader.ReadInt64();
+                stream.Position = programOffset + index * 56L + 32;
+                long size = reader.ReadInt64();
+                if (offset <= 0 || size < 16 || offset > stream.Length || size > stream.Length - offset)
+                    return $"its dynamic table (segment {index}) lies outside the file";
+                var table = new byte[Math.Min(size, MaxDynamicTags * 16L)];
+                stream.Position = offset;
+                int read = 0;
+                while (read < table.Length)
+                {
+                    int got = stream.Read(table, read, table.Length - read);
+                    if (got == 0) break;
+                    read += got;
+                }
+                for (int at = 0; at + 16 <= read; at += 16)
+                {
+                    long tag = BitConverter.ToInt64(table, at);
+                    if (tag == DtStrtab || tag == DtOsStrtab) return null;
+                }
+                return Entropy(table, 0, read) >= EntropyLimit
+                    ? $"its dynamic table (segment {index}) is still encrypted"
+                    : $"its dynamic table (segment {index}) has no string table (DT_STRTAB)";
+            }
+            return "it has no dynamic table (PT_DYNAMIC)";
+        }
+
         public static long Unwrap(string path, string output)
         {
             var source = Path.GetFullPath(path);

@@ -23,6 +23,21 @@ Get-ChildItem $app -File | Where-Object { $_.Extension -in '.exe', '.dll' } | Co
 $config = Join-Path $root 'AstroHybrid.App\obj\Release\AstroHybrid.exe.config'
 if (-not (Select-String -Path $config -Pattern 'bindingRedirect' -Quiet)) { throw 'generated config has no binding redirects' }
 Copy-Item $config (Join-Path $stage 'AstroHybrid.exe.config')
+# 1.2.27 shipped a config redirecting System.Memory to 4.0.2.0 (ZstdSharp pulls System.Memory 4.6.0) next to
+# stale 4.0.1.2 DLLs left in bin\Release, so the app died at startup with FileLoadException 0x80131040.
+# Every redirect must point at exactly the assembly version of the DLL that ships beside it.
+$redirects = Select-Xml -Path $config -XPath '//*[local-name()="dependentAssembly"]'
+foreach ($node in $redirects) {
+    $identity = $node.Node.SelectSingleNode('*[local-name()="assemblyIdentity"]')
+    $redirect = $node.Node.SelectSingleNode('*[local-name()="bindingRedirect"]')
+    if ($null -eq $identity -or $null -eq $redirect) { continue }
+    $dll = Join-Path $stage ($identity.name + '.dll')
+    if (-not (Test-Path $dll)) { throw "config redirects $($identity.name) to $($redirect.newVersion) but $($identity.name).dll is not in the download" }
+    $actual = [Reflection.AssemblyName]::GetAssemblyName($dll).Version.ToString()
+    if ($actual -ne $redirect.newVersion) {
+        throw "$($identity.name).dll is $actual but the config redirects to $($redirect.newVersion): rebuild the app (msbuild /t:Rebuild) so bin\Release has the restored package DLLs"
+    }
+}
 Copy-Item (Join-Path $root 'Run-AstroHybrid.bat') $stage
 # RecompLauncher reads it from the top of the zip, next to AstroHybrid.exe.
 Copy-Item (Join-Path $root 'recomplauncher.json') $stage

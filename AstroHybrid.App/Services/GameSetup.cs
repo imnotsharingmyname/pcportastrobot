@@ -144,6 +144,17 @@ namespace AstroHybrid.App.Services
             {
                 Report(15, "Unwrapping the game code (eboot.bin)...");
                 SelfUnwrapper.Unwrap(Path.Combine(dump, "eboot.bin"), Path.Combine(work, "eboot.elf"));
+                // The relinker exits with code 2 and only "Neither DT_OS_ nor DT_ variant present for DT_STRTAB"
+                // when the game code's dynamic table is unreadable; say what that means before a minute is spent.
+                var dynamicProblem = SelfUnwrapper.DescribeUnreadableDynamicTable(Path.Combine(work, "eboot.elf"));
+                if (dynamicProblem != null)
+                {
+                    Log("eboot.bin: " + dynamicProblem);
+                    throw new InvalidOperationException(
+                        "The game code in this dump (eboot.bin) cannot be read: " + dynamicProblem + ". " +
+                        "The dump is incomplete, not fully decrypted, or its eboot.bin was replaced by a patched or " +
+                        "backported one. Dump the game again (base game plus update 01.019.000) and select the new folder.");
+                }
                 foreach (var module in OriginalModules(dump))
                 {
                     Report(25, $"Unwrapping {Path.GetFileName(module)}...");
@@ -163,7 +174,11 @@ namespace AstroHybrid.App.Services
                 var (code, output) = RunProcess(_relinker, $"{options} \"{Path.Combine(work, "eboot.elf")}\" \"{exe}\"", _runHybrid);
                 File.WriteAllText(Path.Combine(_root, "Logs", "setup-relinker.log"), output);
                 if (code != 0 || !File.Exists(exe))
-                    throw new InvalidOperationException($"The relinker failed (exit {code}); see Logs\\setup-relinker.log.");
+                {
+                    var reason = (output ?? "").Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.StartsWith("FAIL:", StringComparison.Ordinal));
+                    throw new InvalidOperationException($"The relinker failed (exit {code})" +
+                        (reason != null ? ": " + reason.Substring(5).Trim() : "") + "; see Logs\\setup-relinker.log.");
+                }
                 Log($"relinker: exit {code}, {new FileInfo(exe).Length} bytes");
             }
             finally
