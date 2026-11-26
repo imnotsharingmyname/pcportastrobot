@@ -20,10 +20,10 @@ namespace AstroHybrid.App.Services
         public event Action<string>? StatusChanged;
         public event Action<int>? ProgressChanged;
 
-        public InstallationManager(string rootDirectory)
+        public InstallationManager(string rootDirectory, SettingsManager? settingsManager = null)
         {
             _rootDirectory = rootDirectory;
-            _settingsManager = new SettingsManager(rootDirectory);
+            _settingsManager = settingsManager ?? new SettingsManager(rootDirectory);
             _gameValidator = new GameValidator();
             _buildManager = new BuildManager(rootDirectory);
 
@@ -316,9 +316,9 @@ namespace AstroHybrid.App.Services
         public async Task<bool> RepairAsync(IProgress<SetupStep>? progress = null)
         {
             var settings = _settingsManager.Load();
-            if (string.IsNullOrEmpty(settings.GameDumpPath))
+            if (!GameSource.Exists(settings.GameDumpPath))
             {
-                throw new InvalidOperationException("No game dump folder or ZArchive is saved. Run the setup again from a fresh download, or set it with --setup.");
+                throw new InvalidOperationException("The saved game dump folder or ZArchive is missing. Select its current location and retry repair.");
             }
             var setup = new GameSetup(_rootDirectory);
             if (!setup.IsReleaseLayout)
@@ -330,7 +330,11 @@ namespace AstroHybrid.App.Services
                 StatusChanged?.Invoke(p.Message);
                 ProgressChanged?.Invoke(p.Percent);
             });
-            await setup.RunAsync(settings.GameDumpPath!, report);
+            var features = await setup.RunAsync(settings.GameDumpPath!, report);
+            settings.GameVersion = features.Version;
+            settings.GameTitleId = features.TitleId;
+            settings.InstallationManifest = CreateManifest(_rootDirectory, settings.GameDumpPath, features.Version, features.TitleId, features.SetupAt);
+            _settingsManager.Save(settings);
             return true;
         }
 

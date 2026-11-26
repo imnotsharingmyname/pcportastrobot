@@ -58,7 +58,7 @@ namespace AstroHybrid.App.ViewModels
             Current = this;
             _rootDirectory = rootDirectory;
             _settingsManager = new SettingsManager(rootDirectory);
-            _installationManager = new InstallationManager(rootDirectory);
+            _installationManager = new InstallationManager(rootDirectory, _settingsManager);
             _hardwareDetector = new HardwareDetector();
             _controllerDetector = new ControllerDetector();
             _launcherService = new LauncherService(rootDirectory);
@@ -483,38 +483,58 @@ namespace AstroHybrid.App.ViewModels
                                 "Connect the drive and press Play again, or choose the dump's new folder and repair now?");
             if (MessageBox.Show(message, "AstroHybrid", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return false;
-            var savedDump = Settings.GameDumpPath;
-            if (!dumpFound)
-            {
-                // RepairInstallationAsync asks for the folder when none is saved.
-                Settings.GameDumpPath = "";
-            }
             await RepairInstallationAsync();
-            if (string.IsNullOrEmpty(Settings.GameDumpPath))
-                Settings.GameDumpPath = savedDump; // folder dialog cancelled: keep the old path
             return false;
+        }
+
+        // Repair and rebuild use the same source types as initial setup.
+        private async Task<string?> SelectRepairSourceAsync()
+        {
+            if (GameSource.Exists(Settings.GameDumpPath))
+                return Settings.GameDumpPath;
+
+            var choice = MessageBox.Show("Select your game source.\n\nYes: extracted game folder\nNo: standalone ZArchive (.zar)\nCancel: keep the saved path",
+                "Select game source", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            string selected;
+            if (choice == MessageBoxResult.Yes)
+            {
+                using var dialog = new System.Windows.Forms.FolderBrowserDialog
+                {
+                    Description = "Select the extracted Astro Bot dump folder",
+                    ShowNewFolderButton = false
+                };
+                if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return null;
+                selected = dialog.SelectedPath;
+            }
+            else if (choice == MessageBoxResult.No)
+            {
+                var dialog = new Microsoft.Win32.OpenFileDialog
+                {
+                    Title = "Select your Astro Bot ZArchive",
+                    Filter = "ZArchive files (*.zar)|*.zar",
+                    CheckFileExists = true,
+                    Multiselect = false
+                };
+                if (dialog.ShowDialog() != true) return null;
+                selected = dialog.FileName;
+            }
+            else return null;
+
+            var info = await new GameValidator().ValidateGameDumpAsync(selected);
+            if (!info.IsValid)
+            {
+                MessageBox.Show(info.ValidationError ?? "That source is not an Astro Bot dump.", "AstroHybrid", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return null;
+            }
+            if (!string.IsNullOrEmpty(info.Warning))
+                MessageBox.Show(info.Warning, "AstroHybrid - Game version", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return selected;
         }
 
         private async Task RepairInstallationAsync()
         {
-            if (string.IsNullOrEmpty(Settings.GameDumpPath))
-            {
-                // Installs made by the classic launcher or an older version do not know the dump folder: ask once.
-                using (var dialog = new System.Windows.Forms.FolderBrowserDialog { Description = "Select your Astro Bot dump folder (the one with eboot.bin)", ShowNewFolderButton = false })
-                {
-                    if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
-                    var info = await new GameValidator().ValidateGameDumpAsync(dialog.SelectedPath);
-                    if (!info.IsValid)
-                    {
-                        MessageBox.Show(info.ValidationError ?? "That folder is not an Astro Bot dump.", "AstroHybrid", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
-                    }
-                    if (!string.IsNullOrEmpty(info.Warning))
-                        MessageBox.Show(info.Warning, "AstroHybrid - Game version", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    Settings.GameDumpPath = dialog.SelectedPath;
-                    _settingsManager.Save(Settings);
-                }
-            }
+            var source = await SelectRepairSourceAsync();
+            if (source == null) return;
 
             var result = MessageBox.Show("This will rebuild the installation from your game dump. Continue?",
                 "Repair Installation", MessageBoxButton.YesNo, MessageBoxImage.Question);
@@ -525,6 +545,8 @@ namespace AstroHybrid.App.ViewModels
 
             try
             {
+                Settings.GameDumpPath = source;
+                _settingsManager.Save(Settings);
                 var success = await _installationManager.RepairAsync();
                 if (success)
                 {
@@ -548,24 +570,8 @@ namespace AstroHybrid.App.ViewModels
 
         private async Task RebuildInstallationAsync()
         {
-            if (string.IsNullOrEmpty(Settings.GameDumpPath))
-            {
-                // Installs made by the classic launcher or an older version do not know the dump folder: ask once.
-                using (var dialog = new System.Windows.Forms.FolderBrowserDialog { Description = "Select your Astro Bot dump folder (the one with eboot.bin)", ShowNewFolderButton = false })
-                {
-                    if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
-                    var info = await new GameValidator().ValidateGameDumpAsync(dialog.SelectedPath);
-                    if (!info.IsValid)
-                    {
-                        MessageBox.Show(info.ValidationError ?? "That folder is not an Astro Bot dump.", "AstroHybrid", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
-                    }
-                    if (!string.IsNullOrEmpty(info.Warning))
-                        MessageBox.Show(info.Warning, "AstroHybrid - Game version", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    Settings.GameDumpPath = dialog.SelectedPath;
-                    _settingsManager.Save(Settings);
-                }
-            }
+            var source = await SelectRepairSourceAsync();
+            if (source == null) return;
 
             var result = MessageBox.Show("This will completely rebuild the installation. Continue?",
                 "Rebuild Installation", MessageBoxButton.YesNo, MessageBoxImage.Question);
@@ -576,6 +582,8 @@ namespace AstroHybrid.App.ViewModels
 
             try
             {
+                Settings.GameDumpPath = source;
+                _settingsManager.Save(Settings);
                 var success = await _installationManager.RebuildAsync();
                 if (success)
                 {
