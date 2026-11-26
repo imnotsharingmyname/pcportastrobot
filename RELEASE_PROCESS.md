@@ -10,7 +10,7 @@ The launcher checks for updates via the GitHub Releases API. When a new release 
 
 The launcher expects a ZIP file with the following naming convention:
 - **Pattern**: `AstroBotPC-AstroHybrid-{version}.zip` (e.g., `AstroBotPC-AstroHybrid-1.1.0.zip`)
-- **Size**: Less than 300 MB (to distinguish from full game packages)
+- **Size**: Must stay under 300 MiB: launchers up to 1.2.28 skip larger packages (make_release.ps1 enforces this); 1.2.29+ accept up to 2 GiB
 - **Contents**: The launcher executable (`AstroHybrid.exe`), its dependencies (DLLs, config files), and any resources
 
 ## Preparing a Release

@@ -30,7 +30,7 @@ public sealed record UpdateInfo(string Version, string Notes, UpdateAsset Asset)
 public sealed class UpdateService
 {
     private const string ReleasesApi = "https://api.github.com/repos/imnotsharingmyname/pcportastrobot/releases";
-    private const long MaxAssetBytes = 300L * 1024 * 1024;
+    private const long MaxAssetBytes = 2L * 1024 * 1024 * 1024;
 
     /// <summary>Version compiled into this launcher; compared with the release tag.</summary>
     public const string LauncherVersion = "1.1.0";

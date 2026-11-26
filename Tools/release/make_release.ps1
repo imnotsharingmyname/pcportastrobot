@@ -155,5 +155,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # paths as they are into the install, so a wrapper folder put the update in a subfolder and the launcher
 # stayed on the old version.
 [IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
+# Launchers up to 1.2.28 (Windows UpdateService and the Linux GUI) only offer assets smaller than 300 MiB;
+# a bigger zip is silently skipped and every installed launcher stops seeing updates.
+$legacyUpdateLimit = 300MB
+if ((Get-Item $zip).Length -ge $legacyUpdateLimit) {
+    throw ("{0} is {1:N0} bytes; launchers up to 1.2.28 ignore update packages of {2:N0} bytes or more" -f (Split-Path $zip -Leaf), (Get-Item $zip).Length, $legacyUpdateLimit)
+}
 "{0}: {1:N0} files, {2:N1} MB staged, zip {3:N1} MB" -f $name, (Get-ChildItem $stage -Recurse -File).Count,
     ((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), ((Get-Item $zip).Length / 1MB)

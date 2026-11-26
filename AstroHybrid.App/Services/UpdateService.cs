@@ -18,6 +18,7 @@ namespace AstroHybrid.App.Services
         private const string GitHubApiUrl = "https://api.github.com/repos/imnotsharingmyname/pcportastrobot/releases";
         private const string GitHubRepoUrl = "https://github.com/imnotsharingmyname/pcportastrobot";
         private const string UserAgent = "AstroHybrid-Launcher";
+        private const long MaxUpdatePackageBytes = 2L * 1024 * 1024 * 1024;
 
         private readonly string _rootDirectory;
         private readonly SettingsManager _settingsManager;
@@ -166,11 +167,11 @@ namespace AstroHybrid.App.Services
             foreach (var asset in release.Assets)
             {
                 var name = asset.Name.ToLowerInvariant();
-                if (name.Contains("astrohybrid") && name.EndsWith(".zip"))
+                if (name.Contains("astrohybrid") && name.EndsWith(".zip") && !name.Contains("linux"))
                 {
-                    // Verify it's a launcher package, not a full game package
-                    // Launcher packages are typically smaller (< 200MB)
-                    if (asset.Size < 300 * 1024 * 1024)
+                    // The Windows package carries the whole runtime (~300 MB in 1.2.28) and grows with it;
+                    // the cap only rejects something that cannot be a launcher package.
+                    if (asset.Size > 0 && asset.Size < MaxUpdatePackageBytes)
                     {
                         return asset;
                     }
