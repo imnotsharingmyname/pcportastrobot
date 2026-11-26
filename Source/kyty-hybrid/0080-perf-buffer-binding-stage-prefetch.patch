@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] perf: hoist buffer prefetch policy and bypass read-only write proofs
+
+---
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.h b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.h
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+@@ -167,5 +167,9 @@
+ 	// FindBuffers for each read binding it discovers (before the stages' image work), instead of a
+ 	// separate pass in RebindBuffers. `at_find` says which caller asks.
+-	void PrefetchReadBinding(uint64_t vaddr, uint64_t size, bool at_find = false) const noexcept;
++	void PrefetchReadBinding(uint64_t vaddr, uint64_t size, bool at_find = false) const noexcept;
++	// Snapshot the hint policy once per stage; memo storage has cache lifetime.
++	[[nodiscard]] bool CanPrefetchReadBinding(bool at_find = false) const noexcept;
++	// Only call after CanPrefetchReadBinding returned true for this cache.
++	void PrefetchReadBindingHint(uint64_t vaddr, uint64_t size) const noexcept;
+ 	// A writable binding whose shader can only write `written` (sub-ranges of [vaddr, vaddr +
+ 	// size), e.g. from a write-range proof): the whole range is synchronized as for any binding,
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -3680,9 +3680,16 @@
+ }
+ 
+-void BufferCache::PrefetchReadBinding(uint64_t vaddr, uint64_t size, bool at_find) const noexcept {
+-	if (m_binding_memo == nullptr || g_binding_batch_prefetch.Get() != (at_find ? 2 : 1)) {
+-		return;
+-	}
+-	const auto* slot =
++bool BufferCache::CanPrefetchReadBinding(bool at_find) const noexcept {
++	return m_binding_memo != nullptr && g_binding_batch_prefetch.Get() == (at_find ? 2 : 1);
++}
++
++void BufferCache::PrefetchReadBinding(uint64_t vaddr, uint64_t size, bool at_find) const noexcept {
++	if (CanPrefetchReadBinding(at_find)) {
++		PrefetchReadBindingHint(vaddr, size);
++	}
++}
++
++void BufferCache::PrefetchReadBindingHint(uint64_t vaddr, uint64_t size) const noexcept {
++	const auto* slot =
+ 	    &m_binding_memo[static_cast<size_t>(BindingMemoHash(vaddr, size) >> m_binding_memo_shift)];
+ #if defined(__clang__) || defined(__GNUC__)
+diff --git a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+--- a/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+@@ -1856,6 +1856,7 @@
+ 		OwnedCounters::Add(DrawPrep::GetBindingTotals().ranges_used, 1);
+ 	}
+-	const bool verify = use_plan && DrawPrep::BindingsVerifyMode() != 0;
+-	const auto& graphics = m_context.GetGraphics();
++	const bool verify = use_plan && DrawPrep::BindingsVerifyMode() != 0;
++	const bool prefetch_at_find = cache.CanPrefetchReadBinding(true);
++	const auto& graphics = m_context.GetGraphics();
+ 	const uint64_t unbounded_read_limit = std::min<uint64_t>(
+ 	    uint64_t {256} * 1024 * 1024,
+@@ -1939,8 +1940,10 @@
+ 			size = unbounded_read_limit;
+ 		}
+-		if (const auto& resource = program.info.buffers[i]; !resource.written && !resource.formatted) {
+-			// KYTY_CP_BINDING_BATCH_PREFETCH=find (BufferCache::PrefetchReadBinding).
+-			cache.PrefetchReadBinding(address, size, true);
+-		}
++		if (prefetch_at_find) {
++			const auto& resource = program.info.buffers[i];
++			if (!resource.written && !resource.formatted) {
++				cache.PrefetchReadBindingHint(address, size);
++			}
++		}
+ 		BufferLookupStats::PartScope find_scope(BufferLookupStats::Part::FindCall);
+ 		prepared.buffer_sources.push_back({address, size, cache.FindBuffer(address, size)});
+@@ -2106,12 +2109,15 @@
+ 	// KYTY_CP_BINDING_BATCH_PREFETCH: the memo slots of every read binding first, so their cache
+ 	// misses overlap (a hint only; the lookups below are unchanged).
+-	BufferLookupStats::PartScope prefetch_scope(BufferLookupStats::Part::Prefetch);
+-	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+-		const auto& source   = prepared.buffer_sources[i];
+-		const auto& resource = program.info.buffers[i];
+-		if (source.address != 0 && source.size != 0 && !resource.written && !resource.formatted) {
+-			m_context.GetBufferCache().PrefetchReadBinding(source.address, source.size);
+-		}
+-	}
++	BufferLookupStats::PartScope prefetch_scope(BufferLookupStats::Part::Prefetch);
++	auto& cache = m_context.GetBufferCache();
++	if (cache.CanPrefetchReadBinding()) {
++		for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
++			const auto& source   = prepared.buffer_sources[i];
++			const auto& resource = program.info.buffers[i];
++			if (source.address != 0 && source.size != 0 && !resource.written && !resource.formatted) {
++				cache.PrefetchReadBindingHint(source.address, source.size);
++			}
++		}
++	}
+ 	prefetch_scope.Stop();
+ 	CommitStats::StepMark(CommitStats::Step::RbHead);
+@@ -2119,12 +2125,16 @@
+ 	    program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::UniformBuffers);
+ 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+-		uint32_t   buffer_offset = 0;
+-		const auto ranges_start  = program.info.buffers[i].written ? BufferLookupStats::Now() : 0;
+-		const auto* written      = ResolveWrittenRanges(m_context, *prepared.runtime, prepared, i,
+-		                                                write_ranges_evaluated, write_scratch);
+-		if (ranges_start != 0) {
+-			BufferLookupStats::AddPart(BufferLookupStats::Part::WriteRanges,
+-			                           BufferLookupStats::Now() - ranges_start);
+-		}
++		uint32_t buffer_offset = 0;
++		const std::vector<GuestRange>* written = nullptr;
++		// Read-only bindings return nullptr without consulting the write proof.
++		if (program.info.buffers[i].written) {
++			const auto ranges_start = BufferLookupStats::Now();
++			written = ResolveWrittenRanges(m_context, *prepared.runtime, prepared, i,
++			                               write_ranges_evaluated, write_scratch);
++			if (ranges_start != 0) {
++				BufferLookupStats::AddPart(BufferLookupStats::Part::WriteRanges,
++				                           BufferLookupStats::Now() - ranges_start);
++			}
++		}
+ 		const bool uniform_view = uniform_binding != nullptr &&
+ 		                          std::ranges::binary_search(uniform_binding->resources, i);
+-- 
+2.55.0
