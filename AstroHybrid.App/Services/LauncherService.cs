@@ -60,7 +60,7 @@ namespace AstroHybrid.App.Services
             var selectedGpuName = hardware?.SelectedGpu?.Name;
             var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName));
 
-            if (ShaderPrep.Needed(runHybridPath))
+            if (await Task.Run(() => ShaderPrep.Needed(runHybridPath, envVars)))
             {
                 bool proceed = true;
                 var app = Application.Current;
@@ -122,9 +122,7 @@ namespace AstroHybrid.App.Services
         public async Task<ShaderPrep.Result> PrepareShadersAsync(Dictionary<string, string> variables, IProgress<string>? status, CancellationToken ct)
         {
             var runHybridPath = Path.Combine(_rootDirectory, "Build", "RunHybrid");
-            var exePath = new[] { "AstroBot-NonRT-SoftAssert.exe", "AstroBot-NonRT.exe", "AstroBot.exe" }
-                .Select(name => Path.Combine(runHybridPath, name))
-                .FirstOrDefault(File.Exists);
+            var exePath = ShaderPrep.ExecutablePath(runHybridPath, variables);
             if (exePath == null || !File.Exists(ShaderPrep.ListPath(runHybridPath)))
                 return ShaderPrep.Result.NoList;
 
@@ -201,11 +199,12 @@ namespace AstroHybrid.App.Services
             }
             if (ct.IsCancellationRequested) return ShaderPrep.Result.Cancelled;
             if (sawNoList) return ShaderPrep.Result.NoList;
-            if (sawDone)
+            if (sawDone && process.ExitCode == 0)
             {
-                ShaderPrep.MarkDone(runHybridPath);
+                ShaderPrep.MarkDone(runHybridPath, variables);
                 return ShaderPrep.Result.Done;
             }
+            AppendDebugLog($"Shader preparation did not complete (exit {process.ExitCode}, done={sawDone}).");
             return ShaderPrep.Result.Failed;
         }
 
