@@ -27,6 +27,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+GENERATED_VARIANTS = (
+    "AstroBot-NonRT",
+    "AstroBot-Ultrawide",
+    "AstroBot-NonRT-Ultrawide",
+    "AstroBot-NonRT-SoftAssert",
+    "AstroBot-NonRT-Ultrawide-SoftAssert",
+)
+
 # (name, original hex, patched hex) ported from AstroHybrid.App/Services/GameSetup.cs.
 SOFT_ASSERT = (
     "soft command-buffer assert",
@@ -91,19 +99,19 @@ def load_toml_patches(directory: Path, names: list[str]) -> list[tuple[str, byte
     return patches
 
 
-def write_variant(run: Path, base: bytes, patches, label: str, written: list[str]) -> bool:
+def write_variant(run: Path, base: bytes | bytearray, patches, label: str, written: list[str]) -> bytearray | None:
     buffer = bytearray(base)
     for name, original, patched in patches:
         count = apply_all(buffer, name, original, patched)
         if count == 0:
             log(f"==   {label}: '{name}' did not match; variant skipped")
-            return False
+            return None
     target = run / f"AstroBot-{label}"
     target.write_bytes(buffer)
     target.chmod(0o755)
     written.append(target.name)
     log(f"==   wrote {target.name}")
-    return True
+    return buffer
 
 
 def main(argv: list[str]) -> int:
@@ -125,7 +133,6 @@ def main(argv: list[str]) -> int:
         count = apply_all(base, name, bytes.fromhex(original), bytes.fromhex(patched))
         log(f"==   {name}: {count} match(es)")
     base_path.write_bytes(base)
-    base = bytes(base)
     # The toml patterns are the bare 6-byte JE (17 matches in 01.019.000: patching all of them breaks
     # unrelated branches, e.g. an empty std::function throw at ps_logo). Use the Windows setup's unique
     # patterns (GameSetup.cs FasterLightingPatches) and require exactly one match.
@@ -157,9 +164,15 @@ def main(argv: list[str]) -> int:
         except (OSError, ValueError):
             pass
 
+    # Generate the plain ultrawide variant before allocating the faster-lighting
+    # copy, so only two executable buffers are needed at this point.
+    ultra_patch = [(ULTRAWIDE[0], bytes.fromhex(ULTRAWIDE[1]), bytes.fromhex(ULTRAWIDE[2]))]
+    if write_variant(run, base, ultra_patch, "Ultrawide", written) is not None:
+        features["ultrawide"] = True
+
     # Faster lighting (non-tiled renderer + GI probes off).
     if lighting:
-        nonrt = bytearray(base)
+        nonrt = base  # no later variant needs the unmodified base buffer
         ok = True
         for name, original, patched in lighting:
             if apply_all(nonrt, name, original, patched) == 0:
@@ -173,22 +186,20 @@ def main(argv: list[str]) -> int:
             features["nonTiledLighting"] = True
             log("==   wrote AstroBot-NonRT")
 
-    # Ultrawide, on the base and on the faster-lighting build.
-    ultra_patch = [(ULTRAWIDE[0], bytes.fromhex(ULTRAWIDE[1]), bytes.fromhex(ULTRAWIDE[2]))]
-    if write_variant(run, base, ultra_patch, "Ultrawide", written):
-        features["ultrawide"] = True
-
-    if (run / "AstroBot-NonRT").is_file():
-        nonrt = (run / "AstroBot-NonRT").read_bytes()
-        write_variant(run, nonrt, ultra_patch, "NonRT-Ultrawide", written)
-
+    if "AstroBot-NonRT" in written:
         soft_patch = [(SOFT_ASSERT[0], bytes.fromhex(SOFT_ASSERT[1]), bytes.fromhex(SOFT_ASSERT[2]))]
-        if write_variant(run, nonrt, soft_patch, "NonRT-SoftAssert", written):
+        if write_variant(run, nonrt, soft_patch, "NonRT-SoftAssert", written) is not None:
             features["softAssert"] = True
-
-        if (run / "AstroBot-NonRT-Ultrawide").is_file():
-            nonrt_ultra = (run / "AstroBot-NonRT-Ultrawide").read_bytes()
+        nonrt_ultra = write_variant(run, nonrt, ultra_patch, "NonRT-Ultrawide", written)
+        del nonrt, base
+        if nonrt_ultra is not None:
             write_variant(run, nonrt_ultra, soft_patch, "NonRT-Ultrawide-SoftAssert", written)
+
+    # The launcher selects variants by file existence. A previous installation
+    # must not leave an old executable selectable if its signature no longer matches.
+    for name in GENERATED_VARIANTS:
+        if name not in written:
+            (run / name).unlink(missing_ok=True)
 
     features["variants"] = written
     manifest = run / "features.json"
