@@ -22,7 +22,6 @@ import argparse
 import datetime as dt
 import json
 import sys
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -83,6 +82,9 @@ def apply_all(buffer: bytearray, name: str, original: bytes, patched: bytes) -> 
 
 
 def load_toml_patches(directory: Path, names: list[str]) -> list[tuple[str, bytes, bytes]]:
+    # Optional TOML loader requires Python 3.11; normal setup does not call it.
+    import tomllib
+
     patches: list[tuple[str, bytes, bytes]] = []
     for name in names:
         path = directory / f"{name}.toml"
@@ -129,10 +131,13 @@ def main(argv: list[str]) -> int:
     base = bytearray(base_path.read_bytes())
     # Same base patches as the Windows setup (AstroHybrid.App/Services/GameSetup.cs): 16 MiB worker
     # command buffers, NULL-memcpy guards (#47, #50, #6, #159) and the Garlic pool +256 MiB (#166).
+    base_changed = False
     for name, original, patched in BASE_PATCHES:
         count = apply_all(base, name, bytes.fromhex(original), bytes.fromhex(patched))
+        base_changed |= count > 0
         log(f"==   {name}: {count} match(es)")
-    base_path.write_bytes(base)
+    if base_changed:
+        base_path.write_bytes(base)
     # The toml patterns are the bare 6-byte JE (17 matches in 01.019.000: patching all of them breaks
     # unrelated branches, e.g. an empty std::function throw at ps_logo). Use the Windows setup's unique
     # patterns (GameSetup.cs FasterLightingPatches) and require exactly one match.
@@ -164,8 +169,8 @@ def main(argv: list[str]) -> int:
         except (OSError, ValueError):
             pass
 
-    # Generate the plain ultrawide variant before allocating the faster-lighting
-    # copy, so only two executable buffers are needed at this point.
+    # Generate the plain ultrawide variant before modifying the base buffer for faster lighting.
+    # Only two executable buffers are needed at this point.
     ultra_patch = [(ULTRAWIDE[0], bytes.fromhex(ULTRAWIDE[1]), bytes.fromhex(ULTRAWIDE[2]))]
     if write_variant(run, base, ultra_patch, "Ultrawide", written) is not None:
         features["ultrawide"] = True
