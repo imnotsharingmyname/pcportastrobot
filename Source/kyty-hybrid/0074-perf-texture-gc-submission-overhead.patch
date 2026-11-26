@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] perf(texture cache): reduce per-submission GC overhead
+
+Avoid redundant heap queries after budget collection has already run in the
+current frame, and avoid heap allocations in the bounded legacy collector.
+---
+diff --git a/src/graphics/host_gpu/renderer/cache/textureCache.cpp b/src/graphics/host_gpu/renderer/cache/textureCache.cpp
+--- a/src/graphics/host_gpu/renderer/cache/textureCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/textureCache.cpp
+@@ -6691,11 +6691,17 @@
+ void TextureCache::RunGarbageCollector() {
+ 	std::scoped_lock lock {m_lock};
+ 	RetireIdlePartialImages();
+-	const uint64_t   tick = m_gc_tick++;
+-	if (m_graphics.CanReportMemoryUsage()) {
+-		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+-	}
+-	const auto frame = m_frame.load(std::memory_order_relaxed);
++	const uint64_t tick = m_gc_tick++;
++	const auto frame = m_frame.load(std::memory_order_relaxed);
++	const bool budget_gc = VramBudget::GcEnabled();
++	const bool plot_memory = (tick & 63u) == 0 && Profiler::DetailedEnabled() && tracy::ProfilerAvailable();
++	// Budget GC can retire only once per presented frame. Subsequent submissions
++	// still maintain local accounting, but need no heap-budget query until the
++	// next collection (or an explicitly requested profiler sample).
++	if (m_graphics.CanReportMemoryUsage() &&
++	    (!budget_gc || frame != m_budget_frame || plot_memory)) {
++		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
++	}
+ 	// Always (one entry per frame): KYTY_VRAM_GC_BUDGET is a live switch and needs recent frames.
+ 	NoteFrameTick(frame, tick);
+ 	if (m_idle_frames != 0 && frame >= m_idle_next_frame) {
+@@ -6703,14 +6709,14 @@
+ 		(void)RetireUnusedImages(frame, m_idle_frames, 512, UINT64_MAX, true);
+ 	}
+ 	m_tiler.TrimScratchPool();
+-	if ((tick & 63u) == 0 && Profiler::DetailedEnabled() && tracy::ProfilerAvailable()) {
+-		if (m_graphics.CanReportMemoryUsage()) {
+-			TracyPlot("ImageCache.DeviceMemoryBytes", static_cast<double>(m_total_used_memory));
+-		}
+-		TracyPlot("ImageCache.RegisteredGuestBytes", static_cast<double>(m_registered_image_memory));
+-		TracyPlot("ImageCache.PendingRetirementBytes", static_cast<double>(m_pressure_retirement_bytes));
+-	}
+-	if (VramBudget::GcEnabled() && RunBudgetGarbageCollector(frame)) {
++	if (plot_memory) {
++		if (m_graphics.CanReportMemoryUsage()) {
++			TracyPlot("ImageCache.DeviceMemoryBytes", static_cast<double>(m_total_used_memory));
++		}
++		TracyPlot("ImageCache.RegisteredGuestBytes", static_cast<double>(m_registered_image_memory));
++		TracyPlot("ImageCache.PendingRetirementBytes", static_cast<double>(m_pressure_retirement_bytes));
++	}
++	if (budget_gc && RunBudgetGarbageCollector(frame)) {
+ 		return;
+ 	}
+ 	if (m_pressure_gc_enabled) {
+@@ -6739,9 +6745,11 @@
+ 		bool           pressured  = m_total_used_memory >= m_pressure_gc_memory;
+ 		bool           aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
+ 		const uint64_t age       = std::min<uint64_t>(aggressive ? 160 : pressured ? 80 : 16, tick);
+-		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
+-		std::vector<ImageId> candidates;
+-		candidates.reserve(deletions);
++		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
++		// The legacy collector never takes more than 40 candidates per pass.
++		// Keep the list on the stack instead of allocating on each submission.
++		std::array<ImageId, 40> candidates {};
++		size_t candidate_count = 0;
+ 		// KYTY_IMAGE_GC_FILTER (default on; =0 counts every entry; chenxiao07/KytyPS5 45beec32a):
+ 		// the walk passes over the images the loop below keeps, without counting them against the
+ 		// budget. Those are never used again either, so they stay at the front of the LRU list:
+@@ -6764,10 +6772,11 @@
+ 			if (m_gc_filter_candidates && kept(id)) {
+ 				return ++passed >= 4096; // bounded per pass
+ 			}
+-			candidates.push_back(id);
+-			return candidates.size() == deletions;
+-		});
+-		for (const auto id: candidates) {
++			candidates[candidate_count++] = id;
++			return candidate_count == deletions;
++		});
++		for (size_t i = 0; i < candidate_count; ++i) {
++			const auto id = candidates[i];
+ 			if (deletions == 0) {
+ 				break;
+ 			}
+-- 
+2.55.0
