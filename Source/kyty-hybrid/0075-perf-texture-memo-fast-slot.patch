@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Subject: [PATCH] perf: speed up texture memo slot selection and reject misses early
+
+---
+diff --git a/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp b/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
+--- a/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.cpp
+@@ -138,6 +138,15 @@
+ 	return slots;
+ }
+ 
++// Default and recommended memo sizes are powers of two. Use the identical
++// low-bit index without a variable integer division on every binding lookup.
++// Explicit non-power-of-two KYTY_TEXTURE_MEMO_SLOTS values keep modulo semantics.
++uint32_t TextureBindingMemo::SlotIndex(uint64_t hash) {
++	const auto count = SlotCount();
++	const auto mask = count - 1u;
++	return static_cast<uint32_t>((count & mask) == 0 ? hash & mask : hash % count);
++}
++
+ TextureBindingMemo::TextureBindingMemo() = default;
+ TextureBindingMemo::~TextureBindingMemo() = default;
+ 
+@@ -239,19 +248,23 @@
+ 	if (entries == nullptr) {
+ 		return false;
+ 	}
+-	const auto& entry  = entries[hash % SlotCount()];
+-	const auto  packed = PackKey(key);
+-	const auto  before = entry.seq.load(std::memory_order_acquire);
++	const auto& entry = entries[SlotIndex(hash)];
++	const auto before = entry.seq.load(std::memory_order_acquire);
+ 	if ((before & 1u) != 0) {
+ 		return false; // being rewritten
+ 	}
+ 	const auto found = entry.published_tag.load(std::memory_order_relaxed);
+-	bool       same  = found != 0;
++	if (found == 0) {
++		return false; // empty slot: no need to pack or read the key
++	}
++	const auto packed = PackKey(key);
+ 	for (uint32_t i = 0; i < KeyWords; i++) {
+-		same = entry.packed_key[i].load(std::memory_order_relaxed) == packed[i] && same;
++		if (entry.packed_key[i].load(std::memory_order_relaxed) != packed[i]) {
++			return false; // a miss is always safe; the CP resolves it normally
++		}
+ 	}
+ 	std::atomic_thread_fence(std::memory_order_acquire);
+-	if (!same || entry.seq.load(std::memory_order_relaxed) != before) {
++	if (entry.seq.load(std::memory_order_relaxed) != before) {
+ 		return false;
+ 	}
+ 	tag = found;
+@@ -295,7 +308,7 @@
+ 	std::scoped_lock lock {cache.m_lock};
+ 	const auto       tick = cache.m_scheduler.CurrentTick();
+ 	for (; hits < bindings.size(); hits++) {
+-		const auto slot  = static_cast<uint32_t>(hashes[hits] % SlotCount());
++		const auto slot  = SlotIndex(hashes[hits]);
+ 		auto&      entry = m_entries[slot];
+ 		if (tags[hits] == 0 || entry.tag != tags[hits]) {
+ 			break;
+@@ -331,7 +344,7 @@
+ 		Profiler::CountFrameEvent(Profiler::FrameEvent::TextureBindingMemoMisses);
+ 		return false;
+ 	}
+-	const auto slot  = static_cast<uint32_t>(hash % SlotCount());
++	const auto slot  = SlotIndex(hash);
+ 	auto&      entry = m_entries[slot];
+ 	// A hint naming this entry's tag proves the key (FindHint); otherwise compare it.
+ 	const bool hinted = tag_hint != 0 && entry.tag == tag_hint;
+@@ -461,7 +474,7 @@
+ 		std::printf("TextureBindingMemo: %u entries (%zu KiB)\n", SlotCount(),
+ 		            static_cast<size_t>(SlotCount()) * sizeof(Entry) / 1024u);
+ 	}
+-	const auto slot  = static_cast<uint32_t>(hash % SlotCount());
++	const auto slot  = SlotIndex(hash);
+ 	auto&      entry = m_entries[slot];
+ 	// FindHint's readers: odd while the key and tag change (the fence orders the odd value before
+ 	// the new words), even again once both are stored (release).
+@@ -500,7 +513,7 @@
+ 	    binding.desc.type != TextureCache::BindingType::Texture) {
+ 		return nullptr;
+ 	}
+-	const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++	const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 	if (entry.tag != binding.memo_tag || entry.image != binding.image_id || entry.view == nullptr) {
+ 		return nullptr;
+ 	}
+@@ -570,7 +583,7 @@
+ 	}
+ 	// KYTY_CP_COMMIT=texdcc: DCC certificates first, outside the lock (as TryResolve checks them).
+ 	for (const auto& binding: bindings) {
+-		const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++		const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 		if (binding.memo_tag != 0 && entry.tag == binding.memo_tag && entry.dcc &&
+ 		    !DccStateHolds(cache, entry)) {
+ 			return false;
+@@ -578,7 +591,7 @@
+ 	}
+ 	std::scoped_lock lock {cache.m_lock};
+ 	for (const auto& binding: bindings) {
+-		const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++		const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 		if (binding.memo_tag == 0 || entry.tag != binding.memo_tag || entry.image != binding.image_id) {
+ 			return false;
+ 		}
+@@ -600,7 +613,7 @@
+ 	}
+ 	const auto tick = cache.m_scheduler.CurrentTick();
+ 	for (const auto& binding: bindings) {
+-		const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++		const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 		if (!entry.null_image) {
+ 			auto& image              = cache.m_slot_images[entry.image];
+ 			image.tick_accessed_last = tick;
+@@ -623,7 +636,7 @@
+ 		return 2;
+ 	}
+ 	for (const auto& binding: bindings) {
+-		const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++		const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 		if (binding.memo_tag != 0 && entry.tag == binding.memo_tag && entry.dcc &&
+ 		    !cache.MetadataStateHolds(entry.dcc_noop)) {
+ 			return 1;
+@@ -631,7 +644,7 @@
+ 	}
+ 	std::scoped_lock lock {cache.m_lock};
+ 	for (const auto& binding: bindings) {
+-		const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++		const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 		if (binding.memo_tag == 0 || entry.tag != binding.memo_tag || entry.image != binding.image_id) {
+ 			return 2;
+ 		}
+@@ -665,7 +678,7 @@
+ 	}
+ 	std::scoped_lock lock {cache.m_lock};
+ 	for (const auto& binding: bindings) {
+-		const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++		const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 		if (binding.memo_tag == 0 || binding.desc.type != TextureCache::BindingType::Texture ||
+ 		    entry.tag != binding.memo_tag || entry.image != binding.image_id ||
+ 		    entry.view == nullptr) {
+@@ -688,7 +701,7 @@
+ 		return true;
+ 	}
+ 	for (auto& binding: bindings) {
+-		const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++		const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 		cache.TouchImage(cache.m_slot_images[binding.image_id]);
+ 		binding.image_view = entry.view;
+ 	}
+@@ -700,7 +713,7 @@
+ 	if (!m_entries || binding.memo_tag == 0) {
+ 		return nullptr;
+ 	}
+-	const auto& entry = m_entries[binding.memo_slot % SlotCount()];
++	const auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 	return entry.tag == binding.memo_tag ? entry.view : nullptr;
+ }
+ 
+@@ -709,7 +722,7 @@
+ 	    binding.desc.type != TextureCache::BindingType::Texture) {
+ 		return;
+ 	}
+-	auto& entry = m_entries[binding.memo_slot % SlotCount()];
++	auto& entry = m_entries[SlotIndex(binding.memo_slot)];
+ 	if (entry.tag == binding.memo_tag && entry.image == binding.image_id) {
+ 		entry.view = view;
+ 	}
+diff --git a/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.h b/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.h
+--- a/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.h
++++ b/src/graphics/host_gpu/renderer/pipeline/textureBindingMemo.h
+@@ -194,6 +194,7 @@
+ 	// launches without counters were +5.7% fps (Sky Garden, ABBA) but mixed elsewhere (launch
+ 	// noise of 5-10% on the pirate island), so the default stays.
+ 	[[nodiscard]] static uint32_t SlotCount();
++	[[nodiscard]] static uint32_t SlotIndex(uint64_t hash);
+ 	static constexpr uint32_t KeyWords = 8;
+ 	using PackedKey                    = std::array<uint64_t, KeyWords>;
+ 
+-- 
+2.55.0
