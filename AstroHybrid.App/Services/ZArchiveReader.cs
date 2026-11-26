@@ -227,6 +227,9 @@ namespace AstroHybrid.App.Services
                 var remaining = entry.Size;
                 var filePosition = entry.FileOffset;
                 var buffer = new byte[BlockSize];
+                // Reuse storage for each compressed block in this entry. Previously
+                // ReadExactly allocated a new array for every 64 KiB of input.
+                var storedBuffer = new byte[BlockSize];
                 long processedInFile = 0;
                 using (var decompressor = new Decompressor())
                 {
@@ -235,7 +238,7 @@ namespace AstroHybrid.App.Services
                         cancellationToken.ThrowIfCancellationRequested();
                         var blockIndex = filePosition / BlockSize;
                         var blockOffset = (int)(filePosition % BlockSize);
-                        var block = ReadBlock(blockIndex, buffer, decompressor);
+                        var block = ReadBlock(blockIndex, buffer, storedBuffer, decompressor);
                         var count = (int)Math.Min(remaining, (ulong)(BlockSize - blockOffset));
                         destination.Write(block, blockOffset, count);
                         filePosition = CheckedAdd(filePosition, (ulong)count, "file offset");
@@ -252,7 +255,7 @@ namespace AstroHybrid.App.Services
             }
         }
 
-        private byte[] ReadBlock(ulong blockIndex, byte[] buffer, Decompressor decompressor)
+        private byte[] ReadBlock(ulong blockIndex, byte[] buffer, byte[] storedBuffer, Decompressor decompressor)
         {
             var recordIndex = blockIndex / 16;
             var subIndex = (int)(blockIndex % 16);
@@ -263,11 +266,17 @@ namespace AstroHybrid.App.Services
             var storedSize = (ulong)record.Sizes[subIndex] + 1;
             if (relativeOffset > _compressedSize || storedSize > _compressedSize - relativeOffset)
                 throw new InvalidDataException("An archive block points beyond the compressed data section.");
-            var stored = ReadExactly(_stream, ToLong(_compressedOffset + relativeOffset, "compressed offset"), (int)storedSize);
-            if (storedSize == BlockSize) return stored;
+            var offset = ToLong(CheckedAdd(_compressedOffset, relativeOffset, "compressed offset"), "compressed offset");
+            if (storedSize == BlockSize)
+            {
+                ReadExactly(_stream, offset, buffer, BlockSize);
+                return buffer;
+            }
+            ReadExactly(_stream, offset, storedBuffer, (int)storedSize);
             try
             {
-                var written = decompressor.Unwrap(stored, buffer);
+                // Pass only the stored bytes; the remainder is from a previous block.
+                var written = decompressor.Unwrap(new ReadOnlySpan<byte>(storedBuffer, 0, (int)storedSize), buffer);
                 if (written != BlockSize) throw new InvalidDataException("A ZArchive block has an invalid decompressed size.");
                 return buffer;
             }
@@ -361,6 +370,12 @@ namespace AstroHybrid.App.Services
         private static byte[] ReadExactly(FileStream stream, long offset, int count)
         {
             var bytes = new byte[count];
+            ReadExactly(stream, offset, bytes, count);
+            return bytes;
+        }
+
+        private static void ReadExactly(FileStream stream, long offset, byte[] bytes, int count)
+        {
             stream.Position = offset;
             var read = 0;
             while (read < count)
@@ -369,7 +384,6 @@ namespace AstroHybrid.App.Services
                 if (current == 0) throw new InvalidDataException("The ZArchive ended unexpectedly.");
                 read += current;
             }
-            return bytes;
         }
 
         private static void ValidateSection(ulong offset, ulong size, ulong fileSize, string name)
