@@ -54,6 +54,22 @@ jobs:
             Build/anyps5-hybrid/core/relinker/relinker
             Build/anyps5-hybrid/core/libs/libs/*.prx
 
+      - name: Stage AnyPS5 setup helper and license
+        run: |
+          set -euo pipefail
+          mkdir -p dist/anyps5-setup/tools
+          cp Tools/AnyPS5/tools/unwrap_self.py dist/anyps5-setup/tools/
+          cp Tools/AnyPS5/LICENSE dist/anyps5-setup/
+          python3 -I dist/anyps5-setup/tools/unwrap_self.py --help
+
+      - name: Upload AnyPS5 setup helper
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-anyps5-setup
+          retention-days: 1
+          if-no-files-found: error
+          path: dist/anyps5-setup/
+
   build-kyty-gpu:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -140,6 +156,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          name: linux-anyps5-setup
+          path: dist/stage/Tools/AnyPS5
+
+      - uses: actions/download-artifact@v4
+        with:
           name: linux-kyty-gpu
           path: dist/stage/Build/kyty-gpu
 
@@ -173,6 +194,10 @@ jobs:
                  "$STAGE/Build/anyps5-hybrid/core/libs/libs/libkernel.prx" \
                  "$STAGE/Build/anyps5-hybrid/core/libs/libs/libc.prx" \
                  "$STAGE/Build/anyps5-hybrid/core/libs/libs/libAstroHybridHost.prx"
+
+          # Exercise the exact helper path used by the shipped launcher, without game files.
+          test -f "$STAGE/Tools/AnyPS5/LICENSE"
+          python3 -I "$STAGE/Tools/AnyPS5/tools/unwrap_self.py" --help
 
           OUT="AstroBotPC-AstroHybrid-${VER}-Linux-x64.tar.gz"
           tar -C "$STAGE" -czf "$OUT" .
