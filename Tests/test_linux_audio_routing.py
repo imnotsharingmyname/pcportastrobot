@@ -71,7 +71,8 @@ AstroBot:output_FR
             self.assertIn(("AstroBot:output_FL", "sink:playback_FL"), graph)
             self.assertIn(("AstroBot:output_FR", "sink:playback_FR"), graph)
         else:
-            self.assertEqual(removed, [])
+            self.assertEqual(removed, [("AstroBot:output_FL", "sink:playback_FL")])
+            self.assertNotIn(("AstroBot:output_FL", "sink:playback_FL"), graph)
             self.assertIn(("AstroBot:output_FL", "old:playback_FL"), graph)
             self.assertIn(("AstroBot:output_FR", "old:playback_FR"), graph)
 
