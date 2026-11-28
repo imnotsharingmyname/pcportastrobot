@@ -1,0 +1,43 @@
+From: Jetsku <59046009+Jetsku@users.noreply.github.com>
+Subject: [PATCH] Backport int22 eager write readbacks for Astro Bot
+
+Adapted from Jetsku/KytyPS5 a3458ee70853ea504f9fdcf2b5a43a130c3dcc33 and 9b87d056114a038c762f4da95d72e6d13138110e. Retain existing 256-page cap and readback ordering; no unrelated GT7 diagnostics or shader changes.
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -306,7 +306,9 @@
+ // the GPU; the bytes the write sees and the order against newer writers are the same. Other
+ // CPU-dirty transitions (emulator writes reported through InvalidateMemory, direct HandleFault
+ // calls) still drain: nothing faults again after them.
+-Live::Switch g_readback_side_writes("KYTY_READBACK_SIDE_WRITES", Live::ParseDefaultOn);
++Live::Switch g_readback_side_writes("KYTY_READBACK_SIDE_WRITES", Live::ParseDefaultOn);
++// Learn GPU-owned pages that guest jobs repeatedly write, as well as pages they read.
++Live::Switch g_readback_eager_writes("KYTY_READBACK_EAGER_WRITES", Live::ParseDefaultOff);
+ std::atomic<uint64_t> g_readback_side_writes_copies {0};
+ 
+ // KYTY_READ_FAULT_PUBLISHED (live, default off; =1 on, =verify): a guest thread's read fault on a
+@@ -2065,8 +2067,8 @@
+ 	if (!side_path) {
+ 		diag_path("drain-nonside");
+ 		gpu.SendCommandSync([&, this, vaddr, size, is_write, gpu_thread] {
+-			if (!is_write) {
+-				NoteEagerRead(vaddr, size, gpu_thread);
++			if (!is_write || g_readback_eager_writes.On()) {
++				NoteEagerRead(vaddr, size, gpu_thread);
+ 			}
+ 			CpGaps::Note(is_write ? CpGaps::Event::DrainWrite : CpGaps::Event::DrainOther);
+ 			ReadMemoryDrain(vaddr, size, is_write, trace);
+@@ -2111,8 +2113,8 @@
+ 	auto                          result    = SideIssueResult::Other;
+ 	const auto                    sync_mark = diag ? ReadFaultDiag::NowNs() : 0;
+ 	gpu.SendCommandSync([&, this, vaddr, size, is_write] {
+-		if (!is_write) {
+-			NoteEagerRead(vaddr, size, false);
++		if (!is_write || g_readback_eager_writes.On()) {
++			NoteEagerRead(vaddr, size, false);
+ 		}
+ 		result = TryIssueSideReadback(vaddr, size, issued);
+ 		if ((result == SideIssueResult::CurrentWriter || result == SideIssueResult::Unbounded) &&

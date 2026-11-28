@@ -31,6 +31,9 @@ rem which is safe on the PS5's GPU (it starts every workgroup of the first dispa
 rem not on a PC GPU, where a later dispatch waiting on an earlier one can take the whole GPU and stall it
 rem until Windows resets the device. A/B 2026-11-21, Sky Garden: same average FPS, no 300 ms spikes.
 if not defined KYTY_DISPATCH_OVERLAP set KYTY_DISPATCH_OVERLAP=0
+rem int22: publish recurrent GPU-written pages ahead of the next guest write.
+if not defined KYTY_READBACK_EAGER_WRITES set KYTY_READBACK_EAGER_WRITES=1
+if not defined KYTY_READBACK_EAGER_PAGES set KYTY_READBACK_EAGER_PAGES=256
 rem Persistent shader and pipeline cache behaviour (verified 2026-11-08; see OVERNIGHT.md): without the title ID the
 rem hybrid never opened Kyty's caches and compiled shaders during play (100-117 ms hitches); with it, no
 rem late compiles and no frame over 80 ms. ASTROHYBRID_SHADER_CACHE=0 turns it off.
