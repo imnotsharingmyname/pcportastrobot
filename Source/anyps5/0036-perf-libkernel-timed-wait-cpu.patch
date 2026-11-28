@@ -1,0 +1,143 @@
+From 1cf6f482c03f3f2d033ecccc65931289d549bbc1 Mon Sep 17 00:00:00 2001
+From: AnyPS5 contributors <noreply@localhost>
+Subject: [PATCH] Reduce Windows timed-wait CPU spin
+
+Backport upstream AnyPS5 1cf6f482c03f3f2d033ecccc65931289d549bbc1; preserve guest timing and add upstream regression coverage.
+
+diff --git a/core/libs/prx/libkernel/CMakeLists.txt b/core/libs/prx/libkernel/CMakeLists.txt
+--- a/core/libs/prx/libkernel/CMakeLists.txt
++++ b/core/libs/prx/libkernel/CMakeLists.txt
+@@ -945,6 +945,16 @@ if(BUILD_TESTING)
+         set_tests_properties(guest_nanosleep_long_request PROPERTIES ENVIRONMENT_MODIFICATION
+             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+     endif()
++    add_test_executable(guest_timed_wait_cpu_tests ${LIBS_INCLUDE_DIR}/tests/GuestTimedWaitCpu.cpp)
++    target_include_directories(guest_timed_wait_cpu_tests PRIVATE ${LIBS_INCLUDE_DIR})
++    target_link_libraries(guest_timed_wait_cpu_tests PRIVATE libkernel libc)
++    configure_windows_unwind(guest_timed_wait_cpu_tests)
++    add_test(NAME guest_timed_wait_cpu COMMAND guest_timed_wait_cpu_tests)
++    set_tests_properties(guest_timed_wait_cpu PROPERTIES TIMEOUT 30)
++    if(WIN32)
++        set_tests_properties(guest_timed_wait_cpu PROPERTIES ENVIRONMENT_MODIFICATION
++            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
++    endif()
+     add_test_executable(guest_pthread_sem_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadSem.cpp)
+     target_include_directories(guest_pthread_sem_tests PRIVATE ${LIBS_INCLUDE_DIR})
+     target_link_libraries(guest_pthread_sem_tests PRIVATE libkernel libc)
+diff --git a/core/libs/prx/libkernel/Time/TimedWait.cpp b/core/libs/prx/libkernel/Time/TimedWait.cpp
+--- a/core/libs/prx/libkernel/Time/TimedWait.cpp
++++ b/core/libs/prx/libkernel/Time/TimedWait.cpp
+@@ -22,7 +22,7 @@ namespace TimedWait {
+ namespace {
+ 
+ constexpr std::uint64_t YIELD_BELOW_NANOS = 50000ULL;
+-constexpr std::uint64_t LEAD_NANOS = 500000ULL;
++constexpr std::uint64_t LEAD_NANOS = 20000ULL;
+ 
+ std::mutex& ChangeSleepersMutex() {
+     static std::mutex mutex;
+diff --git a/core/libs/tests/GuestTimedWaitCpu.cpp b/core/libs/tests/GuestTimedWaitCpu.cpp
+--- a/core/libs/tests/GuestTimedWaitCpu.cpp
++++ b/core/libs/tests/GuestTimedWaitCpu.cpp
+@@ -0,0 +1,101 @@
++#include "prx/libkernel/include/Api.hpp"
++#include "prx/libkernel/KernelErrors.hpp"
++#include "prx/libkernel/Pthread/include/Cond.hpp"
++#include "prx/libkernel/Pthread/include/Mutex.hpp"
++#include "prx/libkernel/Time/include/Time.hpp"
++#include "SceTypes.hpp"
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++
++#ifdef _WIN32
++#include <windows.h>
++#endif
++
++static void Require(bool value) {
++    if (!value) std::abort();
++}
++
++#ifdef _WIN32
++static std::uint64_t CurrentThreadCpuNanos() {
++    FILETIME creation{}, exit{}, kernel{}, user{};
++    if (!GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user)) return 0;
++    ULARGE_INTEGER k, u;
++    k.LowPart = kernel.dwLowDateTime;
++    k.HighPart = kernel.dwHighDateTime;
++    u.LowPart = user.dwLowDateTime;
++    u.HighPart = user.dwHighDateTime;
++    return (k.QuadPart + u.QuadPart) * 100ULL;
++}
++#endif
++
++static void TestUsleep500us() {
++    constexpr int iterations = 50;
++#ifdef _WIN32
++    const auto cpuStart = CurrentThreadCpuNanos();
++#endif
++    const auto wallStart = std::chrono::steady_clock::now();
++
++    for (int i = 0; i < iterations; ++i) {
++        const auto t0 = std::chrono::steady_clock::now();
++        Require(sceKernelUsleep_nid_postfix(500) == 0);
++        const auto t1 = std::chrono::steady_clock::now();
++        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
++        Require(elapsed >= std::chrono::microseconds(500));
++        Require(elapsed < std::chrono::microseconds(3000));
++    }
++
++    const auto wallEnd = std::chrono::steady_clock::now();
++#ifdef _WIN32
++    const auto cpuEnd = CurrentThreadCpuNanos();
++    const auto wallNanos = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count());
++    const auto cpuNanos = cpuEnd - cpuStart;
++    Require(cpuNanos <= (wallNanos * 40ULL) / 100ULL);
++#endif
++}
++
++static void TestCondTimedwait500us() {
++    constexpr int iterations = 50;
++    PthreadMutex mutex = nullptr;
++    PthreadCond cond = nullptr;
++    Require(scePthreadMutexInit(&mutex, nullptr, nullptr) == 0);
++    Require(scePthreadCondInit(&cond, nullptr, nullptr) == 0);
++    Require(scePthreadMutexLock(&mutex) == 0);
++
++#ifdef _WIN32
++    const auto cpuStart = CurrentThreadCpuNanos();
++#endif
++    const auto wallStart = std::chrono::steady_clock::now();
++
++    for (int i = 0; i < iterations; ++i) {
++        const auto t0 = std::chrono::steady_clock::now();
++        const int result = scePthreadCondTimedwait(&cond, &mutex, 500);
++        Require(result == SCE_KERNEL_ERROR_ETIMEDOUT);
++        const auto t1 = std::chrono::steady_clock::now();
++        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
++        Require(elapsed >= std::chrono::microseconds(500));
++        Require(elapsed < std::chrono::microseconds(3000));
++    }
++
++    const auto wallEnd = std::chrono::steady_clock::now();
++#ifdef _WIN32
++    const auto cpuEnd = CurrentThreadCpuNanos();
++    const auto wallNanos = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count());
++    const auto cpuNanos = cpuEnd - cpuStart;
++#endif
++
++    Require(scePthreadMutexUnlock(&mutex) == 0);
++    Require(scePthreadCondDestroy(&cond) == 0);
++    Require(scePthreadMutexDestroy(&mutex) == 0);
++
++#ifdef _WIN32
++    Require(cpuNanos <= (wallNanos * 40ULL) / 100ULL);
++#endif
++}
++
++int main() {
++    TestUsleep500us();
++    TestCondTimedwait500us();
++    return 0;
++}
++
