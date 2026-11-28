@@ -244,7 +244,7 @@ public sealed class Backend
         {
             arguments.Add("--env");
             arguments.Add("KYTY_GPU_PRESENT_MODE");
-            arguments.Add("Fifo");
+            arguments.Add("Mailbox"); // FIFO stalls the game on high-refresh displays; falls back to FIFO when unavailable
         }
         if (settings.GameSpeed)
         {

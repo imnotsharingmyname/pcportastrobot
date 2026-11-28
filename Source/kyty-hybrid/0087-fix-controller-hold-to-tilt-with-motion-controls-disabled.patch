@@ -1,0 +1,63 @@
+From ac800ab18125389d1e7dafcecb26afb6d04efcd9 Mon Sep 17 00:00:00 2001
+From: AstroHybrid <noreply@localhost>
+Date: Sat, 28 Nov 2026 00:00:35 +0000
+Subject: [PATCH] fix(controller): hold-to-tilt with motion controls disabled
+
+---
+ src/libs/controller.cpp | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/src/libs/controller.cpp b/src/libs/controller.cpp
+index c24edd32..f35b729a 100644
+--- a/src/libs/controller.cpp
++++ b/src/libs/controller.cpp
+@@ -552,6 +552,15 @@ static bool HostInputOnly() {
+ 	return enabled;
+ }
+ 
++// ASTROHYBRID_PAD_MOTION=0: the pad's accelerometer and gyroscope stay off (motion controls disabled).
++static bool PadMotionEnabled() {
++	static const bool enabled = [] {
++		const char* value = std::getenv("ASTROHYBRID_PAD_MOTION");
++		return value == nullptr || std::strcmp(value, "0") != 0;
++	}();
++	return enabled;
++}
++
+ static bool SupportsRgbLed(SDL_Gamepad* pad) {
+ 	return pad != nullptr &&
+ 	       SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+@@ -574,8 +583,7 @@ void GameController::SetDevices(int active_id) {
+ 			if (const auto& color = Config::GetControllerColor(); color && SupportsRgbLed(pad)) {
+ 				(void)SDL_SetGamepadLED(pad, (*color)[0], (*color)[1], (*color)[2]);
+ 			}
+-			const char* motion_env = std::getenv("ASTROHYBRID_PAD_MOTION");
+-			if (motion_env == nullptr || std::strcmp(motion_env, "0") != 0) {
++			if (PadMotionEnabled()) {
+ 				for (auto sensor: {SDL_SENSOR_ACCEL, SDL_SENSOR_GYRO}) {
+ 					if (SDL_GamepadHasSensor(pad, sensor) &&
+ 					    !SDL_SetGamepadSensorEnabled(pad, sensor, true)) {
+@@ -934,8 +942,9 @@ bool GameController::GyroEmulationApplies(int id) const {
+ 	if (id != HOST_INPUT_CONTROLLER_ID && id != m_active_id) {
+ 		return false;
+ 	}
+-	// Pads with a real gyroscope report it directly.
+-	if (m_active_id != HOST_INPUT_CONTROLLER_ID) {
++	// Pads with a real gyroscope report it directly, unless motion controls are off: then hold-to-tilt
++	// (Back/View, Create on a DualSense) drives the tilt from the right stick as on pads without one.
++	if (m_active_id != HOST_INPUT_CONTROLLER_ID && PadMotionEnabled()) {
+ 		auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(m_active_id));
+ 		if (pad != nullptr && SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) {
+ 			return false;
+@@ -1385,7 +1394,7 @@ static void LogPad(int id) {
+ 	             SDL_GetGamepadStringForType(SDL_GetGamepadType(pad)), SDL_GetGamepadVendor(pad),
+ 	             SDL_GetGamepadProduct(pad),
+ 	             SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false) ? "yes" : "no",
+-	             SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) ? "yes" : "no (Back/View toggles right-stick tilt)");
++	             SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) && PadMotionEnabled() ? "yes" : "no (Back/View toggles right-stick tilt)");
+ 	std::fflush(stderr);
+ }
+ 
+-- 
+2.55.0.windows.5
+

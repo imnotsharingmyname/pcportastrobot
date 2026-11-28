@@ -517,10 +517,12 @@ namespace AstroHybrid.App.Services
             int language = settings.Language >= 0 && settings.Language <= 30 ? settings.Language : WindowsLanguage();
             env["ANYPS5_LANGUAGE"] = language.ToString();
 
-            // VSync: Vulkan FIFO presentation (the default is immediate presentation). It also applies with DLSS
-            // Frame Generation: the generated frames go through the same swapchain, and forcing VSync in the
-            // NVIDIA driver (which only changes the present mode) removes the tearing there too (#15).
-            if (settings.VSync) env["KYTY_GPU_PRESENT_MODE"] = "Fifo";
+            // VSync: Vulkan MAILBOX presentation (the default is immediate presentation): no tearing, and the
+            // newest frame replaces a queued one instead of the game waiting on the display. FIFO made the game
+            // wait for refreshes of high-refresh monitors (60/40 fps swings at 144 Hz, CPU and GPU idle); the
+            // renderer falls back to FIFO when a driver offers no mailbox mode. It also applies with DLSS Frame
+            // Generation: the generated frames go through the same swapchain (#15).
+            if (settings.VSync) env["KYTY_GPU_PRESENT_MODE"] = "Mailbox";
 
             // Advanced page: the variables Run-AstroHybrid.bat reads (it keeps its defaults when unset).
             if (settings.HangWatchdog) env["ASTROHYBRID_HANG_WATCHDOG"] = "1";
