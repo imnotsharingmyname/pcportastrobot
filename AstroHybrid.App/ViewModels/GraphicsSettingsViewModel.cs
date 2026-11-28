@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using AstroHybrid.App.Models;
+using AstroHybrid.App.Services;
 
 namespace AstroHybrid.App.ViewModels
 {
@@ -55,6 +56,7 @@ namespace AstroHybrid.App.ViewModels
                 if (_mainViewModel.Settings.Size != sizeIndex)
                 {
                     _mainViewModel.Settings.Size = sizeIndex;
+                    _mainViewModel.ResolveAutoGraphics();
                     bool wantsUltrawide = AppSettings.GetAspectRatio(sizeIndex) != 16;
                     if (_mainViewModel.Settings.Ultrawide != wantsUltrawide)
                     {
@@ -182,6 +184,7 @@ namespace AstroHybrid.App.ViewModels
                     {
                         _mainViewModel.Settings.Size = _mainViewModel.Settings.Size == 8 ? 9 : (_mainViewModel.Settings.Size == 5 || _mainViewModel.Settings.Size == 6) ? 3 : 2;
                     }
+                    _mainViewModel.ResolveAutoGraphics();
                     OnPropertyChanged();
                     OnPropertyChanged(nameof(ResolutionIndex));
                     _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
@@ -286,7 +289,7 @@ namespace AstroHybrid.App.ViewModels
             get
             {
                 var hw = _mainViewModel.HardwareInfo;
-                var bestUpscale = hw != null ? _mainViewModel.BestSettingsFor(hw).Upscale : 0;
+                var bestUpscale = hw != null ? HardwareDetector.RecommendUpscaler(hw, _mainViewModel.Settings.Size) : 0;
                 var labels = new List<string> { "Auto - " + UpscalerName(bestUpscale) };
                 labels.Add("Off - the game's own upscaling");
                 if (HasDlss) labels.Add("NVIDIA DLSS - sharper image");
