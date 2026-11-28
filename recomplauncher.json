@@ -98,7 +98,7 @@
     {
       "id": "upscaler",
       "label": "Upscaling",
-      "help": "DLSS needs an NVIDIA RTX card. AMD FSR works on any card (FSR 4 on Radeon RX 9000, FSR 3.1 elsewhere).",
+      "help": "DLSS needs an NVIDIA RTX card. AMD FSR works on any card (FSR 4 on Radeon RX 6000 and newer, FSR 3.1 elsewhere).",
       "group": "Upscaling and frame generation",
       "choices": [
         { "label": "Game's own", "set": { "upscale": "0", "upscaleAuto": "false" } },

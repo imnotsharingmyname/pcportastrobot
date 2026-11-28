@@ -8,7 +8,7 @@ DLSS: same pass, colour, motion vectors, depth pairing and jitter conventions (r
 by dlss.cpp). The SDK's signed Vulkan runtime (amd_fidelityfx_loader_vk.dll and
 amd_fidelityfx_upscaler_vk.dll) is loaded at run time from ASTROHYBRID_FSR_PATH; only headers are used
 at build time (KYTY_FFX_SDK_DIR). ASTROHYBRID_FSR_VERSION=auto (default) takes the newest version the
-runtime offers for the device (FSR 4.1.2 on Radeon RX 9000, otherwise 3.1.6, then 2.3.4) and falls back
+runtime offers for the device (FSR 4.1.2 on Radeon RX 6000/7000/9000, otherwise 3.1.6, then 2.3.4) and falls back
 to the next one when a context cannot be created. The context is created for the largest input size seen,
 with dynamic resolution on. DLSS wins when both are requested. One "FSR 10s:" line every 10 s.
 
@@ -125,7 +125,7 @@ index 00000000..85ca6be3
 +// temporal-upscale pass detection, the depth pairs and the jitter conventions; see dlss.h / fsr in
 +// dlss.h for the options). The SDK's signed Vulkan runtime (amd_fidelityfx_loader_vk.dll and
 +// amd_fidelityfx_upscaler_vk.dll) is loaded at run time from ASTROHYBRID_FSR_PATH; nothing of it is
-+// linked in. The runtime offers FSR 4.1.2 (machine-learning upscaler, Radeon RX 9000 only), FSR 3.1.6
++// linked in. The runtime offers FSR 4.1.2 (machine-learning upscaler, RX 6000/7000/9000), FSR 3.1.6
 +// and FSR 2.3.4; "auto" takes the newest one the device can create, falling back version by version.
 +
 +namespace Fsr {
