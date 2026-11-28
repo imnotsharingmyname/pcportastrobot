@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid contributors <noreply@localhost>
+Subject: [PATCH] Account for pending image retirement in budget GC
+
+Avoid duplicate texture eviction while deferred destruction still contributes to driver usage. Preserve actual-usage planning in the critical-pressure path. Adapt accounting already used in the pinned legacy pressure collector.
+
+diff --git a/src/graphics/host_gpu/renderer/cache/textureCache.cpp b/src/graphics/host_gpu/renderer/cache/textureCache.cpp
+--- a/src/graphics/host_gpu/renderer/cache/textureCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/textureCache.cpp
+@@ -1167,9 +1167,8 @@
+ 	UnregisterImage(id);
+ 	if (m_scheduler.Active()) {
+-		uint64_t retiring_bytes = 0;
+-		if (m_pressure_gc_enabled) {
+-			retiring_bytes = m_graphics.NativeImageBytes(image->backing);
+-			m_pressure_retirement_bytes += retiring_bytes;
+-		}
++		// Budget GC is a live switch: account for deferred retirement under both policies.
++		const uint64_t retiring_bytes = m_graphics.CanReportMemoryUsage()
++		    ? m_graphics.NativeImageBytes(image->backing) : 0;
++		m_pressure_retirement_bytes += retiring_bytes;
+ 		m_scheduler.DeferOperation([this, id, retiring_bytes] {
+ 			m_slot_images.erase(id);
+@@ -6596,5 +6595,6 @@
+ 	const auto budget = m_graphics.GetTotalMemoryBudget();
+ 	m_budget_last     = budget;
+-	const auto plan   = VramBudget::PlanImages(budget, m_total_used_memory, m_pressure_frames);
++	const auto plan = VramBudget::PlanImagesWithRetirements(
++	    budget, m_total_used_memory, m_pressure_frames, m_pressure_retirement_bytes);
+ 	if (!plan.retire) {
+ 		return true;
+diff --git a/src/graphics/host_gpu/vramBudget.h b/src/graphics/host_gpu/vramBudget.h
+--- a/src/graphics/host_gpu/vramBudget.h
++++ b/src/graphics/host_gpu/vramBudget.h
+@@ -64,5 +64,15 @@
+ }
+ 
+-} // namespace Libs::Graphics::VramBudget
++// Deferred destruction remains in reported usage. Avoid a second eviction for those bytes.
++// Critical pressure still uses actual usage, since destruction may not have completed.
++[[nodiscard]] constexpr ImagePlan PlanImagesWithRetirements(uint64_t budget, uint64_t usage,
++    uint64_t age_frames, uint64_t pending_bytes) noexcept {
++	if (usage < Critical(budget)) {
++		usage -= std::min(usage, pending_bytes);
++	}
++	return PlanImages(budget, usage, age_frames);
++}
++
++} // namespace Libs::Graphics::VramBudget
+ 
+ #endif /* EMULATOR_SRC_GRAPHICS_HOST_GPU_VRAMBUDGET_H_ */
+diff --git a/tests/VramBudgetTests.cpp b/tests/VramBudgetTests.cpp
+--- a/tests/VramBudgetTests.cpp
++++ b/tests/VramBudgetTests.cpp
+@@ -55,9 +55,25 @@
+ }
+ 
+-} // namespace
+-
+-int main() {
+-	TestMarks();
+-	TestPlans();
++void TestPendingRetirements() {
++	constexpr uint64_t budget = 8 * GiB;
++	constexpr uint64_t usage = 7 * GiB;
++	Expect(!PlanImagesWithRetirements(budget, usage, 0, GiB).retire,
++	       "pending retirement already reaches the ordinary trigger");
++	const auto partial = PlanImagesWithRetirements(budget, usage, 0, 512 * MiB);
++	Expect(partial.retire && partial.bytes == 512 * MiB, "retire only remaining excess");
++	Expect(!PlanImagesWithRetirements(budget, usage, 0, 9 * GiB).retire,
++	       "pending bytes cannot underflow usage");
++	const auto critical = PlanImagesWithRetirements(budget, Critical(budget), 0, 2 * GiB);
++	Expect(critical.retire && critical.bytes == Critical(budget) - ImageTrigger(budget),
++	       "critical pressure still uses actual driver usage");
++	Expect(!PlanImagesWithRetirements(0, usage, 0, 0).retire, "no reported budget");
++}
++
++} // namespace
++
++int main() {
++	TestMarks();
++	TestPlans();
++	TestPendingRetirements();
+ 	if (g_failures != 0) {
+ 		std::printf("%d failure(s)\n", g_failures);
