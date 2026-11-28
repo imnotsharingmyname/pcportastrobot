@@ -1,0 +1,95 @@
+From e6ee8302e8ba85ff4f933ea05be5d0aceb1ac5f4 Mon Sep 17 00:00:00 2001
+From: Ricardo <ricardocacco@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 19:07:54 -0300
+Subject: [PATCH] perf(framegen): never ask for more frames than the runtime
+ presents
+
+ASTROHYBRID_DLSSG_TARGET raises the generated-frame count whenever the game's
+frame rate falls under the target, and reads that frame rate back from the
+window after the change. Dynamic multi-frame generation (RTX 50) decides the
+count itself: in a 370 s run on an RTX 5060 Ti (driver 621.40) the runtime
+presented 2.00 frames per game frame in every one of the 37 measured windows,
+while the controller asked for 2x, 3x and 4x and switched 101 times. The
+windows in which it asked for more are the ones where the game ran at 38-56 FPS
+instead of the 60.0 it holds at 2x. A request above what the runtime presents
+changes nothing on screen, so whatever it costs in GPU time is pure loss, and
+the frame rate it costs is what the next window raises the request again from.
+
+Two consecutive windows that present fewer frames than requested now settle the
+ceiling at what the runtime honours, and the request drops to it at once
+instead of waiting for the four lower windows below. Hardware that honours the
+requests keeps the previous behaviour: the ceiling only ever moves to a value
+the runtime has been seen to present, and a window without frame generation
+(presented 1) is not evidence about the cap and does not move it.
+
+Replaying the log's 10 s windows at the controller's 0.5 s cadence: 18 -> 2
+switches, settled at 2x instead of 4x. The changed translation unit compiles
+(MSVC 14.52 /Zs, STREAMLINE branch); the engine and the game were not rebuilt
+or benchmarked here.
+---
+ src/graphics/host_gpu/renderer/frameGen.cpp | 36 +++++++++++++++++++--
+ 1 file changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/host_gpu/renderer/frameGen.cpp b/src/graphics/host_gpu/renderer/frameGen.cpp
+index 7ec3462d..1d0db8c4 100644
+--- a/src/graphics/host_gpu/renderer/frameGen.cpp
++++ b/src/graphics/host_gpu/renderer/frameGen.cpp
+@@ -188,6 +188,11 @@ struct State {
+ 	int64_t               window_ns = 0;
+ 	uint32_t              window_presents = 0;
+ 	uint32_t              lower_windows = 0;
++	// ASTROHYBRID_DLSSG_TARGET: windows in which the runtime presented fewer frames than requested
++	// in a row, and the highest request it has been seen to honour (frames_generated units; 5 is
++	// "nothing learned yet", the same upper bound ASTROHYBRID_DLSSG_MAX_FRAMES accepts).
++	uint32_t              capped_windows = 0;
++	uint32_t              honoured_max = 5;
+ 	double                game_fps = 0.0;
+ 	uint32_t              switches = 0;
+ };
+@@ -426,7 +431,8 @@ void RenderSubmitted(uint64_t frame) {
+ namespace {
+ // ASTROHYBRID_DLSSG_TARGET: the smallest multiplier that keeps the screen at or above the target for
+ // the game's measured frame rate (half-second windows); up after one short window, down only after
+-// four windows (2 s) in which the lower multiplier would have been enough.
++// four windows (2 s) in which the lower multiplier would have been enough, and never above the
++// highest request the runtime has been seen to honour (the ceiling below).
+ void Adapt() {
+ 	auto&      s   = Get();
+ 	const auto now = NowNs();
+@@ -445,9 +451,35 @@ void Adapt() {
+ 	if (s.game_fps < 1.0) {
+ 		return;
+ 	}
++	// The runtime decides how many frames it actually generates. Dynamic multi-frame generation
++	// (RTX 50) presents what it chooses, not what was asked: a request above that changes nothing
++	// on screen, costs the game's own frame rate, and the frame rate it costs is what the next
++	// window measures, so the request hunts between multipliers. Two consecutive windows that
++	// present fewer frames than requested settle the ceiling at what the runtime honours, and the
++	// request drops to it at once instead of waiting for the four lower windows below.
++	const auto presented = static_cast<uint32_t>(
++	    std::floor(s.shown_ratio.load(std::memory_order_relaxed) + 0.25));
++	if (presented >= 2 && presented < s.frames_generated + 1) {
++		if (++s.capped_windows >= 2 && presented - 1 < s.honoured_max) {
++			s.honoured_max   = presented - 1;
++			s.capped_windows = 0;
++			s.lower_windows  = 0;
++			std::printf("DLSS-G: the runtime presents %u frames per game frame, the adaptive "
++			            "multiplier stops above %ux\n",
++			            presented, s.honoured_max + 1);
++			std::fflush(stdout);
++			if (s.frames_generated > s.honoured_max) {
++				s.frames_generated = s.honoured_max;
++				s.switches++;
++				ApplyOptions();
++			}
++		}
++	} else {
++		s.capped_windows = 0;
++	}
+ 	const auto wanted = static_cast<uint32_t>(std::clamp(
+ 	    std::ceil(static_cast<double>(s.target_fps) / s.game_fps - 0.02) - 1.0, 1.0,
+-	    static_cast<double>(s.max_frames)));
++	    static_cast<double>(std::min(s.max_frames, s.honoured_max))));
+ 	if (wanted > s.frames_generated) {
+ 		s.frames_generated = wanted;
+ 		s.lower_windows    = 0;
