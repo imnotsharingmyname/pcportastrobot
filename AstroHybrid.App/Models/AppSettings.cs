@@ -15,8 +15,10 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("fpsv")]
         public int FpsVersion { get; set; } = 2;
 
+        internal const int DefaultResolutionIndex = 2;
+
         [JsonPropertyName("size")]
-        public int Size { get; set; } = 2;
+        public int Size { get; set; } = DefaultResolutionIndex;
 
         [JsonPropertyName("fullscreen")]
         public bool Fullscreen { get; set; } = true;
@@ -219,13 +221,20 @@ namespace AstroHybrid.App.Models
         [JsonIgnore]
         public bool IsSuperUltrawideSize => GetAspectRatio(Size) == 32;
 
+        internal void NormalizeResolution()
+        {
+            if (Size < 0 || Size >= ResolutionPresets.Length) Size = DefaultResolutionIndex;
+            if (IsUltrawideSize) Ultrawide = true;
+            else if (Ultrawide) Size = Size == 9 ? 8 : Size == 3 ? 5 : 4;
+        }
+
         public void Sanitize(bool supportsDlss = true, bool supportsFrameGeneration = true, bool supportsReflex = true, int maxFrameGenMultiplier = 4,
                              bool supportsFsrFrameGen = true, bool supportsXess = true)
         {
             if (Lighting < 0 || Lighting > 1) Lighting = 0;
             if (Fps < 0 || Fps > 6) Fps = 0;
             if (Speed < 0 || Speed > 5) Speed = 0;
-            if (Size < 0 || Size >= ResolutionPresets.Length) Size = 2;
+            NormalizeResolution();
             if (Overlay < 0 || Overlay > 3) Overlay = 0;
             if (Upscale < 0 || Upscale > 3) Upscale = 0;   // 0 game's own, 1 NVIDIA DLSS, 2 AMD FSR, 3 Intel XeSS
             if (FrameGenMode < 0 || FrameGenMode > 4) FrameGenMode = 0;
@@ -235,9 +244,6 @@ namespace AstroHybrid.App.Models
             if (CpPriority < 0 || CpPriority > 2) CpPriority = 2;
             if (Priority != "normal" && Priority != "abovenormal" && Priority != "high")
                 Priority = "abovenormal";
-
-            if (IsUltrawideSize) Ultrawide = true;
-            else if (Ultrawide) Size = Size == 9 ? 8 : Size == 3 ? 5 : 4;
 
             if (!supportsDlss && Upscale == 1) Upscale = 0;
             if (!supportsXess && Upscale == 3) Upscale = 0;

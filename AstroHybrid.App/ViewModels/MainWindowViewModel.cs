@@ -258,6 +258,7 @@ namespace AstroHybrid.App.ViewModels
                     ApplyBestSettings();
                 }
 
+                Settings.NormalizeResolution();
                 ResolveAutoGraphics();
                 bool fsrFrameGen = LauncherService.FsrFrameGenRuntimeAvailable(_rootDirectory);
                 if (HardwareInfo != null)
@@ -395,12 +396,12 @@ namespace AstroHybrid.App.ViewModels
         }
 
         // Graphics page "Auto": the upscaler and frame generation the selected card supports best.
-        // Called at start-up (the card or driver may have changed) and when the card or the choice changes.
+        // Called at start-up and when the card, resolution or choice changes.
         public void ResolveAutoGraphics()
         {
             if (HardwareInfo == null) return;
             var best = PickBestSettings(HardwareInfo);
-            if (Settings.UpscaleAuto) Settings.Upscale = best.Upscale;
+            if (Settings.UpscaleAuto) Settings.Upscale = HardwareDetector.RecommendUpscaler(HardwareInfo, Settings.Size);
             if (Settings.FrameGenAuto)
             {
                 bool wasOff = Settings.FrameGenMode == 0;
@@ -703,16 +704,8 @@ namespace AstroHybrid.App.ViewModels
                 if (best.Size == 8) best.Size = 5;   // 5120x2160 -> 3440x1440
             }
 
-            if (pc.RtxSeries >= 20)
-            {
-                best.Upscale = 1;
-                best.LowLatency = true;
-            }
-            else if (pc.GpuVendor == "Intel" && pc.SupportsXess)
-            {
-                // Intel Arc and Iris Xe: Intel's own upscaler, on the XMX engines where the GPU has them.
-                best.Upscale = 3;
-            }
+            best.Upscale = HardwareDetector.RecommendUpscaler(pc, best.Size);
+            best.LowLatency = pc.RtxSeries >= 20;
 
             if (pc.RtxSeries >= 40)
             {

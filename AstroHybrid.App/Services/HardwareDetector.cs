@@ -389,6 +389,29 @@ namespace AstroHybrid.App.Services
             return buffer.ToString();
         }
 
+        internal static int RecommendUpscaler(HardwareInfo pc, int size)
+        {
+            if (pc.RtxSeries >= 20)
+            {
+                if (size < 0 || size >= AppSettings.ResolutionPresets.Length)
+                    size = AppSettings.DefaultResolutionIndex;
+                var resolution = AppSettings.ResolutionPresets[size];
+                var gpu = pc.SelectedGpu;
+
+                // One Sky Garden comparison on v1.2.30 favored the game's own upscaling
+                // over DLSS Balanced on a desktop RTX 2080 SUPER at 1920x1080.
+                if (resolution.Width == 1920 && resolution.Height == 1080 && gpu != null && gpu.Vendor == "NVIDIA" &&
+                    (Regex.IsMatch(gpu.PnpDeviceId, @"^PCI\\VEN_10DE&DEV_1E81(?:[&\\]|$)", RegexOptions.IgnoreCase) ||
+                     (gpu.PnpDeviceId.Length == 0 && string.Equals(gpu.Name, "NVIDIA GeForce RTX 2080 SUPER", StringComparison.OrdinalIgnoreCase))))
+                    return 0;
+
+                return 1;
+            }
+
+            // Intel Arc and Iris Xe use XeSS, with XMX acceleration where the GPU has it.
+            return pc.GpuVendor == "Intel" && pc.SupportsXess ? 3 : 0;
+        }
+
         public string GetBestSettingsSummary(HardwareInfo info)
         {
             var parts = new System.Collections.Generic.List<string>();
