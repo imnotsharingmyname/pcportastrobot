@@ -163,6 +163,14 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("skipIntro")]
         public bool SkipIntro { get; set; } = false;
 
+        // Restore #242: null selects the vendor-specific default, while an explicit override
+        // survives adapter changes. The asynchronous dependency path can freeze RTX 50 with HAGS.
+        [JsonPropertyName("asyncVulkanStaging")]
+        public bool? AsyncVulkanStaging { get; set; }
+
+        public bool EffectiveAsyncVulkanStaging(string? gpuVendor) =>
+            AsyncVulkanStaging ?? string.Equals(gpuVendor, "AMD", StringComparison.OrdinalIgnoreCase);
+
         // Set by the setup wizard: the main window picks the best settings for this PC once.
         [JsonPropertyName("applyBestOnStart")]
         public bool ApplyBestOnStart { get; set; } = false;

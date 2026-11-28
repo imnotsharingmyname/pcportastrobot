@@ -58,7 +58,7 @@ namespace AstroHybrid.App.Services
             // Build environment variables from settings
             var launchSettings = new SettingsManager(_rootDirectory).Load();
             var selectedGpuName = hardware?.SelectedGpu?.Name;
-            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName));
+            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName, hardware?.SelectedGpu?.Vendor));
 
             if (await Task.Run(() => ShaderPrep.Needed(runHybridPath, envVars)))
             {
@@ -230,7 +230,7 @@ namespace AstroHybrid.App.Services
 
             var launchSettings = new SettingsManager(_rootDirectory).Load();
             var selectedGpuName = hardware?.SelectedGpu?.Name;
-            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName));
+            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName, hardware?.SelectedGpu?.Vendor));
             // DLSS-specific overrides
             envVars["ASTROHYBRID_DLSS"] = "1";
             envVars["ASTROHYBRID_CUDA_HOLE"] = "1";
@@ -285,7 +285,7 @@ namespace AstroHybrid.App.Services
 
             var launchSettings = new SettingsManager(_rootDirectory).Load();
             var selectedGpuName = hardware?.SelectedGpu?.Name;
-            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName));
+            var envVars = await Task.Run(() => BuildEnvironmentVariables(launchSettings, selectedGpuName, hardware?.SelectedGpu?.Vendor));
             // Frame Gen specific overrides
             envVars["ASTROHYBRID_DLSSG"] = "1";
             envVars["ASTROHYBRID_CUDA_HOLE"] = "1";
@@ -319,7 +319,7 @@ namespace AstroHybrid.App.Services
             return await tcs.Task;
         }
 
-        private Dictionary<string, string> BuildEnvironmentVariables(AppSettings settings, string? selectedGpuName)
+        private Dictionary<string, string> BuildEnvironmentVariables(AppSettings settings, string? selectedGpuName, string? selectedGpuVendor)
         {
             var env = new Dictionary<string, string>();
 
@@ -545,6 +545,7 @@ namespace AstroHybrid.App.Services
             }
             if (!settings.TriggerState) env["APS5_PAD_TRIGGER_STATE"] = "0";
             if (settings.SkipIntro) env["ASTROHYBRID_SKIP_INTRO"] = "1";
+            env["KYTY_SUBMIT_WAIT_BEFORE_SIGNAL"] = settings.EffectiveAsyncVulkanStaging(selectedGpuVendor) ? "1" : "0";
 
             // Cloth/blanket/bubble stability (#30, #35): the commit epoch fast path only for read-only
             // bindings (writable ones stay on the full check), plus the buffer range fixes.
