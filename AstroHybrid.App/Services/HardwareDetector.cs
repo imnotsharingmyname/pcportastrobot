@@ -294,14 +294,21 @@ namespace AstroHybrid.App.Services
             }
         }
 
+        internal static int NvidiaRtxSeries(string name)
+        {
+            const RegexOptions options = RegexOptions.IgnoreCase;
+            if (Regex.IsMatch(name, @"\bRTX\s+PRO\b|\bRTX\b.*\bBlackwell\b", options)) return 50;
+            if (Regex.IsMatch(name, @"\bRTX\b.*\bAda\b", options)) return 40;
+            if (Regex.IsMatch(name, @"\bRTX\s+A[1-6]\d{3}\b", options)) return 30;
+            if (Regex.IsMatch(name, @"\bQuadro\s+RTX\s+\d{4}\b", options)) return 20;
+            var match = Regex.Match(name, @"\bRTX\s*(20|30|40|50)\d{2}\b", options);
+            return match.Success ? int.Parse(match.Groups[1].Value) : 0;
+        }
+
         private static void ApplyFeatureSupport(GpuAdapter gpu)
         {
-            // NVIDIA RTX 20 series and newer: DLSS and Reflex
-            var match = Regex.Match(gpu.Name, @"RTX\s*(\d{1,2})\d{2}", RegexOptions.IgnoreCase);
-            if (match.Success && int.TryParse(match.Groups[1].Value, out var series))
-            {
-                gpu.RtxSeries = series;
-            }
+            // Workstation RTX model numbers do not encode their architecture.
+            gpu.RtxSeries = NvidiaRtxSeries(gpu.Name);
 
             if (gpu.RtxSeries >= 20)
             {
