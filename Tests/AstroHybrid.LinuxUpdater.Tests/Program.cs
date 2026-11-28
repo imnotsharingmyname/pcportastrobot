@@ -6,6 +6,10 @@ using AstroHybrid.App.Avalonia.Services;
 if (!OperatingSystem.IsLinux())
     throw new PlatformNotSupportedException("Run this regression on Linux.");
 
+if (UpdateService.LauncherVersion != "1.2.32" || UpdateService.IsNewer("1.2.32", UpdateService.LauncherVersion) ||
+    UpdateService.IsNewer("1.2.31", UpdateService.LauncherVersion) || !UpdateService.IsNewer("1.2.33", UpdateService.LauncherVersion))
+    throw new Exception("Updater did not use the compiled package version");
+
 var dir = Directory.CreateTempSubdirectory("astrohybrid-updater-test-").FullName;
 try
 {

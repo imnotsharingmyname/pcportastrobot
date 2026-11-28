@@ -33,7 +33,7 @@ public sealed class UpdateService
     private const long MaxAssetBytes = 2L * 1024 * 1024 * 1024;
 
     /// <summary>Version compiled into this launcher; compared with the release tag.</summary>
-    public const string LauncherVersion = "1.1.0";
+    public static string LauncherVersion => typeof(UpdateService).Assembly.GetName().Version!.ToString(3);
 
     private static readonly HttpClient Http = CreateClient();
 
@@ -132,7 +132,7 @@ public sealed class UpdateService
         return null;
     }
 
-    private static bool IsNewer(string candidate, string current)
+    internal static bool IsNewer(string candidate, string current)
     {
         static int[] Parts(string value) => value
             .Split('-', '+')[0]
