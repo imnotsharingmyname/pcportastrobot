@@ -1,0 +1,91 @@
+From: AstroHybrid contributors <noreply@localhost>
+Subject: [PATCH] Respect driver heap budgets before growing image allocations
+
+Adapt the budget-first allocation policy used by the existing buffer allocator and upstream Kyty commit 6ff6e7551d. Preserve the unrestricted last-resort allocation paths and existing image formats and mip levels.
+
+diff --git a/src/graphics/host_gpu/vma.cpp b/src/graphics/host_gpu/vma.cpp
+--- a/src/graphics/host_gpu/vma.cpp
++++ b/src/graphics/host_gpu/vma.cpp
+@@ -560,8 +560,12 @@
+ 	requirements.size           = bytes;
+ 	requirements.alignment      = state.block_size;
+ 	requirements.memoryTypeBits = state.memory_type_bits;
+-	VmaAllocationCreateInfo create {};
+-	if (InVramImageCooldown(bytes)) {
++	VmaAllocationCreateInfo create {};
++	// Like device buffers, try reported heap budgets before allowing OS paging.
++	if (CanReportMemoryUsage() && ImageSystemMemoryFallbackEnabled()) {
++		create.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
++	}
++	if (InVramImageCooldown(bytes)) {
+ 		create.requiredFlags  = 0;
+ 		create.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+ 	} else {
+@@ -588,11 +592,20 @@
+ 			}
+ 		}
+ 		if (result != vk::Result::eSuccess && ImageSystemMemoryFallbackEnabled()) {
+-			RecordVramImageCooldown(bytes);
+-			create.requiredFlags  = 0;
+-			create.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+-			result                = allocate();
+-		}
++			RecordVramImageCooldown(bytes);
++			create.requiredFlags  = 0;
++			create.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++			result                = allocate();
++			if ((result == vk::Result::eErrorOutOfDeviceMemory ||
++			     result == vk::Result::eErrorOutOfHostMemory ||
++			     result == vk::Result::eErrorFragmentation ||
++			     result == vk::Result::eErrorFragmentedPool) && create.flags != 0) {
++				// No permitted heap has budget left: retain the old best-effort allocation
++				// rather than leaving a requested mip level unbound merely due to a budget estimate.
++				create.flags = 0;
++				result = allocate();
++			}
++		}
+ 		static std::atomic<uint32_t> reported {0};
+ 		if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+ 			std::fprintf(stderr,
+@@ -923,8 +936,13 @@
+ 	}
+ 	const bool pool_hit = image.image != nullptr;
+ 	if (image.image == nullptr) {
+-		VmaAllocationCreateInfo alloc_info {};
+-		alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++		VmaAllocationCreateInfo alloc_info {};
++		alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++		// Avoid growing an already over-budget VRAM heap before cache relief has a chance.
++		// VMA can still reuse existing suballocations without growing a heap.
++		if (CanReportMemoryUsage() && ImageSystemMemoryFallbackEnabled()) {
++			alloc_info.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
++		}
+ 		auto allocate = [&] {
+ 			if (alloc_info.requiredFlags != 0 && DebugFailImageAllocation()) {
+ 				return vk::Result::eErrorOutOfDeviceMemory;
+@@ -980,10 +998,21 @@
+ 			if (memory_failure(result)) {
+ 				// Second fallback (#114): drop the device-local preference completely so VMA
+ 				// allocates directly in host-visible system memory instead of failing OOM.
+-				alloc_info.preferredFlags = 0;
+-				result                    = allocate();
+-			}
+-			static std::atomic<uint32_t> reported {0};
++				alloc_info.preferredFlags = 0;
++				result                    = allocate();
++			}
++			if (memory_failure(result) && alloc_info.flags != 0) {
++				// Budget estimates are not hard allocation limits. Keep the pre-existing
++				// unrestricted recovery as a last resort, including on unified-memory GPUs.
++				alloc_info.flags = 0;
++				alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++				result = allocate();
++				if (memory_failure(result)) {
++					alloc_info.preferredFlags = 0;
++					result = allocate();
++				}
++			}
++			static std::atomic<uint32_t> reported {0};
+ 			if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+ 				std::fprintf(stderr, "Vulkan: video memory full, %s: %ux%ux%u format=%d layers=%u levels=%u "
+ 				     "(KYTY_IMAGE_SYSMEM_FALLBACK)\n",
