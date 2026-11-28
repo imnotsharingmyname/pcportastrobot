@@ -124,7 +124,60 @@ namespace AstroHybrid.App.ViewModels
         public InstallationState? InstallationState
         {
             get => _installationState;
-            set => SetProperty(ref _installationState, value);
+            set
+            {
+                if (SetProperty(ref _installationState, value))
+                    _ = RefreshHeroImageAsync();
+            }
+        }
+
+        private System.Windows.Media.ImageSource? _heroImage;
+        private bool _heroLoaded;
+
+        /// <summary>Key art from the player's own dump (sce_sys/pic0.png), shown behind the launcher. Null when none is found.</summary>
+        public System.Windows.Media.ImageSource? HeroImage
+        {
+            get => _heroImage;
+            private set => SetProperty(ref _heroImage, value);
+        }
+
+        private async Task RefreshHeroImageAsync()
+        {
+            if (_heroLoaded) return;
+            var roots = new[]
+            {
+                _settings?.GameDumpPath,
+                _installationState?.GameDumpPath,
+                _installationState?.InstallPath == null ? null : Path.Combine(_installationState.InstallPath, "app0"),
+                Path.Combine(_rootDirectory, "Build", "RunHybrid", "app0"),
+            };
+            var image = await Task.Run(() =>
+            {
+                foreach (var root in roots)
+                {
+                    if (string.IsNullOrEmpty(root)) continue;
+                    foreach (var name in new[] { "pic0.png", "pic1.png", "pic2.png" })
+                    {
+                        try
+                        {
+                            var file = Path.Combine(root, "sce_sys", name);
+                            if (!File.Exists(file)) continue;
+                            // Decode once at window size: a 4K PNG then costs ~6 MB instead of ~33 MB.
+                            var bmp = new System.Windows.Media.Imaging.BitmapImage();
+                            bmp.BeginInit();
+                            bmp.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                            bmp.DecodePixelWidth = 1600;
+                            bmp.UriSource = new Uri(file, UriKind.Absolute);
+                            bmp.EndInit();
+                            bmp.Freeze();
+                            return (System.Windows.Media.ImageSource)bmp;
+                        }
+                        catch { }
+                    }
+                }
+                return null;
+            });
+            if (image != null) { _heroLoaded = true; HeroImage = image; }
         }
 
         public HardwareInfo? HardwareInfo
@@ -329,6 +382,9 @@ namespace AstroHybrid.App.ViewModels
 
             IsLaunching = true;
             StatusMessage = "Launching Astro Bot...";
+            // Free the decoded key art while the game runs; it reloads when the game exits.
+            HeroImage = null;
+            _heroLoaded = false;
 
             try
             {
@@ -365,6 +421,7 @@ namespace AstroHybrid.App.ViewModels
             finally
             {
                 IsLaunching = false;
+                _ = RefreshHeroImageAsync();
             }
         }
 

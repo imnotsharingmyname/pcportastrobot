@@ -3,517 +3,78 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-             xmlns:local="clr-namespace:AstroHybrid.App.Views"
-             xmlns:app="clr-namespace:AstroHybrid.App"
-             xmlns:vm="clr-namespace:AstroHybrid.App.ViewModels"
-             xmlns:models="clr-namespace:AstroHybrid.App.Models"
              mc:Ignorable="d"
              d:DesignHeight="600" d:DesignWidth="920">
 
     <UserControl.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
-        <app:UpdateStateToVisibilityConverter x:Key="UpdateStateToVisibilityConverter"/>
-        <local:InverseBooleanToVisibilityConverter x:Key="InverseBooleanToVisibilityConverter"/>
+        <Style x:Key="ChipLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="9.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}"/>
+        </Style>
+        <Style x:Key="ChipValue" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Margin" Value="0,1,0,0"/>
+        </Style>
     </UserControl.Resources>
 
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Margin="0,4,4,16">
+    <!-- Home is deliberately minimal: the key art, the title and a few facts. Everything else lives on its own page. -->
+    <Grid>
+        <StackPanel VerticalAlignment="Bottom" HorizontalAlignment="Left" MaxWidth="560" Margin="0,0,0,8">
+            <TextBlock Text="ASTRO BOT" Style="{StaticResource HeroTitleStyle}" FontSize="64">
+                <TextBlock.Effect>
+                    <DropShadowEffect Color="Black" BlurRadius="24" ShadowDepth="0" Opacity="0.6"/>
+                </TextBlock.Effect>
+            </TextBlock>
+            <TextBlock Text="Native PC build" Style="{StaticResource HeroSubtitleStyle}" Margin="2,2,0,0"/>
 
-            <!-- Help the project banner: contributors with AI models can send performance pull requests -->
-            <Border CornerRadius="14" BorderThickness="1" Padding="18,14" Margin="0,0,0,14">
-                <Border.BorderBrush>
-                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                        <GradientStop Color="#FF38BDF8" Offset="0"/>
-                        <GradientStop Color="#FFA78BFA" Offset="0.5"/>
-                        <GradientStop Color="#FFFF8FB1" Offset="1"/>
-                    </LinearGradientBrush>
-                </Border.BorderBrush>
-                <Border.Background>
-                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                        <GradientStop Color="#FF0B1D3F" Offset="0"/>
-                        <GradientStop Color="#FF1A1540" Offset="0.6"/>
-                        <GradientStop Color="#FF2A1430" Offset="1"/>
-                    </LinearGradientBrush>
-                </Border.Background>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-
-                    <!-- 60 FPS badge -->
-                    <Border Grid.Column="0" Width="58" Height="58" CornerRadius="29" VerticalAlignment="Center" Margin="0,0,16,0">
-                        <Border.Background>
-                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                <GradientStop Color="#FF38BDF8" Offset="0"/>
-                                <GradientStop Color="#FFA78BFA" Offset="1"/>
-                            </LinearGradientBrush>
-                        </Border.Background>
-                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                            <TextBlock Text="60" FontSize="20" FontWeight="ExtraBold" Foreground="White" HorizontalAlignment="Center"/>
-                            <TextBlock Text="FPS" FontSize="9.5" FontWeight="Bold" Foreground="#FFE0F2FE" HorizontalAlignment="Center" Margin="0,-3,0,0"/>
-                        </StackPanel>
-                    </Border>
-
-                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Text="Help the project with your AI model" FontSize="16" FontWeight="ExtraBold" Foreground="White"/>
-                        <TextBlock FontSize="12.5" Foreground="#FFCBD5F5" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18">
-                            AstroHybrid is open source. If you use an AI coding model (or know C++ and Vulkan), point it at
-                            the project, find a performance gain, measure it, and send a pull request on GitHub.
-                            Every proven improvement brings Astro Bot closer to 60 FPS on every PC.
-                        </TextBlock>
-                    </StackPanel>
-
-                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="16,0,0,0">
-                        <Button Content="Send a pull request"
-                                Command="{Binding DataContext.OpenContributeCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                Style="{StaticResource PrimaryButtonStyle}" MinWidth="170" Height="38"
-                                ToolTip="Opens github.com/imnotsharingmyname/pcportastrobot"/>
-                        <Button Content="Fund me on Ko-fi"
-                                Command="{Binding DataContext.OpenSupportCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                Style="{StaticResource SecondaryButtonStyle}" MinWidth="170" Height="34" Margin="0,8,0,0"
-                                ToolTip="Opens ko-fi.com/justhappyguy"/>
-                    </StackPanel>
-                </Grid>
-            </Border>
-
-            <!-- Cinematic Space Hero Banner -->
-            <Border Style="{StaticResource HeroCardStyle}" Margin="0,0,0,14">
-                <Grid>
-                    <!-- Native WPF Space & Ringed Planet Artwork Layer (Right) -->
-                    <Grid IsHitTestVisible="False" HorizontalAlignment="Right" Width="560">
-                        <Canvas ClipToBounds="True">
-                            <!-- Nebula Glow -->
-                            <Ellipse Width="520" Height="380" Canvas.Left="90" Canvas.Top="-80">
-                                <Ellipse.Fill>
-                                    <RadialGradientBrush>
-                                        <GradientStop Color="#6622D3EE" Offset="0"/>
-                                        <GradientStop Color="#441D4ED8" Offset="0.45"/>
-                                        <GradientStop Color="#0007132E" Offset="1"/>
-                                    </RadialGradientBrush>
-                                </Ellipse.Fill>
-                            </Ellipse>
-
-                            <!-- Starfield -->
-                            <Ellipse Width="2.5" Height="2.5" Fill="#CCF0F9FF" Canvas.Left="110" Canvas.Top="28"/>
-                            <Ellipse Width="2" Height="2" Fill="#AA7DD3FC" Canvas.Left="165" Canvas.Top="64"/>
-                            <Ellipse Width="3" Height="3" Fill="#EEFFFFFF" Canvas.Left="240" Canvas.Top="22"/>
-                            <Ellipse Width="2" Height="2" Fill="#99BAE6FD" Canvas.Left="330" Canvas.Top="36"/>
-                            <Ellipse Width="2.5" Height="2.5" Fill="#DDE0F2FE" Canvas.Left="418" Canvas.Top="18"/>
-                            <Ellipse Width="2" Height="2" Fill="#AA7DD3FC" Canvas.Left="490" Canvas.Top="48"/>
-                            <Ellipse Width="2" Height="2" Fill="#AA38BDF8" Canvas.Left="525" Canvas.Top="110"/>
-                            <Ellipse Width="2" Height="2" Fill="#CCF0F9FF" Canvas.Left="280" Canvas.Top="130"/>
-                            <Ellipse Width="2.5" Height="2.5" Fill="#99BAE6FD" Canvas.Left="150" Canvas.Top="178"/>
-
-                            <!-- Distant Secondary Moon -->
-                            <Ellipse Width="44" Height="44" Canvas.Left="190" Canvas.Top="36" Opacity="0.88">
-                                <Ellipse.Fill>
-                                    <RadialGradientBrush GradientOrigin="0.72,0.28">
-                                        <GradientStop Color="#FF7DD3FC" Offset="0"/>
-                                        <GradientStop Color="#FF1E40AF" Offset="0.55"/>
-                                        <GradientStop Color="#FF081432" Offset="1"/>
-                                    </RadialGradientBrush>
-                                </Ellipse.Fill>
-                            </Ellipse>
-
-                            <!-- Main Glowing Planetary Horizon -->
-                            <Ellipse Width="330" Height="330" Canvas.Left="210" Canvas.Top="68">
-                                <Ellipse.Fill>
-                                    <RadialGradientBrush GradientOrigin="0.62,0.18">
-                                        <GradientStop Color="#FF7DE0FF" Offset="0"/>
-                                        <GradientStop Color="#FF2563EB" Offset="0.45"/>
-                                        <GradientStop Color="#FF0F265C" Offset="0.82"/>
-                                        <GradientStop Color="#FF07132E" Offset="1"/>
-                                    </RadialGradientBrush>
-                                </Ellipse.Fill>
-                            </Ellipse>
-
-                            <!-- Planetary Atmospheric Rim Light -->
-                            <Ellipse Width="332" Height="332" Canvas.Left="209" Canvas.Top="67" StrokeThickness="2" Fill="Transparent">
-                                <Ellipse.Stroke>
-                                    <LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1">
-                                        <GradientStop Color="#EEBAE6FD" Offset="0"/>
-                                        <GradientStop Color="#5538BDF8" Offset="0.4"/>
-                                        <GradientStop Color="#0007132E" Offset="1"/>
-                                    </LinearGradientBrush>
-                                </Ellipse.Stroke>
-                            </Ellipse>
-
-                            <!-- Tilted Orbital Rings -->
-                            <Ellipse Width="460" Height="118" Canvas.Left="140" Canvas.Top="112"
-                                     Stroke="#AA38BDF8" StrokeThickness="3" Fill="Transparent" RenderTransformOrigin="0.5,0.5">
-                                <Ellipse.RenderTransform>
-                                    <RotateTransform Angle="-16"/>
-                                </Ellipse.RenderTransform>
-                            </Ellipse>
-                            <Ellipse Width="492" Height="134" Canvas.Left="124" Canvas.Top="104"
-                                     Stroke="#557DD3FC" StrokeThickness="1.3" Fill="Transparent" RenderTransformOrigin="0.5,0.5">
-                                <Ellipse.RenderTransform>
-                                    <RotateTransform Angle="-16"/>
-                                </Ellipse.RenderTransform>
-                            </Ellipse>
-
-                            <!-- Asteroid Silhouettes -->
-                            <Polygon Points="228,158 242,150 254,160 247,172 232,171" Fill="#FF1E3A6E" Stroke="#FF60A5FA" StrokeThickness="0.8"/>
-                            <Polygon Points="432,46 446,38 456,49 448,59 434,56" Fill="#FF172F5E" Stroke="#FF38BDF8" StrokeThickness="0.8"/>
-                            <Polygon Points="478,94 489,89 496,97 489,105 479,102" Fill="#FF10254D" Stroke="#667DD3FC" StrokeThickness="0.7"/>
-
-                            <!-- Horizon Lens Flare -->
-                            <Ellipse Width="96" Height="96" Canvas.Left="348" Canvas.Top="24">
-                                <Ellipse.Fill>
-                                    <RadialGradientBrush>
-                                        <GradientStop Color="#FFFFFFFF" Offset="0"/>
-                                        <GradientStop Color="#AA67E8F9" Offset="0.28"/>
-                                        <GradientStop Color="#0038BDF8" Offset="1"/>
-                                    </RadialGradientBrush>
-                                </Ellipse.Fill>
-                            </Ellipse>
-                            <Rectangle Width="180" Height="2" Canvas.Left="306" Canvas.Top="71">
-                                <Rectangle.Fill>
-                                    <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
-                                        <GradientStop Color="#0038BDF8" Offset="0"/>
-                                        <GradientStop Color="#EEFFFFFF" Offset="0.5"/>
-                                        <GradientStop Color="#0038BDF8" Offset="1"/>
-                                    </LinearGradientBrush>
-                                </Rectangle.Fill>
-                            </Rectangle>
-                        </Canvas>
-                    </Grid>
-
-                    <!-- Left Readability Scrim -->
-                    <Border IsHitTestVisible="False">
-                        <Border.Background>
-                            <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
-                                <GradientStop Color="#FA07122B" Offset="0"/>
-                                <GradientStop Color="#EB09183B" Offset="0.46"/>
-                                <GradientStop Color="#33081432" Offset="0.78"/>
-                                <GradientStop Color="#0007122B" Offset="1"/>
-                            </LinearGradientBrush>
-                        </Border.Background>
-                    </Border>
-
-                    <!-- Hero Text & Status Pills -->
-                    <StackPanel VerticalAlignment="Center" Margin="28,22,28,22" MaxWidth="540" HorizontalAlignment="Left">
-                        <TextBlock Text="THE NATIVE PC EXPERIENCE" FontSize="10.5" FontWeight="SemiBold"
-                                   Foreground="#FF7DD3FC" Margin="0,0,0,4"/>
-                        <TextBlock Text="ASTRO BOT" Style="{StaticResource HeroTitleStyle}"/>
-                        <TextBlock Text="A universe of adventure. Rebuilt for PC." Style="{StaticResource HeroSubtitleStyle}" Margin="0,4,0,0"/>
-                        <TextBlock Text="Explore, jump and discover in this award-winning adventure, now on Windows."
-                                   FontSize="12" Foreground="#FF9DB4D8" TextWrapping="Wrap" Margin="0,6,0,0"/>
-
-                        <WrapPanel Orientation="Horizontal" Margin="0,18,0,0">
-                            <Border Style="{StaticResource VersionBadgeStyle}" Margin="0,0,10,6">
-                                <StackPanel Orientation="Horizontal">
-                                    <Border Width="26" Height="26" CornerRadius="8" Background="#2238BDF8" Margin="0,0,10,0" VerticalAlignment="Center">
-                                        <Path Data="M6,9 L18,9 C20,9 21.5,11 21,14 L20.4,17 C20,18.2 19,18.5 18,17.8 L15.5,16 L8.5,16 L6,17.8 C5,18.5 4,18.2 3.6,17 L3,14 C2.5,11 4,9 6,9 Z"
-                                              Stroke="#FF38BDF8" StrokeThickness="1.5" Fill="Transparent"
-                                              Width="14" Height="12" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                    </Border>
-                                    <StackPanel VerticalAlignment="Center">
-                                        <TextBlock Text="GAME VERSION" Style="{StaticResource VersionBadgeLabelStyle}"/>
-                                        <TextBlock Text="{Binding GameVersion}" Style="{StaticResource VersionBadgeValueStyle}"/>
-                                    </StackPanel>
-                                </StackPanel>
-                            </Border>
-
-                            <Border Style="{StaticResource VersionBadgeStyle}" Margin="0,0,10,6">
-                                <StackPanel Orientation="Horizontal">
-                                    <Ellipse Width="22" Height="22" Fill="#2234D399" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                    <Path Data="M6,12 L10.2,16 L18,8" Stroke="#FF34D399" StrokeThickness="2"
-                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
-                                          Width="12" Height="10" Stretch="Uniform" VerticalAlignment="Center" Margin="-27,0,10,0"/>
-                                    <StackPanel VerticalAlignment="Center">
-                                        <TextBlock Text="INSTALLATION" Style="{StaticResource VersionBadgeLabelStyle}"/>
-                                        <TextBlock Text="{Binding GameStatus}" Style="{StaticResource VersionBadgeValueStyle}"
-                                                   Foreground="{Binding GameStatus, Converter={StaticResource StatusToBrushConverter}}"/>
-                                    </StackPanel>
-                                </StackPanel>
-                            </Border>
-
-                            <Border Style="{StaticResource VersionBadgeStyle}" Margin="0,0,0,6"
-                                    Visibility="{Binding UpdateState.UpdateAvailable, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                    BorderBrush="{StaticResource PrimaryLightBrush}">
-                                <StackPanel Orientation="Horizontal">
-                                    <Path Data="M12,4 L12,15 M7.5,10.5 L12,15 L16.5,10.5 M5,19 L19,19"
-                                          Stroke="#FF38BDF8" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
-                                          Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                    <StackPanel VerticalAlignment="Center">
-                                        <TextBlock Text="UPDATE AVAILABLE" Style="{StaticResource VersionBadgeLabelStyle}" Foreground="#FF7DD3FC"/>
-                                        <TextBlock Text="{Binding UpdateState.LatestUpdate.Version}" Style="{StaticResource VersionBadgeValueStyle}" Foreground="#FF38BDF8"/>
-                                    </StackPanel>
-                                </StackPanel>
-                            </Border>
-                        </WrapPanel>
-                    </StackPanel>
-                </Grid>
-            </Border>
-
-            <!-- 4-Column Hardware & Build Cards -->
-            <Grid Margin="0,0,0,14">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="10"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="10"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="10"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-
-                <!-- Build Version -->
-                <Border Grid.Column="0" Style="{StaticResource StatCardStyle}">
-                    <Grid>
-                        <Path Data="M 0,34 Q 25,18 48,26 T 96,12 L 96,42 L 0,42 Z"
-                              Stroke="#3338BDF8" StrokeThickness="1.2" Fill="#0D38BDF8"
-                              HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-14,-13" IsHitTestVisible="False"/>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" Width="34" Height="34" CornerRadius="9" Background="#FF0D2047" BorderBrush="#FF264E91" BorderThickness="1" VerticalAlignment="Center" Margin="0,0,11,0">
-                                <Path Data="M12,3 L20,7.5 L20,16.5 L12,21 L4,16.5 L4,7.5 Z M4,7.5 L12,12 L20,7.5 M12,12 L12,21"
-                                      Stroke="#FF38BDF8" StrokeThickness="1.5" Fill="Transparent"
-                                      Width="16" Height="16" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Border>
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                <TextBlock Text="BUILD VERSION" Style="{StaticResource StatLabelStyle}"/>
-                                <TextBlock Text="{Binding GameVersion}" Style="{StaticResource StatValueStyle}" TextTrimming="CharacterEllipsis"/>
-                                <TextBlock Text="{Binding GameTitleId}" Style="{StaticResource StatDetailStyle}"/>
-                            </StackPanel>
-                        </Grid>
-                    </Grid>
-                </Border>
-
-                <!-- Processor -->
-                <Border Grid.Column="2" Style="{StaticResource StatCardStyle}">
-                    <Grid>
-                        <Path Data="M 0,32 Q 24,28 48,14 T 96,24 L 96,42 L 0,42 Z"
-                              Stroke="#336366F1" StrokeThickness="1.2" Fill="#0D6366F1"
-                              HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-14,-13" IsHitTestVisible="False"/>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" Width="34" Height="34" CornerRadius="9" Background="#FF0D2047" BorderBrush="#FF264E91" BorderThickness="1" VerticalAlignment="Center" Margin="0,0,11,0">
-                                <Path Data="M7,7 L17,7 L17,17 L7,17 Z M10,4 L10,7 M14,4 L14,7 M10,17 L10,20 M14,17 L14,20 M4,10 L7,10 M4,14 L7,14 M17,10 L20,10 M17,14 L20,14"
-                                      Stroke="#FF60A5FA" StrokeThickness="1.5" Fill="Transparent"
-                                      Width="16" Height="16" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Border>
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                <TextBlock Text="PROCESSOR" Style="{StaticResource StatLabelStyle}"/>
-                                <TextBlock Text="{Binding CpuInfo}" Style="{StaticResource StatValueStyle}" FontSize="13" MaxHeight="38" TextTrimming="CharacterEllipsis" ToolTip="{Binding CpuInfo}"/>
-                            </StackPanel>
-                        </Grid>
-                    </Grid>
-                </Border>
-
-                <!-- Graphics -->
-                <Border Grid.Column="4" Style="{StaticResource StatCardStyle}">
-                    <Grid>
-                        <Path Data="M 0,34 Q 20,30 44,12 T 96,26 L 96,42 L 0,42 Z"
-                              Stroke="#3334D399" StrokeThickness="1.2" Fill="#0D34D399"
-                              HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-14,-13" IsHitTestVisible="False"/>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" Width="34" Height="34" CornerRadius="9" Background="#FF0D2047" BorderBrush="#FF264E91" BorderThickness="1" VerticalAlignment="Center" Margin="0,0,11,0">
-                                <Path Data="M4,7 L20,7 L20,16 L4,16 Z M9,11.5 A2.5,2.5 0 1,1 9,11.51 M16,10 L16,13"
-                                      Stroke="#FF38BDF8" StrokeThickness="1.5" Fill="Transparent"
-                                      Width="16" Height="15" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Border>
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                <TextBlock Text="GRAPHICS" Style="{StaticResource StatLabelStyle}"/>
-                                <TextBlock Text="{Binding GpuInfo}" Style="{StaticResource StatValueStyle}" FontSize="13" MaxHeight="38" TextTrimming="CharacterEllipsis" ToolTip="{Binding GpuInfo}"/>
-                            </StackPanel>
-                        </Grid>
-                    </Grid>
-                </Border>
-
-                <!-- Memory / Display -->
-                <Border Grid.Column="6" Style="{StaticResource StatCardStyle}">
-                    <Grid>
-                        <Path Data="M 0,34 Q 28,26 52,18 T 96,10 L 96,42 L 0,42 Z"
-                              Stroke="#33A855F7" StrokeThickness="1.2" Fill="#0DA855F7"
-                              HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-14,-13" IsHitTestVisible="False"/>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" Width="34" Height="34" CornerRadius="9" Background="#FF0D2047" BorderBrush="#FF264E91" BorderThickness="1" VerticalAlignment="Center" Margin="0,0,11,0">
-                                <Path Data="M3,5 L21,5 L21,16 L3,16 Z M9,19 L15,19 M12,16 L12,19"
-                                      Stroke="#FF818CF8" StrokeThickness="1.5" Fill="Transparent"
-                                      Width="16" Height="15" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Border>
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                <TextBlock Text="MEMORY / DISPLAY" Style="{StaticResource StatLabelStyle}"/>
-                                <TextBlock Text="{Binding CompactMemoryDisplayInfo}" Style="{StaticResource StatValueStyle}" FontSize="12.5" MaxHeight="38" TextTrimming="CharacterEllipsis" ToolTip="{Binding CompactMemoryDisplayInfo}"/>
-                            </StackPanel>
-                        </Grid>
-                    </Grid>
-                </Border>
-            </Grid>
-
-            <!-- Split Row: Current Profile + Shortcuts -->
-            <Grid Margin="0,0,0,14">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="1.55*"/>
-                    <ColumnDefinition Width="12"/>
-                    <ColumnDefinition Width="1*"/>
-                </Grid.ColumnDefinitions>
-
-                <!-- Current Profile Card -->
-                <Border Grid.Column="0" Style="{StaticResource ConfigCardStyle}" Padding="18,16">
-                    <Grid>
-                        <Path Data="M -10,95 Q 110,40 240,80 T 520,30 L 520,120 L -10,120 Z"
-                              Fill="#0A38BDF8" IsHitTestVisible="False" VerticalAlignment="Bottom"/>
-                        <Grid>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="Auto"/>
-                            </Grid.RowDefinitions>
-
-                            <!-- Header -->
-                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
-                                <Border Width="28" Height="28" CornerRadius="8" Background="#FF0E234D" BorderBrush="#FF295194" BorderThickness="1" Margin="0,0,10,0">
-                                    <Path Data="M12,3 A9,9 0 1,0 12,21 C13.5,21 14,19.8 14,18.5 C14,17.3 15,16.5 16.5,16.5 L18.5,16.5 A2.5,2.5 0 0,0 21,14 A9,9 0 0,0 12,3 Z"
-                                          Stroke="#FF7DD3FC" StrokeThickness="1.5" Fill="Transparent"
-                                          Width="14" Height="14" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Border>
-                                <StackPanel VerticalAlignment="Center">
-                                    <TextBlock Text="CURRENT PROFILE" FontSize="12.5" FontWeight="Bold" Foreground="White"/>
-                                    <TextBlock Text="Your graphics setup" FontSize="11.5" Foreground="{StaticResource TextMutedBrush}"/>
-                                </StackPanel>
-                            </StackPanel>
-
-                            <!-- Bound Profile Feature Chips -->
-                            <WrapPanel Grid.Row="1" Orientation="Horizontal" VerticalAlignment="Center"
-                                       ToolTip="{Binding CurrentGraphicsConfig}">
-                                <Border Style="{StaticResource ProfileChipStyle}">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M3,5 L21,5 L21,16 L3,16 Z" Stroke="#FF7DD3FC" StrokeThickness="1.5" Fill="Transparent"
-                                              Width="13" Height="11" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
-                                        <TextBlock Text="{Binding ProfileResolution}" FontSize="12.5" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </Border>
-
-                                <Border Style="{StaticResource ProfileChipStyle}">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M12,3 L14,9.5 L20.5,11.5 L14,13.5 L12,20 L10,13.5 L3.5,11.5 L10,9.5 Z"
-                                              Fill="#FF38BDF8" Width="12" Height="12" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
-                                        <TextBlock Text="{Binding ProfileUpscale}" FontSize="12.5" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </Border>
-
-                                <Border Style="{StaticResource ProfileChipStyle}">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M13,2 L5,14 L11,14 L10,22 L19,10 L13,10 Z"
-                                              Fill="#FF60A5FA" Width="11" Height="13" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
-                                        <TextBlock Text="{Binding ProfileFrameGen}" FontSize="12.5" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </Border>
-
-                                <Border Style="{StaticResource ProfileChipStyle}">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M12,3 L20,6.5 L20,12 C20,16.5 16.5,20 12,21.5 C7.5,20 4,16.5 4,12 L4,6.5 Z"
-                                              Stroke="#FF7DD3FC" StrokeThickness="1.6" Fill="Transparent"
-                                              Width="12" Height="13" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
-                                        <TextBlock Text="{Binding ProfileLowLatency}" FontSize="12.5" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </Border>
-
-                                <Border Style="{StaticResource ProfileChipStyle}">
-                                    <TextBlock Text="{Binding ProfileLighting}" FontSize="12.5" FontWeight="SemiBold" Foreground="#FFBAE6FD" VerticalAlignment="Center"/>
-                                </Border>
-                            </WrapPanel>
-
-                            <!-- Edit Settings Button -->
-                            <Grid Grid.Row="2" Margin="0,6,0,0">
-                                <TextBlock Text="{Binding CurrentGraphicsConfig}" FontSize="11" Foreground="{StaticResource TextMutedBrush}"
-                                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,130,0"/>
-                                <Button Command="{Binding NavigateToSettingsCommand}"
-                                        Style="{StaticResource PillButtonStyle}" HorizontalAlignment="Right"
-                                        MinHeight="32" Padding="14,6">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M4,17 L4,20 L7,20 L18,9 L15,6 Z" Stroke="#FF7DD3FC" StrokeThickness="1.5" Fill="Transparent"
-                                              Width="12" Height="12" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
-                                        <TextBlock Text="EDIT SETTINGS" FontSize="11" FontWeight="Bold" Foreground="White" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </Button>
-                            </Grid>
-                        </Grid>
-                    </Grid>
-                </Border>
-
-                <!-- Shortcuts Card -->
-                <Border Grid.Column="2" Style="{StaticResource ConfigCardStyle}" Padding="18,16">
+            <WrapPanel Margin="0,20,0,0">
+                <Border Style="{StaticResource ProfileChipStyle}" Padding="12,7">
                     <StackPanel>
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                            <Border Width="28" Height="28" CornerRadius="8" Background="#FF0E234D" BorderBrush="#FF295194" BorderThickness="1" Margin="0,0,10,0">
-                                <Path Data="M12,3 C16,6 18,11 16,16 L12,14 L8,16 C6,11 8,6 12,3 Z M12,18 L12,21"
-                                      Stroke="#FF7DD3FC" StrokeThickness="1.5" Fill="Transparent"
-                                      Width="14" Height="14" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Border>
-                            <TextBlock Text="SHORTCUTS" FontSize="12.5" FontWeight="Bold" Foreground="White" VerticalAlignment="Center"/>
-                        </StackPanel>
-
-                        <UniformGrid Columns="3">
-                            <Button Style="{StaticResource ShortcutTileStyle}" Command="{Binding NavigateToControllerCommand}" Margin="0,0,6,0">
-                                <StackPanel HorizontalAlignment="Center">
-                                    <Path Data="M6,7 L18,7 C20.5,7 22,9.2 21.5,12.5 L20.8,16.5 C20.5,18 19.2,18.5 18,17.5 L15.5,15 L8.5,15 L6,17.5 C4.8,18.5 3.5,18 3.2,16.5 L2.5,12.5 C2,9.2 3.5,7 6,7 Z"
-                                          Stroke="#FF7DD3FC" StrokeThickness="1.6" Fill="Transparent"
-                                          Width="22" Height="18" Stretch="Uniform" HorizontalAlignment="Center" Margin="0,0,0,8"/>
-                                    <TextBlock Text="Controller&#x0a;Settings" FontSize="11.5" FontWeight="SemiBold" Foreground="White" TextAlignment="Center"/>
-                                </StackPanel>
-                            </Button>
-
-                            <Button Style="{StaticResource ShortcutTileStyle}" Command="{Binding ToggleRayTracingCommand}" Margin="3,0,3,0"
-                                    ToolTip="Click to toggle Ray Tracing between OFF (Non-RT faster lighting) and ON (Ray Tracing)">
-                                <StackPanel HorizontalAlignment="Center">
-                                    <Path Data="M12,3 L14,9.5 L20.5,11.5 L14,13.5 L12,20 L10,13.5 L3.5,11.5 L10,9.5 Z"
-                                          Stroke="#FF38BDF8" StrokeThickness="1.5" Fill="#3338BDF8"
-                                          Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center" Margin="0,0,0,6"/>
-                                    <TextBlock Text="Toggle&#x0a;Ray Tracing" FontSize="11.5" FontWeight="SemiBold" Foreground="White" TextAlignment="Center"/>
-                                    <TextBlock Text="{Binding RayTracingToggleText}" FontSize="10" FontWeight="Bold" Foreground="#FF38BDF8" TextAlignment="Center" Margin="0,3,0,0"/>
-                                </StackPanel>
-                            </Button>
-
-                            <Button Style="{StaticResource ShortcutTileStyle}" Command="{Binding NavigateToInstallationCommand}" Margin="6,0,0,0">
-                                <StackPanel HorizontalAlignment="Center">
-                                    <Path Data="M12,3 L12,14 M8,10 L12,14 L16,10 M4,16 L4,19 L20,19 L20,16"
-                                          Stroke="#FF7DD3FC" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
-                                          Width="20" Height="18" Stretch="Uniform" HorizontalAlignment="Center" Margin="0,0,0,8"/>
-                                    <TextBlock Text="Installation&#x0a;Manager" FontSize="11.5" FontWeight="SemiBold" Foreground="White" TextAlignment="Center"/>
-                                </StackPanel>
-                            </Button>
-                        </UniformGrid>
+                        <TextBlock Text="VERSION" Style="{StaticResource ChipLabel}"/>
+                        <TextBlock Text="{Binding GameVersion}" Style="{StaticResource ChipValue}"/>
                     </StackPanel>
                 </Border>
-            </Grid>
-
-            <!-- What's New / Release Notes Section (shown when update available) -->
-            <Border Style="{StaticResource NewsCardStyle}"
-                    Visibility="{Binding UpdateState.UpdateAvailable, Converter={StaticResource BooleanToVisibilityConverter}}">
-                <StackPanel>
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="WHAT'S NEW IN" Style="{StaticResource SectionHeaderStyle}" Margin="0"/>
-                        <TextBlock Text="{Binding UpdateState.LatestUpdate.Version, StringFormat=' {0}'}" Style="{StaticResource SectionHeaderStyle}" Foreground="{StaticResource AccentBrush}" Margin="0"/>
+                <Border Style="{StaticResource ProfileChipStyle}" Padding="12,7">
+                    <StackPanel>
+                        <TextBlock Text="STATUS" Style="{StaticResource ChipLabel}"/>
+                        <TextBlock Text="{Binding GameStatus}" Style="{StaticResource ChipValue}"
+                                   Foreground="{Binding GameStatus, Converter={StaticResource StatusToBrushConverter}}"/>
                     </StackPanel>
-                    <TextBlock Text="{Binding UpdateState.LatestUpdate.ReleaseNotes}" Style="{StaticResource NewsTextStyle}" TextWrapping="Wrap" Margin="0,10,0,0"/>
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
-                        <Button Content="Update Now" Command="{Binding DownloadUpdateCommand}"
-                                Style="{StaticResource PrimaryButtonStyle}" MinWidth="120" MinHeight="36"
-                                FontSize="13"/>
+                </Border>
+                <Button Command="{Binding ToggleRayTracingCommand}" Margin="0,0,8,8" Cursor="Hand"
+                        ToolTip="Switch between the ray-traced and non-ray-traced build">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="B" Background="#14FFFFFF" BorderBrush="#22FFFFFF" BorderThickness="1" CornerRadius="12" Padding="12,7">
+                                <StackPanel>
+                                    <TextBlock Text="RAY TRACING" Style="{StaticResource ChipLabel}"/>
+                                    <TextBlock Text="{Binding RayTracingToggleText}" Style="{StaticResource ChipValue}" Foreground="{StaticResource AccentBrush}"/>
+                                </StackPanel>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="B" Property="BorderBrush" Value="#FF3A86FF"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+                <Border Style="{StaticResource ProfileChipStyle}" Padding="12,7" BorderBrush="#FF2F7BFF"
+                        Visibility="{Binding UpdateState.UpdateAvailable, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Text="UPDATE" Style="{StaticResource ChipLabel}" Foreground="{StaticResource AccentBrush}"/>
+                        <TextBlock Text="{Binding UpdateState.LatestUpdate.Version}" Style="{StaticResource ChipValue}"/>
                     </StackPanel>
-                </StackPanel>
-            </Border>
+                </Border>
+            </WrapPanel>
 
+            <Button Content="Contribute on GitHub" Style="{StaticResource TextButtonStyle}" HorizontalAlignment="Left" Margin="2,6,0,0"
+                    FontSize="12" Command="{Binding DataContext.OpenContributeCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                    ToolTip="Help reach 60 FPS: send a measured performance pull request"/>
         </StackPanel>
-    </ScrollViewer>
+    </Grid>
 </UserControl>

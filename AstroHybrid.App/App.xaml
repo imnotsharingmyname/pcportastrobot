@@ -7,6 +7,7 @@
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="Resources/Styles.xaml"/>
+                <ResourceDictionary Source="Resources/Theme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
             <views:EnumToBoolConverter x:Key="EnumToBoolConverter"/>
             <views:BoolToProgressConverter x:Key="BoolToProgressConverter"/>

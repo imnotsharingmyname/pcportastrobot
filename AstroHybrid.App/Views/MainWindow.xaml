@@ -5,21 +5,19 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:AstroHybrid.App.Views"
         xmlns:app="clr-namespace:AstroHybrid.App"
-        xmlns:vm="clr-namespace:AstroHybrid.App.ViewModels"
-        xmlns:models="clr-namespace:AstroHybrid.App.Models"
         mc:Ignorable="d"
-        Title="AstroHybrid" Height="760" Width="1200"
+        Title="AstroHybrid" Height="760" Width="1240"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
         AllowsTransparency="False"
         ResizeMode="CanResize"
-        MinHeight="460" MinWidth="840"
+        MinHeight="560" MinWidth="900"
         Style="{StaticResource MainWindowStyle}"
         Icon="/Resources/astrohybrid.ico"
         StateChanged="Window_StateChanged">
 
     <WindowChrome.WindowChrome>
-        <WindowChrome CaptionHeight="54"
+        <WindowChrome CaptionHeight="56"
                       ResizeBorderThickness="6"
                       CornerRadius="12"
                       GlassFrameThickness="0"
@@ -30,543 +28,384 @@
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
         <app:UpdateStateToVisibilityConverter x:Key="UpdateStateToVisibilityConverter"/>
         <local:InverseBooleanToVisibilityConverter x:Key="InverseBooleanToVisibilityConverter"/>
+
+        <!-- Icon used in the rail: stroke follows the RadioButton foreground -->
+        <Style x:Key="RailIcon" TargetType="Path">
+            <Setter Property="Stroke" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"/>
+            <Setter Property="StrokeThickness" Value="1.7"/>
+            <Setter Property="StrokeStartLineCap" Value="Round"/>
+            <Setter Property="StrokeEndLineCap" Value="Round"/>
+            <Setter Property="StrokeLineJoin" Value="Round"/>
+            <Setter Property="Fill" Value="Transparent"/>
+            <Setter Property="Width" Value="20"/>
+            <Setter Property="Height" Value="20"/>
+            <Setter Property="Stretch" Value="Uniform"/>
+        </Style>
     </Window.Resources>
 
-    <Border x:Name="RootWindowBorder" BorderBrush="#FF1B3566" BorderThickness="1" Background="{StaticResource WindowSpaceBrush}">
+    <Border x:Name="RootWindowBorder" BorderBrush="#FF161A22" BorderThickness="1" Background="{StaticResource BackgroundBrush}">
         <Grid ClipToBounds="True">
-            <!-- Subtle Atmospheric Cosmic Background Curves (Non-interactive) -->
-            <Canvas IsHitTestVisible="False" ClipToBounds="True">
-                <Ellipse Width="680" Height="680" Canvas.Left="-260" Canvas.Top="260" Opacity="0.22">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="84"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Key art from the player's dump fills the whole content area; shades keep text readable -->
+            <Grid Grid.Column="1" IsHitTestVisible="False">
+                <Image Source="{Binding HeroImage}" Stretch="UniformToFill" HorizontalAlignment="Right" VerticalAlignment="Center"
+                       RenderOptions.BitmapScalingMode="HighQuality"/>
+                <Border Background="{StaticResource HeroShadeBrush}"/>
+                <Border Background="{StaticResource HeroFloorBrush}"/>
+                <!-- Soft blue glow when no key art is available -->
+                <Ellipse Width="900" Height="900" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-420,-300,0" Opacity="0.35">
                     <Ellipse.Fill>
                         <RadialGradientBrush>
-                            <GradientStop Color="#FF1D9BF0" Offset="0"/>
-                            <GradientStop Color="#00050A18" Offset="1"/>
+                            <GradientStop Color="#661F6FFF" Offset="0"/>
+                            <GradientStop Color="#001F6FFF" Offset="1"/>
                         </RadialGradientBrush>
                     </Ellipse.Fill>
                 </Ellipse>
-                <Ellipse Width="780" Height="780" Canvas.Left="540" Canvas.Top="-240" Opacity="0.16">
-                    <Ellipse.Fill>
-                        <RadialGradientBrush>
-                            <GradientStop Color="#FF38BDF8" Offset="0"/>
-                            <GradientStop Color="#446366F1" Offset="0.45"/>
-                            <GradientStop Color="#00050A18" Offset="1"/>
-                        </RadialGradientBrush>
-                    </Ellipse.Fill>
-                </Ellipse>
-                <Path Data="M -80,690 C 160,610 420,660 1320,560" Stroke="#2238BDF8" StrokeThickness="1.4" Fill="Transparent"/>
-                <Path Data="M -40,740 C 260,630 580,710 1320,625" Stroke="#1A6366F1" StrokeThickness="1.2" Fill="Transparent"/>
-            </Canvas>
-
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="216"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-
-                <!-- Left Space Navigation Sidebar -->
-                <Border Grid.Column="0" Background="{StaticResource SidebarSpaceBrush}"
-                        BorderBrush="#FF162B54" BorderThickness="0,0,1,0">
-                    <Grid>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                            <RowDefinition Height="Auto"/>
-                        </Grid.RowDefinitions>
-
-                        <!-- AstroHybrid Orbital Brand Mark -->
-                        <StackPanel Grid.Row="0" Margin="18,22,18,18" HorizontalAlignment="Center">
-                            <Grid Width="64" Height="46" HorizontalAlignment="Center" Margin="0,0,0,6">
-                                <Ellipse Width="58" Height="20" StrokeThickness="2.2" RenderTransformOrigin="0.5,0.5">
-                                    <Ellipse.RenderTransform>
-                                        <RotateTransform Angle="-22"/>
-                                    </Ellipse.RenderTransform>
-                                    <Ellipse.Stroke>
-                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                            <GradientStop Color="#FF67E8F9" Offset="0"/>
-                                            <GradientStop Color="#FF1D4ED8" Offset="1"/>
-                                        </LinearGradientBrush>
-                                    </Ellipse.Stroke>
-                                </Ellipse>
-                                <Ellipse Width="18" Height="18" Fill="#5538BDF8"/>
-                                <Path Data="M 12,0 L 14.5,9.5 L 24,12 L 14.5,14.5 L 12,24 L 9.5,14.5 L 0,12 L 9.5,9.5 Z"
-                                      Fill="#FFE0F2FE" Width="22" Height="22" Stretch="Uniform"
-                                      HorizontalAlignment="Center" VerticalAlignment="Center">
-                                    <Path.Effect>
-                                        <DropShadowEffect Color="#FF38BDF8" BlurRadius="10" ShadowDepth="0" Opacity="0.9"/>
-                                    </Path.Effect>
-                                </Path>
-                            </Grid>
-                            <TextBlock HorizontalAlignment="Center" FontSize="15.5" FontWeight="ExtraBold">
-                                <Run Text="ASTRO" Foreground="White"/><Run Text="HYBRID" Foreground="#FF38BDF8"/>
-                            </TextBlock>
-                            <TextBlock Text="PC GAME HUB" HorizontalAlignment="Center" FontSize="9.5" FontWeight="SemiBold"
-                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,2,0,0"/>
-                        </StackPanel>
-
-                        <!-- Navigation Items -->
-                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel Margin="14,6,14,6">
-                                <RadioButton Style="{StaticResource NavButtonStyle}"
-                                             IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=Home}"
-                                             Command="{Binding NavigateCommand}" CommandParameter="Home">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M3,10 L10,3 L17,10 L17,17 L12,17 L12,12 L8,12 L8,17 L3,17 Z"
-                                              Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"
-                                              Width="15" Height="15" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                        <TextBlock Text="Overview" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </RadioButton>
-
-                                <RadioButton Style="{StaticResource NavButtonStyle}"
-                                             IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=GraphicsSettings}"
-                                             Command="{Binding NavigateCommand}" CommandParameter="GraphicsSettings"
-                                             Margin="0,6,0,0">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M12,8.6 A3.4,3.4 0 1,0 12,15.4 A3.4,3.4 0 1,0 12,8.6 M19.4,13.5 L21,12 L19.4,10.5 L19.7,8.3 L17.6,7.6 L16.8,5.5 L14.6,5.8 L13.1,4 L10.9,4 L9.4,5.8 L7.2,5.5 L6.4,7.6 L4.3,8.3 L4.6,10.5 L3,12 L4.6,13.5 L4.3,15.7 L6.4,16.4 L7.2,18.5 L9.4,18.2 L10.9,20 L13.1,20 L14.6,18.2 L16.8,18.5 L17.6,16.4 L19.7,15.7 Z"
-                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"
-                                              StrokeThickness="1.7" Fill="Transparent"
-                                              Width="15" Height="15" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                        <TextBlock Text="Graphics" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </RadioButton>
-
-                                <RadioButton Style="{StaticResource NavButtonStyle}"
-                                             IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=ControllerSettings}"
-                                             Command="{Binding NavigateCommand}" CommandParameter="ControllerSettings"
-                                             Margin="0,6,0,0">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M6,7 L18,7 C20.5,7 22,9.2 21.5,12.5 L20.8,16.5 C20.5,18 19.2,18.5 18,17.5 L15.5,15 L8.5,15 L6,17.5 C4.8,18.5 3.5,18 3.2,16.5 L2.5,12.5 C2,9.2 3.5,7 6,7 Z M7,10 L7,13 M5.5,11.5 L8.5,11.5 M16,10.5 A0.8,0.8 0 1,1 16,10.51 M17.5,12 A0.8,0.8 0 1,1 17.5,12.01"
-                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"
-                                              StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
-                                              Width="16" Height="15" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,11,0"/>
-                                        <TextBlock Text="Controller" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </RadioButton>
-
-                                <RadioButton Style="{StaticResource NavButtonStyle}"
-                                             IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=AdvancedSettings}"
-                                             Command="{Binding NavigateCommand}" CommandParameter="AdvancedSettings"
-                                             Margin="0,6,0,0">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M4,6 L20,6 M4,12 L20,12 M4,18 L20,18 M9,4 L9,8 M15,10 L15,14 M11,16 L11,20"
-                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"
-                                              StrokeThickness="1.7" StrokeStartLineCap="Round" Fill="Transparent"
-                                              Width="15" Height="15" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                        <TextBlock Text="Advanced" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </RadioButton>
-
-                                <RadioButton Style="{StaticResource NavButtonStyle}"
-                                             IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=Installation}"
-                                             Command="{Binding NavigateCommand}" CommandParameter="Installation"
-                                             Margin="0,6,0,0">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M12,3 L12,14 M8,10 L12,14 L16,10 M4,16 L4,19 L20,19 L20,16"
-                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"
-                                              StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
-                                              Width="15" Height="15" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                        <TextBlock Text="Installation" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </RadioButton>
-                            </StackPanel>
-                        </ScrollViewer>
-
-                        <!-- Bottom Status Card & Real Version -->
-                        <StackPanel Grid.Row="2" Margin="14,10,14,14">
-                            <!-- Fund me: Ko-fi card (between the navigation and the launcher status) -->
-                            <Button Command="{Binding OpenSupportCommand}" Cursor="Hand" Margin="0,0,0,10"
-                                    ToolTip="Support AstroHybrid on Ko-fi (opens ko-fi.com/justhappyguy in your browser)">
-                                <Button.Template>
-                                    <ControlTemplate TargetType="Button">
-                                        <Border x:Name="Card" CornerRadius="14" BorderThickness="1" Padding="12,10" ClipToBounds="True">
-                                            <Border.BorderBrush>
-                                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                                    <GradientStop Color="#FFFF8FB1" Offset="0"/>
-                                                    <GradientStop Color="#FFFFB86B" Offset="1"/>
-                                                </LinearGradientBrush>
-                                            </Border.BorderBrush>
-                                            <Border.Background>
-                                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                                    <GradientStop Color="#FF3A1530" Offset="0"/>
-                                                    <GradientStop Color="#FF2A1426" Offset="0.55"/>
-                                                    <GradientStop Color="#FF3A2214" Offset="1"/>
-                                                </LinearGradientBrush>
-                                            </Border.Background>
-                                            <Grid>
-                                                <!-- Little floating hearts -->
-                                                <Path Data="M5,8 C5,8 0,5 0,2.5 C0,1 1.2,0 2.5,0 C3.6,0 4.4,0.7 5,1.6 C5.6,0.7 6.4,0 7.5,0 C8.8,0 10,1 10,2.5 C10,5 5,8 5,8 Z"
-                                                      Fill="#55FF8FB1" Width="8" Height="7" Stretch="Uniform"
-                                                      HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,4,0" IsHitTestVisible="False"/>
-                                                <Path Data="M5,8 C5,8 0,5 0,2.5 C0,1 1.2,0 2.5,0 C3.6,0 4.4,0.7 5,1.6 C5.6,0.7 6.4,0 7.5,0 C8.8,0 10,1 10,2.5 C10,5 5,8 5,8 Z"
-                                                      Fill="#33FFB86B" Width="6" Height="5" Stretch="Uniform"
-                                                      HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,8,16,0" IsHitTestVisible="False"/>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <!-- Coffee cup with a heart -->
-                                                    <Grid Width="34" Height="34" VerticalAlignment="Center" Margin="0,0,10,0">
-                                                        <Ellipse Fill="#33FF8FB1"/>
-                                                        <Canvas Width="22" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                                            <Path Data="M7,0 C6,1.5 8,2.5 7,4 M11,0 C10,1.5 12,2.5 11,4" Stroke="#AAFFFFFF"
-                                                                  StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                                                            <Path Data="M2,6 L16,6 L15,16 C14.8,17.5 13.8,18.5 12.3,18.5 L5.7,18.5 C4.2,18.5 3.2,17.5 3,16 Z"
-                                                                  Fill="#FFFFF4E6"/>
-                                                            <Path Data="M16,8 C19.5,8 19.8,13.5 15.4,13.8" Stroke="#FFFFF4E6" StrokeThickness="1.6" Fill="Transparent"/>
-                                                            <Path Data="M9,15.5 C9,15.5 5.6,13.4 5.6,11.6 C5.6,10.6 6.4,9.9 7.3,9.9 C8,9.9 8.6,10.4 9,11 C9.4,10.4 10,9.9 10.7,9.9 C11.6,9.9 12.4,10.6 12.4,11.6 C12.4,13.4 9,15.5 9,15.5 Z"
-                                                                  Fill="#FFFF5E8A"/>
-                                                        </Canvas>
-                                                    </Grid>
-                                                    <StackPanel VerticalAlignment="Center">
-                                                        <TextBlock Text="Fund me" FontSize="14" FontWeight="ExtraBold" Foreground="White"/>
-                                                        <TextBlock Text="Buy me a coffee on Ko-fi" FontSize="10.5" Foreground="#FFFFC9D9" Margin="0,1,0,0"/>
-                                                    </StackPanel>
-                                                </StackPanel>
-                                            </Grid>
-                                        </Border>
-                                        <ControlTemplate.Triggers>
-                                            <Trigger Property="IsMouseOver" Value="True">
-                                                <Setter TargetName="Card" Property="Effect">
-                                                    <Setter.Value>
-                                                        <DropShadowEffect Color="#FFFF8FB1" BlurRadius="14" ShadowDepth="0" Opacity="0.7"/>
-                                                    </Setter.Value>
-                                                </Setter>
-                                            </Trigger>
-                                            <Trigger Property="IsPressed" Value="True">
-                                                <Setter TargetName="Card" Property="Opacity" Value="0.85"/>
-                                            </Trigger>
-                                        </ControlTemplate.Triggers>
-                                    </ControlTemplate>
-                                </Button.Template>
-                            </Button>
-
-                            <Border CornerRadius="14" BorderBrush="#FF1F3C73" BorderThickness="1" Padding="14,12" ClipToBounds="True">
-                                <Border.Background>
-                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                        <GradientStop Color="#FF0A1733" Offset="0"/>
-                                        <GradientStop Color="#FF071127" Offset="1"/>
-                                    </LinearGradientBrush>
-                                </Border.Background>
-                                <Grid>
-                                    <Path Data="M -10,48 Q 50,24 110,44 T 190,34 L 190,72 L -10,72 Z"
-                                          Fill="#1438BDF8" IsHitTestVisible="False"/>
-                                    <StackPanel>
-                                        <StackPanel Orientation="Horizontal">
-                                            <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}" VerticalAlignment="Center" Margin="0,0,7,0"/>
-                                            <TextBlock Text="LAUNCHER STATUS" FontSize="10" FontWeight="SemiBold"
-                                                       Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
-                                        </StackPanel>
-                                        <TextBlock Text="{Binding StatusMessage}" FontSize="14.5" FontWeight="Bold"
-                                                   Foreground="{StaticResource SuccessBrush}" TextWrapping="Wrap" Margin="0,6,0,0"/>
-                                        <ProgressBar Value="{Binding IsLoading, Converter={StaticResource BoolToProgressConverter}}"
-                                                     Maximum="1" IsIndeterminate="{Binding IsLoading}"
-                                                     Style="{StaticResource ModernProgressBarStyle}" Height="4" Margin="0,8,0,0"
-                                                     Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                    </StackPanel>
-                                </Grid>
-                            </Border>
-
-                            <TextBlock Text="{Binding AppVersionText}" FontSize="11" Foreground="#FF5A7094"
-                                       Margin="6,10,0,0"/>
-                            <StackPanel Margin="6,8,0,0">
-                                <TextBlock Text="Made by a random Moroccan guy" FontSize="12.5" FontWeight="SemiBold"
-                                           Foreground="#FFCBD5F5" TextWrapping="Wrap"/>
-                                <TextBlock Text="A9wad Fassi" FontSize="20" FontWeight="ExtraBold" Margin="0,1,0,0">
-                                    <TextBlock.Foreground>
-                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                                            <GradientStop Color="#FFFF8FB1" Offset="0"/>
-                                            <GradientStop Color="#FFFFB86B" Offset="1"/>
-                                        </LinearGradientBrush>
-                                    </TextBlock.Foreground>
-                                    <TextBlock.Effect>
-                                        <DropShadowEffect Color="#FFFF8FB1" BlurRadius="10" ShadowDepth="0" Opacity="0.55"/>
-                                    </TextBlock.Effect>
-                                </TextBlock>
-                            </StackPanel>
-                        </StackPanel>
-                    </Grid>
+                <!-- Settings pages sit on a darker veil so the art stays in the background -->
+                <Border Background="#FF050608">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Opacity" Value="0.86"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding CurrentPage}" Value="Home">
+                                    <Setter Property="Opacity" Value="0"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
                 </Border>
+            </Grid>
 
-                <!-- Right Main Area -->
-                <Grid Grid.Column="1">
+            <!-- Icon rail -->
+            <Border Grid.Column="0" Background="{StaticResource SidebarSpaceBrush}" BorderBrush="#FF12151C" BorderThickness="0,0,1,0">
+                <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Top Header Strip + Window Caption Controls -->
-                    <Grid Grid.Row="0" Margin="26,12,14,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
+                    <!-- Abstract emblem: blue orbit with a spark -->
+                    <Grid Grid.Row="0" Width="44" Height="44" Margin="0,18,0,26" HorizontalAlignment="Center"
+                          ToolTip="AstroHybrid">
+                        <Border CornerRadius="14" Background="{StaticResource NavActiveFillBrush}">
+                            <Border.Effect>
+                                <DropShadowEffect Color="#FF1F6FFF" BlurRadius="18" ShadowDepth="0" Opacity="0.55"/>
+                            </Border.Effect>
+                        </Border>
+                        <Ellipse Width="30" Height="11" Stroke="#CCFFFFFF" StrokeThickness="1.6" RenderTransformOrigin="0.5,0.5">
+                            <Ellipse.RenderTransform>
+                                <RotateTransform Angle="-24"/>
+                            </Ellipse.RenderTransform>
+                        </Ellipse>
+                        <Path Data="M 12,0 L 14.2,9.8 L 24,12 L 14.2,14.2 L 12,24 L 9.8,14.2 L 0,12 L 9.8,9.8 Z"
+                              Fill="White" Width="15" Height="15" Stretch="Uniform"/>
+                    </Grid>
 
-                        <!-- Game Space Heading & Native Status Badge -->
-                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                            <TextBlock Text="YOUR GAME SPACE" FontSize="10" FontWeight="SemiBold"
-                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,2"/>
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <TextBlock Text="Astro Bot" FontSize="25" FontWeight="Bold" Foreground="White"
-                                           VerticalAlignment="Center"/>
-                                <Border CornerRadius="11" Padding="10,4" Margin="14,2,0,0" VerticalAlignment="Center"
-                                        BorderThickness="1" BorderBrush="#FF244985" Background="#CC0C1D3F">
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock FontSize="10.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
-                                                    <Setter Property="Text" Value="SETUP REQUIRED"/>
-                                                    <Setter Property="Foreground" Value="#FFFBBF24"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding InstallationState.IsInstalled}" Value="True">
-                                                            <Setter Property="Text" Value="NATIVE WINDOWS BUILD"/>
-                                                            <Setter Property="Foreground" Value="#FFCBD5E1"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
-                                        <Ellipse Width="12" Height="12" VerticalAlignment="Center">
-                                            <Ellipse.Style>
-                                                <Style TargetType="Ellipse">
-                                                    <Setter Property="Fill" Value="#FFFBBF24"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding InstallationState.IsInstalled}" Value="True">
-                                                            <Setter Property="Fill" Value="#FF22C55E"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Ellipse.Style>
-                                        </Ellipse>
-                                    </StackPanel>
-                                </Border>
-                            </StackPanel>
-                        </StackPanel>
+                    <StackPanel Grid.Row="1" HorizontalAlignment="Center">
+                        <RadioButton Style="{StaticResource NavButtonStyle}" ToolTip="Home"
+                                     IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=Home}"
+                                     Command="{Binding NavigateCommand}" CommandParameter="Home">
+                            <Path Style="{StaticResource RailIcon}" Data="M3,10.5 L12,3 L21,10.5 M5.5,8.8 L5.5,20 L18.5,20 L18.5,8.8 M10,20 L10,14 L14,14 L14,20"/>
+                        </RadioButton>
+                        <RadioButton Style="{StaticResource NavButtonStyle}" ToolTip="Graphics" Margin="0,10,0,0"
+                                     IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=GraphicsSettings}"
+                                     Command="{Binding NavigateCommand}" CommandParameter="GraphicsSettings">
+                            <Path Style="{StaticResource RailIcon}" Data="M3,5 L21,5 L21,16 L3,16 Z M8,20 L16,20 M12,16 L12,20 M7,12 L10,9 L13,11.5 L17,8"/>
+                        </RadioButton>
+                        <RadioButton Style="{StaticResource NavButtonStyle}" ToolTip="Controller" Margin="0,10,0,0"
+                                     IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=ControllerSettings}"
+                                     Command="{Binding NavigateCommand}" CommandParameter="ControllerSettings">
+                            <Path Style="{StaticResource RailIcon}" Width="22"
+                                  Data="M6,7 L18,7 C20.5,7 22,9.2 21.5,12.5 L20.8,16.5 C20.5,18 19.2,18.5 18,17.5 L15.5,15 L8.5,15 L6,17.5 C4.8,18.5 3.5,18 3.2,16.5 L2.5,12.5 C2,9.2 3.5,7 6,7 Z M7,10 L7,13 M5.5,11.5 L8.5,11.5 M16,10.5 L16,10.6 M17.5,12 L17.5,12.1"/>
+                        </RadioButton>
+                        <RadioButton Style="{StaticResource NavButtonStyle}" ToolTip="Advanced" Margin="0,10,0,0"
+                                     IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=AdvancedSettings}"
+                                     Command="{Binding NavigateCommand}" CommandParameter="AdvancedSettings">
+                            <Path Style="{StaticResource RailIcon}" Data="M4,6 L20,6 M4,12 L20,12 M4,18 L20,18 M9,4 L9,8 M15,10 L15,14 M11,16 L11,20"/>
+                        </RadioButton>
+                        <RadioButton Style="{StaticResource NavButtonStyle}" ToolTip="Installation" Margin="0,10,0,0"
+                                     IsChecked="{Binding CurrentPage, Converter={StaticResource EnumToBoolConverter}, ConverterParameter=Installation}"
+                                     Command="{Binding NavigateCommand}" CommandParameter="Installation">
+                            <Path Style="{StaticResource RailIcon}" Data="M12,3 L12,14 M8,10 L12,14 L16,10 M4,16 L4,20 L20,20 L20,16"/>
+                        </RadioButton>
+                    </StackPanel>
 
-                        <!-- Check for Updates Pill -->
-                        <Button Grid.Column="1"
-                                Command="{Binding CheckForUpdatesCommand}"
-                                WindowChrome.IsHitTestVisibleInChrome="True"
-                                VerticalAlignment="Center" Margin="12,4,14,0">
-                            <Button.Style>
-                                <Style TargetType="Button" BasedOn="{StaticResource PillButtonStyle}">
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding UpdateState.IsChecking}" Value="True">
-                                            <Setter Property="IsEnabled" Value="False"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Button.Style>
+                    <StackPanel Grid.Row="2" HorizontalAlignment="Center" Margin="0,0,0,16">
+                        <!-- Ko-fi -->
+                        <Button Command="{Binding OpenSupportCommand}" Cursor="Hand" Width="52" Height="52"
+                                ToolTip="Fund me: buy me a coffee on Ko-fi (opens ko-fi.com/justhappyguy in your browser)">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="B" CornerRadius="14" Background="#141F6FFF" BorderBrush="#331F6FFF" BorderThickness="1">
+                                        <Path x:Name="Heart" Data="M5,8 C5,8 0,5 0,2.5 C0,1 1.2,0 2.5,0 C3.6,0 4.4,0.7 5,1.6 C5.6,0.7 6.4,0 7.5,0 C8.8,0 10,1 10,2.5 C10,5 5,8 5,8 Z"
+                                              Fill="#FF6FA6FF" Width="20" Height="17" Stretch="Uniform"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="B" Property="Background" Value="#331F6FFF"/>
+                                            <Setter TargetName="B" Property="BorderBrush" Value="#FF3A86FF"/>
+                                            <Setter TargetName="Heart" Property="Fill" Value="White"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <TextBlock Text="{Binding AppVersionText}" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
+                                   HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="76" Margin="0,12,0,0"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Main area -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Top bar -->
+                <Grid Grid.Row="0" Margin="36,12,12,4" MinHeight="44">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock FontFamily="{StaticResource FontFamilyDisplay}" FontSize="15" VerticalAlignment="Center">
+                            <Run Text="ASTRO" Foreground="White"/><Run Text="HYBRID" Foreground="{StaticResource AccentBrush}"/>
+                        </TextBlock>
+                        <Border CornerRadius="10" Padding="10,4" Margin="14,0,0,0" VerticalAlignment="Center"
+                                Background="#14FFFFFF" BorderBrush="#22FFFFFF" BorderThickness="1">
                             <StackPanel Orientation="Horizontal">
-                                <Path Data="M4,12 A8,8 0 0,1 17.6,6.4 M20,4 L20,8.5 L15.5,8.5 M20,12 A8,8 0 0,1 6.4,17.6 M4,20 L4,15.5 L8.5,15.5"
-                                      Stroke="#FF7DD3FC" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
-                                      Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                <TextBlock FontSize="12.5" FontWeight="Medium" VerticalAlignment="Center">
+                                <Ellipse Width="7" Height="7" VerticalAlignment="Center" Margin="0,0,7,0">
+                                    <Ellipse.Style>
+                                        <Style TargetType="Ellipse">
+                                            <Setter Property="Fill" Value="{StaticResource WarningBrush}"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding InstallationState.IsInstalled}" Value="True">
+                                                    <Setter Property="Fill" Value="{StaticResource SuccessBrush}"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Ellipse.Style>
+                                </Ellipse>
+                                <TextBlock FontSize="10.5" FontWeight="SemiBold" VerticalAlignment="Center">
                                     <TextBlock.Style>
                                         <Style TargetType="TextBlock">
-                                            <Setter Property="Text" Value="Check for updates"/>
+                                            <Setter Property="Text" Value="SETUP REQUIRED"/>
+                                            <Setter Property="Foreground" Value="{StaticResource WarningBrush}"/>
                                             <Style.Triggers>
-                                                <DataTrigger Binding="{Binding UpdateState.IsChecking}" Value="True">
-                                                    <Setter Property="Text" Value="Checking updates..."/>
+                                                <DataTrigger Binding="{Binding InstallationState.IsInstalled}" Value="True">
+                                                    <Setter Property="Text" Value="NATIVE WINDOWS BUILD"/>
+                                                    <Setter Property="Foreground" Value="#FFB3BAC7"/>
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
                                     </TextBlock.Style>
                                 </TextBlock>
                             </StackPanel>
-                        </Button>
+                        </Border>
+                    </StackPanel>
 
-                        <!-- Custom Caption Buttons (Min / Max / Close) -->
-                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top"
-                                    WindowChrome.IsHitTestVisibleInChrome="True">
-                            <Button Style="{StaticResource CaptionButtonStyle}" Click="MinimizeButton_Click" ToolTip="Minimize">
-                                <Path Data="M 0,5 L 10,5" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.3"/>
-                            </Button>
-                            <Button Style="{StaticResource CaptionButtonStyle}" Click="MaximizeRestoreButton_Click" ToolTip="Maximize / Restore">
-                                <Path Data="M 0,0 L 10,0 L 10,10 L 0,10 Z" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.2" Fill="Transparent"/>
-                            </Button>
-                            <Button Style="{StaticResource CloseCaptionButtonStyle}" Click="CloseButton_Click" ToolTip="Close">
-                                <Path Data="M 0,0 L 10,10 M 10,0 L 0,10" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.3"/>
-                            </Button>
+                    <Button Grid.Column="1" Command="{Binding CheckForUpdatesCommand}"
+                            WindowChrome.IsHitTestVisibleInChrome="True" VerticalAlignment="Center" Margin="12,0,10,0">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource PillButtonStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding UpdateState.IsChecking}" Value="True">
+                                        <Setter Property="IsEnabled" Value="False"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                        <StackPanel Orientation="Horizontal">
+                            <Path Data="M4,12 A8,8 0 0,1 17.6,6.4 M20,4 L20,8.5 L15.5,8.5 M20,12 A8,8 0 0,1 6.4,17.6 M4,20 L4,15.5 L8.5,15.5"
+                                  Stroke="{StaticResource AccentBrush}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
+                                  Width="13" Height="13" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <TextBlock VerticalAlignment="Center">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Text" Value="Check for updates"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding UpdateState.IsChecking}" Value="True">
+                                                <Setter Property="Text" Value="Checking updates..."/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
                         </StackPanel>
-                    </Grid>
+                    </Button>
 
-                    <!-- Page Content & Update Banners -->
-                    <Grid Grid.Row="1" Margin="26,0,26,0">
-                        <ContentControl Content="{Binding CurrentPage, Converter={StaticResource PageTemplateSelector}}"/>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
+                                WindowChrome.IsHitTestVisibleInChrome="True">
+                        <Button Style="{StaticResource CaptionButtonStyle}" Click="MinimizeButton_Click" ToolTip="Minimize">
+                            <Path Data="M 0,5 L 10,5" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.3"/>
+                        </Button>
+                        <Button Style="{StaticResource CaptionButtonStyle}" Click="MaximizeRestoreButton_Click" ToolTip="Maximize / Restore">
+                            <Path Data="M 0,0 L 10,0 L 10,10 L 0,10 Z" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.2" Fill="Transparent"/>
+                        </Button>
+                        <Button Style="{StaticResource CloseCaptionButtonStyle}" Click="CloseButton_Click" ToolTip="Close">
+                            <Path Data="M 0,0 L 10,10 M 10,0 L 0,10" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.3"/>
+                        </Button>
+                    </StackPanel>
+                </Grid>
 
-                        <!-- Floating Update Notification Banner -->
-                        <Border VerticalAlignment="Top" Margin="0,6,0,0"
-                                Visibility="{Binding ShowUpdateNotification, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                CornerRadius="14" Padding="18,14"
-                                BorderBrush="{StaticResource PrimaryLightBrush}" BorderThickness="1">
-                            <Border.Background>
-                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                                    <GradientStop Color="#F20E2859" Offset="0"/>
-                                    <GradientStop Color="#F212387A" Offset="1"/>
-                                </LinearGradientBrush>
-                            </Border.Background>
-                            <Border.Effect>
-                                <DropShadowEffect Color="#FF050A18" BlurRadius="20" ShadowDepth="4" Opacity="0.75"/>
-                            </Border.Effect>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <Border Grid.Column="0" Width="40" Height="40" CornerRadius="10" Background="#3338BDF8"
-                                        BorderBrush="#6638BDF8" BorderThickness="1" VerticalAlignment="Center" Margin="0,0,14,0">
-                                    <Path Data="M12,4 L12,15 M7.5,10.5 L12,15 L16.5,10.5 M5,19 L19,19"
-                                          Stroke="#FF7DD3FC" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
-                                          Width="18" Height="18" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Border>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                    <TextBlock Text="NEW ASTROHYBRID UPDATE AVAILABLE" FontSize="13" FontWeight="Bold" Foreground="White"/>
-                                    <TextBlock Text="{Binding UpdateState.LatestUpdate.Version, StringFormat='Version {0}'}" FontSize="12.5" Foreground="#FF7DD3FC" Margin="0,2,0,0"/>
-                                    <TextBlock Text="{Binding UpdateState.LatestUpdate.ReleaseNotes}" FontSize="11.5" Foreground="#FFCBD5E1" TextWrapping="Wrap" MaxWidth="520" Margin="0,6,0,0"/>
-                                    <ProgressBar Value="{Binding UpdateState.DownloadPercent, Mode=OneWay}" Maximum="100"
-                                                 Style="{StaticResource UpdateProgressBarStyle}"
-                                                 Visibility="{Binding UpdateState.IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                    <!-- Update status line: "Updating to x.y.z... 42%", then "ready, restart the launcher" -->
-                                    <TextBlock Text="{Binding UpdateState.DownloadStatus}" FontSize="12" FontWeight="SemiBold"
-                                               Foreground="#FF7DD3FC" TextWrapping="Wrap" MaxWidth="520" Margin="0,8,0,0"
-                                               Visibility="{Binding UpdateState.ShowUpdateStatus, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                </StackPanel>
-                                <Button Grid.Column="2" Content="Update Now" Command="{Binding DownloadUpdateCommand}"
-                                        Style="{StaticResource PrimaryButtonStyle}" MinWidth="118" MinHeight="36"
-                                        FontSize="13" Margin="14,0,8,0"
-                                        Visibility="{Binding UpdateState.ShowUpdateButton, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                <Button Grid.Column="2" Content="Updating..." Style="{StaticResource PrimaryButtonStyle}" MinWidth="118" MinHeight="36"
-                                        FontSize="13" Margin="14,0,8,0" IsEnabled="False"
-                                        Visibility="{Binding UpdateState.IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                <Button Grid.Column="2" Content="Restart launcher" Command="{Binding RestartToUpdateCommand}"
-                                        Style="{StaticResource PrimaryButtonStyle}" MinWidth="140" MinHeight="36"
-                                        FontSize="13" Margin="14,0,8,0"
-                                        Visibility="{Binding UpdateState.IsReadyToRestart, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                <Button Grid.Column="3" Content="Ignore for Now" Command="{Binding IgnoreUpdateCommand}"
-                                        Style="{StaticResource SecondaryButtonStyle}" MinWidth="110" MinHeight="36"
-                                        FontSize="12.5" Margin="4,0,0,0"
-                                        Visibility="{Binding UpdateState.ShowUpdateButton, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                <Button Grid.Column="3" Content="Later" Command="{Binding DismissUpdateNotificationCommand}"
-                                        Style="{StaticResource SecondaryButtonStyle}" MinWidth="82" MinHeight="36"
-                                        FontSize="12.5" Margin="4,0,0,0"
-                                        Visibility="{Binding UpdateState.IsReadyToRestart, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                            </Grid>
-                        </Border>
+                <!-- Page content with a short fade/slide on every page change -->
+                <Grid Grid.Row="1" Margin="36,6,36,0">
+                    <ContentControl x:Name="PageHost" Focusable="False"
+                                    Content="{Binding CurrentPage, Converter={StaticResource PageTemplateSelector}, NotifyOnTargetUpdated=True}">
+                        <ContentControl.RenderTransform>
+                            <TranslateTransform/>
+                        </ContentControl.RenderTransform>
+                        <ContentControl.Triggers>
+                            <EventTrigger RoutedEvent="Binding.TargetUpdated">
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.22"/>
+                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                         From="12" To="0" Duration="0:0:0.24" EasingFunction="{StaticResource EaseOut}"/>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </EventTrigger>
+                        </ContentControl.Triggers>
+                    </ContentControl>
 
-                        <!-- Persistent Ignored Update Strip -->
-                        <Border VerticalAlignment="Top" Margin="0,6,0,0"
-                                Visibility="{Binding HasIgnoredUpdate, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                Background="#EB0B1B3B" CornerRadius="12" Padding="14,10"
-                                BorderBrush="{StaticResource WarningBrush}" BorderThickness="1">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="↻" FontSize="18" Foreground="{StaticResource WarningBrush}"
-                                           VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                    <TextBlock Text="UPDATE AVAILABLE" FontSize="10.5" FontWeight="Bold" Foreground="{StaticResource WarningBrush}"/>
-                                    <TextBlock Text="{Binding UpdateState.IgnoredUpdate.ReleaseName}" FontSize="12.5" Foreground="White"/>
-                                </StackPanel>
-                                <Button Grid.Column="2" Content="Update Now" Command="{Binding DownloadUpdateCommand}"
-                                        Style="{StaticResource SecondaryButtonStyle}" MinWidth="110" MinHeight="32"
-                                        Margin="14,0,0,0"/>
-                            </Grid>
-                        </Border>
-                    </Grid>
-
-                    <!-- Persistent Bottom Launch Dock -->
-                    <Border Grid.Row="2" Padding="26,12,26,14" BorderBrush="#FF162C58" BorderThickness="0,1,0,0">
-                        <Border.Background>
-                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                                <GradientStop Color="#CC060E22" Offset="0"/>
-                                <GradientStop Color="#F2040917" Offset="1"/>
-                            </LinearGradientBrush>
-                        </Border.Background>
+                    <!-- Update notification -->
+                    <Border VerticalAlignment="Top" Margin="0,4,0,0"
+                            Visibility="{Binding ShowUpdateNotification, Converter={StaticResource BooleanToVisibilityConverter}}"
+                            CornerRadius="16" Padding="18,14" Background="#F20B0F18"
+                            BorderBrush="#FF2F7BFF" BorderThickness="1">
+                        <Border.Effect>
+                            <DropShadowEffect Color="Black" BlurRadius="24" ShadowDepth="4" Opacity="0.7"/>
+                        </Border.Effect>
                         <Grid>
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Width="40" Height="40" CornerRadius="12" Background="#261F6FFF"
+                                    BorderBrush="#552F7BFF" BorderThickness="1" VerticalAlignment="Center" Margin="0,0,14,0">
+                                <Path Data="M12,4 L12,15 M7.5,10.5 L12,15 L16.5,10.5 M5,19 L19,19"
+                                      Stroke="{StaticResource AccentBrush}" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
+                                      Width="18" Height="18" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Text="New AstroHybrid update available" FontFamily="{StaticResource FontFamilyDisplay}" FontSize="14" Foreground="White"/>
+                                <TextBlock Text="{Binding UpdateState.LatestUpdate.Version, StringFormat='Version {0}'}" FontSize="12.5" Foreground="{StaticResource AccentBrush}" Margin="0,2,0,0"/>
+                                <TextBlock Text="{Binding UpdateState.LatestUpdate.ReleaseNotes}" FontSize="11.5" Foreground="#FFB3BAC7" TextWrapping="Wrap" MaxWidth="560" MaxHeight="64" TextTrimming="CharacterEllipsis" Margin="0,6,0,0"/>
+                                <ProgressBar Value="{Binding UpdateState.DownloadPercent, Mode=OneWay}" Maximum="100"
+                                             Style="{StaticResource UpdateProgressBarStyle}"
+                                             Visibility="{Binding UpdateState.IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                <TextBlock Text="{Binding UpdateState.DownloadStatus}" FontSize="12" FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" MaxWidth="560" Margin="0,8,0,0"
+                                           Visibility="{Binding UpdateState.ShowUpdateStatus, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            </StackPanel>
+                            <Button Grid.Column="2" Content="Update now" Command="{Binding DownloadUpdateCommand}"
+                                    Style="{StaticResource PrimaryButtonStyle}" MinWidth="118" Margin="14,0,8,0"
+                                    Visibility="{Binding UpdateState.ShowUpdateButton, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <Button Grid.Column="2" Content="Updating..." Style="{StaticResource PrimaryButtonStyle}" MinWidth="118"
+                                    Margin="14,0,8,0" IsEnabled="False"
+                                    Visibility="{Binding UpdateState.IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <Button Grid.Column="2" Content="Restart launcher" Command="{Binding RestartToUpdateCommand}"
+                                    Style="{StaticResource PrimaryButtonStyle}" MinWidth="140" Margin="14,0,8,0"
+                                    Visibility="{Binding UpdateState.IsReadyToRestart, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <Button Grid.Column="3" Content="Ignore for now" Command="{Binding IgnoreUpdateCommand}"
+                                    Style="{StaticResource SecondaryButtonStyle}" MinWidth="110"
+                                    Visibility="{Binding UpdateState.ShowUpdateButton, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <Button Grid.Column="3" Content="Later" Command="{Binding DismissUpdateNotificationCommand}"
+                                    Style="{StaticResource SecondaryButtonStyle}" MinWidth="82"
+                                    Visibility="{Binding UpdateState.IsReadyToRestart, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                        </Grid>
+                    </Border>
+
+                    <!-- Ignored update strip -->
+                    <Border VerticalAlignment="Top" Margin="0,4,0,0"
+                            Visibility="{Binding HasIgnoredUpdate, Converter={StaticResource BooleanToVisibilityConverter}}"
+                            Background="#F20B0F18" CornerRadius="14" Padding="14,10"
+                            BorderBrush="{StaticResource WarningBrush}" BorderThickness="1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-
-                            <!-- Left Dock Identity (Original Space-Bot Vector Emblem + Copy) -->
-                            <Grid Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <Grid Grid.Column="0" Width="48" Height="48" Margin="0,0,14,0">
-                                    <Ellipse Width="46" Height="46" Fill="#2238BDF8"/>
-                                    <!-- Rounded Space-Bot Helmet & Antenna -->
-                                    <Path Data="M24,4 L24,9" Stroke="#FF7DD3FC" StrokeThickness="2" StrokeStartLineCap="Round"/>
-                                    <Ellipse Width="6" Height="6" Fill="#FF38BDF8" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,1,0,0"/>
-                                    <Border Width="38" Height="30" CornerRadius="14" Background="#FFE2ECFA" BorderBrush="#FF7DD3FC" BorderThickness="1.2"
-                                            HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,6,0,0">
-                                        <Border Width="28" Height="18" CornerRadius="8" Background="#FF07132E" VerticalAlignment="Center" HorizontalAlignment="Center">
-                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                                <Ellipse Width="6" Height="7" Fill="#FF38BDF8" Margin="0,0,6,0">
-                                                    <Ellipse.Effect>
-                                                        <DropShadowEffect Color="#FF38BDF8" BlurRadius="6" ShadowDepth="0"/>
-                                                    </Ellipse.Effect>
-                                                </Ellipse>
-                                                <Ellipse Width="6" Height="7" Fill="#FF38BDF8">
-                                                    <Ellipse.Effect>
-                                                        <DropShadowEffect Color="#FF38BDF8" BlurRadius="6" ShadowDepth="0"/>
-                                                    </Ellipse.Effect>
-                                                </Ellipse>
-                                            </StackPanel>
-                                        </Border>
-                                    </Border>
-                                </Grid>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                    <TextBlock Text="ASTRO BOT" FontSize="14.5" FontWeight="ExtraBold" Foreground="White" TextTrimming="CharacterEllipsis"/>
-                                    <TextBlock Text="Let's dive into your adventure!" FontSize="12" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,1,0,0" TextTrimming="CharacterEllipsis"/>
-                                </StackPanel>
-                            </Grid>
-
-                            <!-- Right Dock Action Controls -->
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                <Button Content="Best Settings for This PC" Command="{Binding ApplyBestSettingsCommand}"
-                                        Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,12,0"
-                                        Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibilityConverter}, ConverterParameter=GraphicsSettings}"/>
-
-                                <Button Content="Update" Command="{Binding DownloadUpdateCommand}"
-                                        Style="{StaticResource PrimaryButtonStyle}" MinWidth="108" Height="42"
-                                        FontSize="14" Margin="0,0,12,0"
-                                        Visibility="{Binding HasUpdateAction, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                        IsEnabled="{Binding HasUpdateAction}"/>
-                                <Button Content="Restart launcher" Command="{Binding RestartToUpdateCommand}"
-                                        Style="{StaticResource PrimaryButtonStyle}" MinWidth="140" Height="42"
-                                        FontSize="14" Margin="0,0,12,0"
-                                        ToolTip="Finish the update: the launcher closes and opens again on the new version"
-                                        Visibility="{Binding IsUpdateReady, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-
-                                <Button Style="{StaticResource PillButtonStyle}"
-                                        Command="{Binding NavigateCommand}" CommandParameter="Installation"
-                                        Height="42" Margin="0,0,14,0" Padding="18,6"
-                                        ToolTip="Manage installation, repair, or game dump location">
-                                    <StackPanel Orientation="Horizontal">
-                                        <Path Data="M12,3 L12,14 M8,10 L12,14 L16,10 M4,16 L4,19 L20,19 L20,16"
-                                              Stroke="#FF7DD3FC" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
-                                              Width="15" Height="15" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                        <TextBlock Text="Install / Manage" FontSize="13" FontWeight="Medium" VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                </Button>
-
-                                <Button Command="{Binding LaunchGameCommand}"
-                                        Style="{StaticResource PlayButtonStyle}"
-                                        IsEnabled="{Binding InstallationState.IsInstalled}">
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                        <Path Data="M 0,0 L 11,7 L 0,14 Z" Fill="#FF031024" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                        <TextBlock Text="PLAY" VerticalAlignment="Center" FontWeight="ExtraBold"/>
-                                    </StackPanel>
-                                </Button>
+                            <TextBlock Grid.Column="0" Text="↻" FontSize="18" Foreground="{StaticResource WarningBrush}"
+                                       VerticalAlignment="Center" Margin="0,0,12,0"/>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Text="UPDATE AVAILABLE" FontSize="10.5" FontWeight="Bold" Foreground="{StaticResource WarningBrush}"/>
+                                <TextBlock Text="{Binding UpdateState.IgnoredUpdate.ReleaseName}" FontSize="12.5" Foreground="White"/>
                             </StackPanel>
+                            <Button Grid.Column="2" Content="Update now" Command="{Binding DownloadUpdateCommand}"
+                                    Style="{StaticResource SecondaryButtonStyle}" MinWidth="110" MinHeight="34" Margin="14,0,0,0"/>
                         </Grid>
                     </Border>
+                </Grid>
+
+                <!-- Launch dock -->
+                <Grid Grid.Row="2" Margin="36,14,36,24">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Status + credit -->
+                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <TextBlock Text="{Binding StatusMessage}" FontSize="13" FontWeight="SemiBold" Foreground="White"
+                                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ProgressBar Value="{Binding IsLoading, Converter={StaticResource BoolToProgressConverter}}"
+                                     Maximum="1" IsIndeterminate="{Binding IsLoading}" Height="3" MaxWidth="260"
+                                     HorizontalAlignment="Left" Width="260" Margin="15,6,0,0"
+                                     Style="{StaticResource ModernProgressBarStyle}"
+                                     Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                        <TextBlock FontSize="11.5" Margin="15,4,0,0" TextTrimming="CharacterEllipsis">
+                            <Run Text="Made by a random Moroccan guy · " Foreground="{StaticResource TextMutedBrush}"/><Run Text="A9wad Fassi" FontWeight="Bold" Foreground="{StaticResource AccentBrush}"/>
+                        </TextBlock>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="Best settings for this PC" Command="{Binding ApplyBestSettingsCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" Height="44" Margin="0,0,10,0"
+                                Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibilityConverter}, ConverterParameter=GraphicsSettings}"/>
+                        <Button Content="Update" Command="{Binding DownloadUpdateCommand}"
+                                Style="{StaticResource PrimaryButtonStyle}" MinWidth="108" Height="44" Margin="0,0,10,0"
+                                Visibility="{Binding HasUpdateAction, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                IsEnabled="{Binding HasUpdateAction}"/>
+                        <Button Content="Restart launcher" Command="{Binding RestartToUpdateCommand}"
+                                Style="{StaticResource PrimaryButtonStyle}" MinWidth="140" Height="44" Margin="0,0,10,0"
+                                ToolTip="Finish the update: the launcher closes and opens again on the new version"
+                                Visibility="{Binding IsUpdateReady, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                        <Button Style="{StaticResource SecondaryButtonStyle}" Height="44" Margin="0,0,14,0"
+                                Command="{Binding NavigateCommand}" CommandParameter="Installation"
+                                ToolTip="Manage installation, repair, or game dump location">
+                            <StackPanel Orientation="Horizontal">
+                                <Path Data="M12,3 L12,14 M8,10 L12,14 L16,10 M4,16 L4,20 L20,20 L20,16"
+                                      Stroke="{StaticResource AccentBrush}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
+                                      Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,9,0"/>
+                                <TextBlock Text="Install / Manage" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Command="{Binding LaunchGameCommand}" Style="{StaticResource PlayButtonStyle}"
+                                IsEnabled="{Binding InstallationState.IsInstalled}">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <Path Data="M 0,0 L 11,7 L 0,14 Z" Fill="White" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                <TextBlock Text="PLAY" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
                 </Grid>
             </Grid>
         </Grid>
