@@ -1,0 +1,593 @@
+From a395bee465a9efd3e7ea3774445c8f98e317fcbb Mon Sep 17 00:00:00 2001
+From: AnyPS5 contributors <noreply@localhost>
+Subject: [PATCH] Reserve signaled kernel semaphore tokens for queued waiters
+
+Backport upstream AnyPS5 #9491, retaining the pinned base's attribute validation and unsupported 0x100 handling. Reserve tokens under the semaphore lock in FIFO or guest-priority order so polling threads cannot steal signaled tokens before awakened workers run. Include upstream handoff tests and trace test stubs.
+
+diff --git a/core/libs/prx/libkernel/CMakeLists.txt b/core/libs/prx/libkernel/CMakeLists.txt
+--- a/core/libs/prx/libkernel/CMakeLists.txt
++++ b/core/libs/prx/libkernel/CMakeLists.txt
+@@ -996,6 +996,16 @@
+         set_tests_properties(guest_pthread_cancel_recovery guest_pthread_cancel_recovery_coarse PROPERTIES
+             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+     endif()
++    add_test_executable(guest_semaphore_handoff_tests ${LIBS_INCLUDE_DIR}/tests/GuestSemaphoreHandoff.cpp)
++    target_include_directories(guest_semaphore_handoff_tests PRIVATE ${LIBS_INCLUDE_DIR})
++    target_link_libraries(guest_semaphore_handoff_tests PRIVATE libkernel libc)
++    configure_windows_unwind(guest_semaphore_handoff_tests)
++    add_test(NAME guest_semaphore_handoff COMMAND guest_semaphore_handoff_tests)
++    set_tests_properties(guest_semaphore_handoff PROPERTIES TIMEOUT 20)
++    if(WIN32)
++        set_tests_properties(guest_semaphore_handoff PROPERTIES ENVIRONMENT_MODIFICATION
++            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
++    endif()
+     add_test_executable(guest_semaphore_tests ${LIBS_INCLUDE_DIR}/tests/GuestSemaphore.cpp)
+     target_include_directories(guest_semaphore_tests PRIVATE ${LIBS_INCLUDE_DIR})
+     target_link_libraries(guest_semaphore_tests PRIVATE libkernel libc)
+diff --git a/core/libs/prx/libkernel/Semaphore/include/Semaphore.hpp b/core/libs/prx/libkernel/Semaphore/include/Semaphore.hpp
+--- a/core/libs/prx/libkernel/Semaphore/include/Semaphore.hpp
++++ b/core/libs/prx/libkernel/Semaphore/include/Semaphore.hpp
+@@ -3,29 +3,37 @@
+ 
+ #include <chrono>
+ #include <cstdint>
+-#include <mutex>
+-#include <string>
+-
+-#include "SceTypes.hpp"
+-#include "prx/libc/include/General.hpp"
+-#include "prx/libkernel/KernelErrors.hpp"
+-#include "prx/libkernel/Time/include/TimedWait.hpp"
+-
+-constexpr int KERNEL_SEMA_OK = 0;
+-
+-struct KernelSemaPrivate {
+-    KernelSemaPrivate(std::int32_t initCount, std::int32_t maxCount, std::string name, bool isFifo);
+-
+-    std::mutex mutex;
+-    TimedWait::Condition condition;
+-    std::string name;
+-    std::int32_t tokenCount;
+-    std::int32_t initCount;
+-    std::int32_t maxCount;
+-    bool isFifo;
+-    bool deleted = false;
+-    std::int32_t waiterCount = 0;
+-    std::int32_t cancelableCount = 0;
++#include <list>
++#include <mutex>
++#include <string>
++
++#include "SceTypes.hpp"
++#include "prx/libc/include/General.hpp"
++#include "prx/libkernel/KernelErrors.hpp"
++#include "prx/libkernel/Time/include/TimedWait.hpp"
++
++constexpr int KERNEL_SEMA_OK = 0;
++
++struct KernelSemaWaiter {
++    std::int32_t need;
++    bool released = false;
++    int priority = 0;
++};
++
++struct KernelSemaPrivate {
++    KernelSemaPrivate(std::int32_t initCount, std::int32_t maxCount, std::string name, bool isFifo);
++
++    std::mutex mutex;
++    TimedWait::Condition condition;
++    std::string name;
++    std::int32_t tokenCount;
++    std::int32_t initCount;
++    std::int32_t maxCount;
++    bool isFifo;
++    bool priorityQueue = false;
++    bool deleted = false;
++    std::int32_t waiterCount = 0;
++    std::list<KernelSemaWaiter*> queue;
+     std::uint64_t cancelGeneration = 0;
+ };
+ 
+diff --git a/core/libs/prx/libkernel/Semaphore/src/Semaphore.cpp b/core/libs/prx/libkernel/Semaphore/src/Semaphore.cpp
+--- a/core/libs/prx/libkernel/Semaphore/src/Semaphore.cpp
++++ b/core/libs/prx/libkernel/Semaphore/src/Semaphore.cpp
+@@ -1,162 +1,178 @@
+ #include "prx/libkernel/Semaphore/include/Semaphore.hpp"
+-#include "prx/libkernel/Time/include/Time.hpp"
+-#include "prx/libc/include/General.hpp"
+-#include <chrono>
+-#include <cstdio>
+-#include <cstdlib>
+-
+-#include <stdexcept>
+-#include <string>
+-#include <utility>
+-
+-KernelSemaPrivate::KernelSemaPrivate(std::int32_t initCount, std::int32_t maxCount, std::string name, bool isFifo)
+- : name(std::move(name)), tokenCount(initCount), initCount(initCount), maxCount(maxCount), isFifo(isFifo) {
+-}
+-
+-static bool TraceSync() {
+- static const bool enabled = std::getenv("APS5_TRACE_SYNC") != nullptr;
+- return enabled;
+-}
+-
+-extern "C" {
+-
+-int APS5_VABI sceKernelCreateSema(KernelSema* sem, const char* name, uint32_t attr, int init, int max, void* opt) {
+- (void)opt;
+- if (sem == nullptr) {
+-  APS5_INVALID_ARG_EX;
+- }
+- if ((attr & ~0x103u) != 0 || (attr & 3u) == 3u || name == nullptr || init < 0 || max <= 0 || init > max) {
+-  return SCE_KERNEL_ERROR_EINVAL;
+- }
+- if ((attr & 0x100u) != 0) {
+-  NotImplemented_nid_no_patch("sceKernelCreateSema with attribute bit 0x100");
+- }
+-
+- *sem = new KernelSemaPrivate(init, max, std::string(name), attr == 1);
+- if (TraceSync()) std::fprintf(stderr, "[sema] create %p '%s' attr=0x%x init=%d max=%d\n", static_cast<void*>(*sem), name, attr, init, max);
+- return KERNEL_SEMA_OK;
+-}
+-
+-int APS5_VABI sceKernelPollSema(KernelSema sem, int need) {
+- if (sem == nullptr) {
+-  return SCE_KERNEL_ERROR_ESRCH;
+- }
+- if (need <= 0 || need > sem->maxCount) {
+-  return SCE_KERNEL_ERROR_EINVAL;
+- }
+-
+- std::lock_guard<std::mutex> lock(sem->mutex);
+- if (sem->tokenCount < need) {
+-  return SCE_KERNEL_ERROR_EBUSY;
+- }
+- sem->tokenCount -= need;
+- return KERNEL_SEMA_OK;
+-}
+-
+-int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
+- if (sem == nullptr) {
+-  return SCE_KERNEL_ERROR_ESRCH;
+- }
+- if (count <= 0) {
+-  return SCE_KERNEL_ERROR_EINVAL;
+- }
+-
+- std::lock_guard<std::mutex> lock(sem->mutex);
+- if (count > sem->maxCount - sem->tokenCount) {
+-  return SCE_KERNEL_ERROR_EINVAL;
+- }
+- const auto before = sem->tokenCount;
+- sem->tokenCount += count;
+- if (TraceSync()) std::fprintf(stderr, "[sema] signal %p '%s' count=%d have=%d->%d\n", static_cast<void*>(sem), sem->name.c_str(), count, before, sem->tokenCount);
+- sem->condition.NotifyAll();
+- return KERNEL_SEMA_OK;
+-}
+-
+-int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
+- if (sem == nullptr) {
+-  return SCE_KERNEL_ERROR_ESRCH;
+- }
+- if (need <= 0) {
+-  APS5_INVALID_ARG_EX;
+- }
+-
+- std::unique_lock<std::mutex> lock(sem->mutex);
+- const std::uint64_t generation = sem->cancelGeneration;
+- ++sem->waiterCount;
+- ++sem->cancelableCount;
+- struct WaiterGuard {
+-  KernelSemaPrivate* sem;
+-  std::uint64_t generation;
+-  ~WaiterGuard() {
+-   --sem->waiterCount;
+-   if (sem->cancelGeneration == generation) {
+-    --sem->cancelableCount;
+-   }
+-   sem->condition.NotifyAll();
+-  }
+- } waiterGuard{sem, generation};
+-
+- const auto waitStart = std::chrono::steady_clock::now();
+- const void* caller = __builtin_return_address(0);
+- if (TraceSync()) std::fprintf(stderr, "[sema] wait begin %p '%s' need=%d have=%d timeout=%lld caller=%p\n", static_cast<void*>(sem), sem->name.c_str(), need, sem->tokenCount, time ? static_cast<long long>(*time) : -1LL, caller);
+- const auto traceSyncWaitEnd = [&](int result) {
+-  if (TraceSync()) std::fprintf(stderr, "[sema] wait end %p '%s' result=0x%x have=%d caller=%p\n", static_cast<void*>(sem), sem->name.c_str(), result, sem->tokenCount, caller);
+- };
+- const auto traceWait = [&](bool timedOut) {
+-  KernelTraceWait_nid_postfix("sema", caller, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count()), timedOut);
+- };
+- const auto released = [&] { return sem->tokenCount >= need || sem->deleted || sem->cancelGeneration != generation; };
+- if (time == nullptr) {
+-  sem->condition.Wait(lock, released);
+-  traceWait(false);
+-  if (sem->deleted) {
+-   traceSyncWaitEnd(SCE_KERNEL_ERROR_EACCES);
+-   return SCE_KERNEL_ERROR_EACCES;
+-  }
+-  if (sem->cancelGeneration != generation) {
+-   traceSyncWaitEnd(SCE_KERNEL_ERROR_ECANCELED);
+-   return SCE_KERNEL_ERROR_ECANCELED;
+-  }
+-  sem->tokenCount -= need;
+-  traceSyncWaitEnd(KERNEL_SEMA_OK);
+-  return KERNEL_SEMA_OK;
+- }
+-
+- const std::uint64_t deadline = TimedWait::DeadlineNanos(*time);
+- const bool acquired = sem->condition.WaitUntil(lock, deadline, released);
+- *time = static_cast<KernelUseconds>(TimedWait::RemainingMicros(deadline));
+- traceWait(!acquired);
+- if (sem->deleted) {
+-  traceSyncWaitEnd(SCE_KERNEL_ERROR_EACCES);
+-  return SCE_KERNEL_ERROR_EACCES;
+- }
+- if (sem->cancelGeneration != generation) {
+-  traceSyncWaitEnd(SCE_KERNEL_ERROR_ECANCELED);
+-  return SCE_KERNEL_ERROR_ECANCELED;
+- }
+- if (!acquired) {
+-  traceSyncWaitEnd(SCE_KERNEL_ERROR_ETIMEDOUT);
+-  return SCE_KERNEL_ERROR_ETIMEDOUT;
+- }
+- sem->tokenCount -= need;
+- traceSyncWaitEnd(KERNEL_SEMA_OK);
+- return KERNEL_SEMA_OK;
+-}
+-
+-int APS5_VABI sceKernelCancelSema(KernelSema sem, int count, int* threads) {
+- if (sem == nullptr) {
+-  return SCE_KERNEL_ERROR_ESRCH;
+- }
+-
+- std::lock_guard<std::mutex> lock(sem->mutex);
+- if (count > sem->maxCount) {
+-  return SCE_KERNEL_ERROR_EINVAL;
+- }
+- if (threads != nullptr) {
+-  *threads = sem->cancelableCount;
+- }
+- sem->tokenCount = count < 0 ? sem->initCount : count;
+- sem->cancelableCount = 0;
++#include "prx/libkernel/include/Api.hpp"
++#include "prx/libkernel/Time/include/Time.hpp"
++#include "prx/libc/include/General.hpp"
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++
++#include <stdexcept>
++#include <string>
++#include <utility>
++
++KernelSemaPrivate::KernelSemaPrivate(std::int32_t initCount, std::int32_t maxCount, std::string name, bool isFifo)
++ : name(std::move(name)), tokenCount(initCount), initCount(initCount), maxCount(maxCount), isFifo(isFifo) {
++}
++
++static bool TraceSync() {
++ static const bool enabled = std::getenv("APS5_TRACE_SYNC") != nullptr;
++ return enabled;
++}
++
++extern "C" {
++
++int APS5_VABI sceKernelCreateSema(KernelSema* sem, const char* name, uint32_t attr, int init, int max, void* opt) {
++ (void)opt;
++ if (sem == nullptr) {
++  APS5_INVALID_ARG_EX;
++ }
++ if ((attr & ~0x103u) != 0 || (attr & 3u) == 3u || name == nullptr || init < 0 || max <= 0 || init > max) {
++  return SCE_KERNEL_ERROR_EINVAL;
++ }
++ if ((attr & 0x100u) != 0) {
++  NotImplemented_nid_no_patch("sceKernelCreateSema with attribute bit 0x100");
++ }
++
++ *sem = new KernelSemaPrivate(init, max, std::string(name), (attr & 3u) == 1u);
++ (*sem)->priorityQueue = (attr & 3u) == 2u;
++ if (TraceSync()) std::fprintf(stderr, "[sema] create %p '%s' attr=0x%x init=%d max=%d\n", static_cast<void*>(*sem), name, attr, init, max);
++ return KERNEL_SEMA_OK;
++}
++
++int APS5_VABI sceKernelPollSema(KernelSema sem, int need) {
++ if (sem == nullptr) {
++  return SCE_KERNEL_ERROR_ESRCH;
++ }
++ if (need <= 0 || need > sem->maxCount) {
++  return SCE_KERNEL_ERROR_EINVAL;
++ }
++
++ std::lock_guard<std::mutex> lock(sem->mutex);
++ if (sem->tokenCount < need) {
++  return SCE_KERNEL_ERROR_EBUSY;
++ }
++ sem->tokenCount -= need;
++ return KERNEL_SEMA_OK;
++}
++
++int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
++ if (sem == nullptr) {
++  return SCE_KERNEL_ERROR_ESRCH;
++ }
++ if (count <= 0) {
++  return SCE_KERNEL_ERROR_EINVAL;
++ }
++
++ std::lock_guard<std::mutex> lock(sem->mutex);
++ if (count > sem->maxCount - sem->tokenCount) {
++  return SCE_KERNEL_ERROR_EINVAL;
++ }
++ const auto before = sem->tokenCount;
++ sem->tokenCount += count;
++ if (TraceSync()) std::fprintf(stderr, "[sema] signal %p '%s' count=%d have=%d->%d\n", static_cast<void*>(sem), sem->name.c_str(), count, before, sem->tokenCount);
++ for (auto it = sem->queue.begin(); it != sem->queue.end();) {
++  KernelSemaWaiter* waiter = *it;
++  if (waiter->need > sem->tokenCount) {
++   ++it;
++   continue;
++  }
++  sem->tokenCount -= waiter->need;
++  waiter->released = true;
++  it = sem->queue.erase(it);
++ }
++ sem->condition.NotifyAll();
++ return KERNEL_SEMA_OK;
++}
++
++int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
++ if (sem == nullptr) {
++  return SCE_KERNEL_ERROR_ESRCH;
++ }
++ if (need <= 0) {
++  APS5_INVALID_ARG_EX;
++ }
++
++ std::unique_lock<std::mutex> lock(sem->mutex);
++ const void* caller = __builtin_return_address(0);
++ if (TraceSync()) std::fprintf(stderr, "[sema] wait begin %p '%s' need=%d have=%d timeout=%lld caller=%p\n", static_cast<void*>(sem), sem->name.c_str(), need, sem->tokenCount, time ? static_cast<long long>(*time) : -1LL, caller);
++ const auto traceSyncWaitEnd = [&](int result) {
++  if (TraceSync()) std::fprintf(stderr, "[sema] wait end %p '%s' result=0x%x have=%d caller=%p\n", static_cast<void*>(sem), sem->name.c_str(), result, sem->tokenCount, caller);
++ };
++ if (sem->deleted) {
++  traceSyncWaitEnd(SCE_KERNEL_ERROR_EACCES);
++  return SCE_KERNEL_ERROR_EACCES;
++ }
++ if (sem->tokenCount >= need) {
++  sem->tokenCount -= need;
++  traceSyncWaitEnd(KERNEL_SEMA_OK);
++  return KERNEL_SEMA_OK;
++ }
++ const std::uint64_t generation = sem->cancelGeneration;
++ KernelSemaWaiter waiter{need};
++ if (sem->priorityQueue && scePthreadGetprio(scePthreadSelf(), &waiter.priority) == 0) {
++  const auto lower = std::find_if(sem->queue.begin(), sem->queue.end(), [&](const KernelSemaWaiter* queued) { return queued->priority > waiter.priority; });
++  sem->queue.insert(lower, &waiter);
++ } else {
++  sem->queue.push_back(&waiter);
++ }
++ ++sem->waiterCount;
++ struct WaiterGuard {
++  KernelSemaPrivate* sem;
++  KernelSemaWaiter* waiter;
++  ~WaiterGuard() {
++   --sem->waiterCount;
++   if (!waiter->released) {
++    sem->queue.remove(waiter);
++   }
++   sem->condition.NotifyAll();
++  }
++ } waiterGuard{sem, &waiter};
++
++ const auto waitStart = std::chrono::steady_clock::now();
++ const auto traceWait = [&](bool timedOut) {
++  KernelTraceWait_nid_postfix("sema", caller, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count()), timedOut);
++ };
++ const auto released = [&] { return waiter.released || sem->deleted || sem->cancelGeneration != generation; };
++ bool acquired = true;
++ if (time == nullptr) {
++  sem->condition.Wait(lock, released);
++ } else {
++  const std::uint64_t deadline = TimedWait::DeadlineNanos(*time);
++  acquired = sem->condition.WaitUntil(lock, deadline, released);
++  *time = static_cast<KernelUseconds>(TimedWait::RemainingMicros(deadline));
++ }
++ traceWait(!acquired);
++ if (waiter.released) {
++  traceSyncWaitEnd(KERNEL_SEMA_OK);
++  return KERNEL_SEMA_OK;
++ }
++ if (sem->deleted) {
++  traceSyncWaitEnd(SCE_KERNEL_ERROR_EACCES);
++  return SCE_KERNEL_ERROR_EACCES;
++ }
++ if (sem->cancelGeneration != generation) {
++  traceSyncWaitEnd(SCE_KERNEL_ERROR_ECANCELED);
++  return SCE_KERNEL_ERROR_ECANCELED;
++ }
++ traceSyncWaitEnd(SCE_KERNEL_ERROR_ETIMEDOUT);
++ return SCE_KERNEL_ERROR_ETIMEDOUT;
++}
++
++int APS5_VABI sceKernelCancelSema(KernelSema sem, int count, int* threads) {
++ if (sem == nullptr) {
++  return SCE_KERNEL_ERROR_ESRCH;
++ }
++
++ std::lock_guard<std::mutex> lock(sem->mutex);
++ if (count > sem->maxCount) {
++  return SCE_KERNEL_ERROR_EINVAL;
++ }
++ if (threads != nullptr) {
++  *threads = static_cast<int>(sem->queue.size());
++ }
++ sem->tokenCount = count < 0 ? sem->initCount : count;
++ sem->queue.clear();
+  ++sem->cancelGeneration;
+  sem->condition.NotifyAll();
+  return KERNEL_SEMA_OK;
+diff --git a/core/libs/tests/GuestSemaphoreHandoff.cpp b/core/libs/tests/GuestSemaphoreHandoff.cpp
+new file mode 100644
+--- /dev/null
++++ b/core/libs/tests/GuestSemaphoreHandoff.cpp
+@@ -0,0 +1,146 @@
++#include "prx/libkernel/Semaphore/include/Semaphore.hpp"
++#include "prx/libkernel/include/Api.hpp"
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <thread>
++
++static constexpr int SCE_OK = 0;
++static constexpr std::uint32_t SemaFifo = 1;
++static constexpr std::uint32_t SemaPriority = 2;
++
++static void Require(bool value) { if (!value) std::abort(); }
++
++struct Waiter {
++    KernelSema sem = nullptr;
++    int result = -1;
++};
++
++static void* APS5_VABI Wait(void* arg) {
++    auto& waiter = *static_cast<Waiter*>(arg);
++    KernelUseconds timeout = 1000000;
++    waiter.result = sceKernelWaitSema(waiter.sem, 1, &timeout);
++    return nullptr;
++}
++
++static std::atomic<int> released{0};
++
++static int QueuedCount(KernelSema sem) {
++    std::lock_guard<std::mutex> lock(sem->mutex);
++    return static_cast<int>(sem->queue.size());
++}
++
++struct QueuedWaiter {
++    KernelSema sem = nullptr;
++    int need = 1;
++    int priority = 0;
++    int result = -1;
++    std::atomic<int> order{0};
++};
++
++static void* APS5_VABI WaitInQueue(void* arg) {
++    auto& waiter = *static_cast<QueuedWaiter*>(arg);
++    if (waiter.priority != 0) Require(scePthreadSetprio(scePthreadSelf(), waiter.priority) == SCE_OK);
++    KernelUseconds timeout = 5000000;
++    waiter.result = sceKernelWaitSema(waiter.sem, waiter.need, &timeout);
++    waiter.order = ++released;
++    return nullptr;
++}
++
++static void WaitForQueue(KernelSema sem, int count) {
++    for (int i = 0; i < 5000 && QueuedCount(sem) != count; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    Require(QueuedCount(sem) == count);
++}
++
++static void WaitForReleased(int count) {
++    for (int i = 0; i < 5000 && released.load() < count; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    Require(released.load() == count);
++}
++
++static Pthread StartQueued(QueuedWaiter& waiter, int queued) {
++    Pthread thread = nullptr;
++    Require(scePthreadCreate(&thread, nullptr, WaitInQueue, &waiter, nullptr) == SCE_OK);
++    WaitForQueue(waiter.sem, queued);
++    return thread;
++}
++
++static void CheckPassesOverALargerNeed() {
++    released = 0;
++    KernelSema sem = nullptr;
++    Require(sceKernelCreateSema(&sem, "handoff-skip", SemaFifo, 0, 4, nullptr) == SCE_OK);
++    QueuedWaiter large{sem, 2};
++    QueuedWaiter small{sem, 1};
++    const Pthread largeThread = StartQueued(large, 1);
++    const Pthread smallThread = StartQueued(small, 2);
++    Require(sceKernelSignalSema(sem, 1) == SCE_OK);
++    WaitForReleased(1);
++    Require(small.order == 1 && small.result == SCE_OK);
++    Require(QueuedCount(sem) == 1 && sceKernelPollSema(sem, 1) == SCE_KERNEL_ERROR_EBUSY);
++    Require(sceKernelSignalSema(sem, 2) == SCE_OK);
++    WaitForReleased(2);
++    Require(large.order == 2 && large.result == SCE_OK);
++    Require(scePthreadJoin(largeThread, nullptr) == SCE_OK && scePthreadJoin(smallThread, nullptr) == SCE_OK);
++    Require(sceKernelPollSema(sem, 1) == SCE_KERNEL_ERROR_EBUSY);
++    Require(sceKernelDeleteSema(sem) == SCE_OK);
++}
++
++static void CheckDeletedRefusesFreeTokens() {
++    KernelSema sem = nullptr;
++    Require(sceKernelCreateSema(&sem, "handoff-deleted", SemaFifo, 2, 2, nullptr) == SCE_OK);
++    {
++        std::lock_guard<std::mutex> lock(sem->mutex);
++        sem->deleted = true;
++    }
++    Require(sceKernelWaitSema(sem, 1, nullptr) == SCE_KERNEL_ERROR_EACCES);
++    {
++        std::lock_guard<std::mutex> lock(sem->mutex);
++        Require(sem->tokenCount == 2);
++        sem->deleted = false;
++    }
++    Require(sceKernelDeleteSema(sem) == SCE_OK);
++}
++
++static void CheckServesInOrder(std::uint32_t attr, int firstPriority, int secondPriority, bool firstServedFirst) {
++    released = 0;
++    KernelSema sem = nullptr;
++    Require(sceKernelCreateSema(&sem, "handoff-order", attr, 0, 2, nullptr) == SCE_OK);
++    QueuedWaiter first{sem, 1, firstPriority};
++    QueuedWaiter second{sem, 1, secondPriority};
++    const Pthread firstThread = StartQueued(first, 1);
++    const Pthread secondThread = StartQueued(second, 2);
++    Require(sceKernelSignalSema(sem, 1) == SCE_OK);
++    WaitForReleased(1);
++    Require((firstServedFirst ? first.order : second.order) == 1);
++    Require(QueuedCount(sem) == 1);
++    Require(sceKernelSignalSema(sem, 1) == SCE_OK);
++    WaitForReleased(2);
++    Require(first.result == SCE_OK && second.result == SCE_OK);
++    Require(scePthreadJoin(firstThread, nullptr) == SCE_OK && scePthreadJoin(secondThread, nullptr) == SCE_OK);
++    Require(sceKernelDeleteSema(sem) == SCE_OK);
++}
++
++int main() {
++    for (int i = 0; i < 20; ++i) {
++        KernelSema sem = nullptr;
++        Require(sceKernelCreateSema(&sem, "handoff", 1, 0, 1, nullptr) == SCE_OK);
++        Waiter waiter{sem};
++        Pthread thread = nullptr;
++        Require(scePthreadCreate(&thread, nullptr, Wait, &waiter, nullptr) == SCE_OK);
++        WaitForQueue(sem, 1);
++        Require(sceKernelSignalSema(sem, 1) == SCE_OK);
++        Require(sceKernelPollSema(sem, 1) == SCE_KERNEL_ERROR_EBUSY);
++        Require(scePthreadJoin(thread, nullptr) == SCE_OK);
++        Require(waiter.result == SCE_OK);
++        Require(sceKernelPollSema(sem, 1) == SCE_KERNEL_ERROR_EBUSY);
++        Require(sceKernelDeleteSema(sem) == SCE_OK);
++    }
++    CheckPassesOverALargerNeed();
++    CheckDeletedRefusesFreeTokens();
++    CheckServesInOrder(SemaFifo, 700, 700, true);
++    CheckServesInOrder(SemaFifo, 767, 256, true);
++    CheckServesInOrder(SemaPriority, 767, 256, false);
++    CheckServesInOrder(SemaPriority, 256, 767, true);
++    CheckServesInOrder(SemaPriority, 700, 700, true);
++    return 0;
++}
+diff --git a/core/libs/tests/SemaphoreTrace.cpp b/core/libs/tests/SemaphoreTrace.cpp
+--- a/core/libs/tests/SemaphoreTrace.cpp
++++ b/core/libs/tests/SemaphoreTrace.cpp
+@@ -5,6 +5,8 @@
+ #include <thread>
+ 
+ extern "C" void KernelTraceWait_nid_postfix(const char*, const void*, std::uint64_t, bool) {}
++extern "C" Pthread APS5_VABI scePthreadSelf() { return nullptr; }
++extern "C" int APS5_VABI scePthreadGetprio(Pthread, int*) { return -1; }
+ 
+ int main() {
+     KernelSema sem = nullptr;
