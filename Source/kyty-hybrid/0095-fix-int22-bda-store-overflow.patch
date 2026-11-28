@@ -1,0 +1,183 @@
+From d141b5f0af2523152a548c589880d5ab63befd76 Mon Sep 17 00:00:00 2001
+From: Jetsku <59046009+Jetsku@users.noreply.github.com>
+Subject: [PATCH] Backport int22 BDA store log overflow recovery
+
+Adapt upstream d141b5f0af2523152a548c589880d5ab63befd76 to the synchronous int21 collector. Avoid transferring the enlarged log unless necessary; invalidate incompatible shader caches. The pinned base has no asynchronous settle implementation.
+
+Co-authored-by: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.h b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.h
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+@@ -91,8 +91,12 @@
+ 	static constexpr uint64_t BDA_WRITE_BITMAP_WORD   = FAULT_BITMAP_WORDS;
+ 	static constexpr uint64_t BDA_DROPPED_WRITES_WORD = 2 * FAULT_BITMAP_WORDS;
+ 	static constexpr uint64_t BDA_STORE_LOG_WORD      = BDA_DROPPED_WRITES_WORD + 4;
+-	static constexpr uint64_t BDA_STORE_LOG_ENTRIES   = 4096;
+-	static constexpr uint64_t BDA_STORE_LOG_BYTES     = (4 + 4 * BDA_STORE_LOG_ENTRIES) * sizeof(uint32_t);
++	// Match int22: retain up to 262144 raw stores, but download only the usual prefix.
++	static constexpr uint64_t BDA_STORE_LOG_ENTRIES   = 262144;
++	static constexpr uint64_t BDA_STORE_LOG_PREFIX    = 4096;
++	static constexpr uint64_t BDA_STORE_LOG_BYTES     = (4 + 4 * BDA_STORE_LOG_ENTRIES) * sizeof(uint32_t);
++	static constexpr uint64_t BDA_STORE_LOG_PREFIX_BYTES =
++	    (4 + 4 * BDA_STORE_LOG_PREFIX) * sizeof(uint32_t);
+ 	static constexpr uint64_t BDA_WRITES_FAULT_BUFFER_SIZE =
+ 	    BDA_STORE_LOG_WORD * sizeof(uint32_t) + BDA_STORE_LOG_BYTES;
+ 
+diff --git a/src/graphics/host_gpu/renderer/cache/faultManager.cpp b/src/graphics/host_gpu/renderer/cache/faultManager.cpp
+--- a/src/graphics/host_gpu/renderer/cache/faultManager.cpp
++++ b/src/graphics/host_gpu/renderer/cache/faultManager.cpp
+@@ -29,7 +29,7 @@
+ constexpr size_t BdaPagesAreaSize = MaxBdaWritePages * sizeof(uint64_t);
+ // KYTY_BDA_STORE_LOG: the copy of the store log (its count, then its entries) follows the counter.
+ constexpr size_t BdaStoreLogOffset = BdaPagesAreaSize + 16;
+-constexpr size_t BdaDownloadSize   = BdaStoreLogOffset + BufferCache::BDA_STORE_LOG_BYTES;
++constexpr size_t BdaDownloadSize   = BdaStoreLogOffset + BufferCache::BDA_STORE_LOG_PREFIX_BYTES;
+ 
+ bool StoreLogEnabled() {
+ 	return ShaderRecompiler::GetCodegenOptions().bda_store_log;
+@@ -255,7 +255,7 @@
+ 	constexpr auto log_offset = BufferCache::BDA_STORE_LOG_WORD * sizeof(uint32_t);
+ 	if (store_log) {
+ 		const vk::BufferCopy log_copy {log_offset, BdaStoreLogOffset,
+-		                               BufferCache::BDA_STORE_LOG_BYTES};
++		                               BufferCache::BDA_STORE_LOG_PREFIX_BYTES};
+ 		command.copyBuffer(m_fault_buffer.Handle(), m_bda_download->Handle(), 1, &log_copy);
+ 	}
+ 	// The counter and the store log's count (the words between them are unused) are cleared.
+@@ -314,8 +314,10 @@
+ 		m_bda_download->Invalidate(BdaStoreLogOffset, sizeof(uint32_t));
+ 		uint32_t logged = 0;
+ 		std::memcpy(&logged, mapped + BdaStoreLogOffset, sizeof(logged));
+-		const auto entries = std::min<size_t>(logged, BufferCache::BDA_STORE_LOG_ENTRIES);
+-		result.log_overflow = logged - static_cast<uint32_t>(entries);
++		const auto kept = std::min<size_t>(logged, BufferCache::BDA_STORE_LOG_ENTRIES);
++		const auto entries = std::min<size_t>(kept, BufferCache::BDA_STORE_LOG_PREFIX);
++		result.log_overflow = logged - static_cast<uint32_t>(kept);
++		result.log_tail = static_cast<uint32_t>(kept - entries);
+ 		if (entries != 0) {
+ 			constexpr size_t first = BdaStoreLogOffset + 4 * sizeof(uint32_t);
+ 			m_bda_download->Invalidate(first, entries * sizeof(BdaStore));
+@@ -323,8 +325,69 @@
+ 			std::memcpy(result.stores.data(), mapped + first, entries * sizeof(BdaStore));
+ 		}
+ 	}
+-	return result;
+-}
+-
+-} // namespace Libs::Graphics
++	if (result.log_tail != 0) {
++		FetchBdaStoreLogTail(result);
++	}
++	return result;
++}
++
++// The store log's entries past the prefix the settle downloaded, appended to writes.stores. Nothing
++// was recorded since the dispatch but the settle's own parse and copies, which clear the log's
++// count and leave its entries alone, so the device log still holds this dispatch's stores.
++void FaultManager::FetchBdaStoreLogTail(BdaWrites& writes) {
++	KYTY_GPU_OP_SITE("fault.bda-log-tail");
++	constexpr uint64_t tail_offset =
++	    (BufferCache::BDA_STORE_LOG_WORD + 4 + 4 * BufferCache::BDA_STORE_LOG_PREFIX) * sizeof(uint32_t);
++	constexpr uint64_t tail_capacity =
++	    (BufferCache::BDA_STORE_LOG_ENTRIES - BufferCache::BDA_STORE_LOG_PREFIX) * sizeof(BdaStore);
++	const uint64_t bytes = uint64_t {writes.log_tail} * sizeof(BdaStore);
++	EXIT_IF(bytes > tail_capacity);
++	if (m_bda_tail_download == nullptr) {
++		m_bda_tail_download = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Download, 0,
++		                                               AllFlags, tail_capacity);
++	}
++	m_scheduler.EndRendering();
++	const auto command = m_scheduler.Current().HelperSink();
++	vk::BufferMemoryBarrier2 before {};
++	before.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
++	before.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
++	before.dstStageMask  = vk::PipelineStageFlagBits2::eTransfer;
++	before.dstAccessMask = vk::AccessFlagBits2::eTransferRead;
++	before.buffer        = m_fault_buffer.Handle();
++	before.offset        = tail_offset;
++	before.size          = bytes;
++	vk::DependencyInfo dependency {};
++	dependency.bufferMemoryBarrierCount = 1;
++	dependency.pBufferMemoryBarriers    = &before;
++	command.pipelineBarrier2(dependency);
++	const vk::BufferCopy copy {tail_offset, 0, bytes};
++	command.copyBuffer(m_fault_buffer.Handle(), m_bda_tail_download->Handle(), 1, &copy);
++	// The next BDA writer may log there again; the host sees the copy.
++	std::array<vk::BufferMemoryBarrier2, 2> after {};
++	after[0].srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
++	after[0].srcAccessMask = vk::AccessFlagBits2::eTransferRead;
++	after[0].dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
++	after[0].dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
++	after[0].buffer        = m_fault_buffer.Handle();
++	after[0].offset        = tail_offset;
++	after[0].size          = bytes;
++	after[1].srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
++	after[1].srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
++	after[1].dstStageMask  = vk::PipelineStageFlagBits2::eHost;
++	after[1].dstAccessMask = vk::AccessFlagBits2::eHostRead;
++	after[1].buffer        = m_bda_tail_download->Handle();
++	after[1].offset        = 0;
++	after[1].size          = bytes;
++	dependency.bufferMemoryBarrierCount = static_cast<uint32_t>(after.size());
++	dependency.pBufferMemoryBarriers    = after.data();
++	command.pipelineBarrier2(dependency);
++	m_scheduler.Wait(m_scheduler.CurrentTick());
++	m_bda_tail_download->Invalidate(0, bytes);
++	const auto first = writes.stores.size();
++	writes.stores.resize(first + writes.log_tail);
++	std::memcpy(writes.stores.data() + first, m_bda_tail_download->Mapped().data(), bytes);
++	writes.log_tail = 0;
++}
++
++} // namespace Libs::Graphics
+ 
+diff --git a/src/graphics/host_gpu/renderer/cache/faultManager.h b/src/graphics/host_gpu/renderer/cache/faultManager.h
+--- a/src/graphics/host_gpu/renderer/cache/faultManager.h
++++ b/src/graphics/host_gpu/renderer/cache/faultManager.h
+@@ -46,7 +46,8 @@
+ 		std::vector<uint64_t> pages;
+ 		std::vector<BdaStore> stores;
+ 		uint32_t              dropped      = 0;
+-		uint32_t              log_overflow = 0;
++		uint32_t              log_overflow = 0;
++		uint32_t              log_tail = 0; // pending tail entries, zero on return from CollectBdaWrites
+ 		bool                  overflow     = false;
+ 	};
+ 	[[nodiscard]] BdaWrites CollectBdaWrites();
+@@ -64,7 +65,9 @@
+ 	vk::PipelineLayout                         m_fault_process_pipeline_layout = nullptr;
+ 	// KYTY_BDA_WRITES only (created on first use).
+ 	vk::Pipeline                               m_bda_pages_pipeline = nullptr;
+-	std::unique_ptr<Buffer>                    m_bda_download;
++	std::unique_ptr<Buffer>                    m_bda_download;
++	std::unique_ptr<Buffer>                    m_bda_tail_download;
++	void                                       FetchBdaStoreLogTail(BdaWrites& writes);
+ 	bool                                       m_bda_region_cleared = false;
+ };
+ 
+diff --git a/src/graphics/shader/recompiler/CodegenFingerprint.cpp b/src/graphics/shader/recompiler/CodegenFingerprint.cpp
+--- a/src/graphics/shader/recompiler/CodegenFingerprint.cpp
++++ b/src/graphics/shader/recompiler/CodegenFingerprint.cpp
+@@ -167,7 +167,8 @@
+ 	// BDA page-table walk bakes into SPIR-V (spirvEmitterMemory.cpp).
+ 	b.U8(Common::RendererBatchEnabled() ? 1u : 0u);
+ 	b.U64(BufferCache::CACHING_PAGEBITS);
+-	b.U64(BufferCache::CACHING_PAGESIZE);
++	b.U64(BufferCache::CACHING_PAGESIZE);
++	b.U64(BufferCache::BDA_STORE_LOG_ENTRIES); // codegen capacity changes shader semantics
+ 
+ 	b.U32(static_cast<uint32_t>(kSwitchCount));
+ 	for (size_t i = 0; i < kSwitchCount; ++i) {
+diff --git a/src/codegen_version.cmake b/src/codegen_version.cmake
+--- a/src/codegen_version.cmake
++++ b/src/codegen_version.cmake
+@@ -8,7 +8,7 @@
+ # The build fails when a file of the set includes a project header that is neither in the set nor
+ # exempt below: the version would not see changes to it. Exempt headers cannot change what a
+ # translation produces, or the fingerprint records the values they contribute (rendererBatch.h:
+-# KYTY_RENDERER_BATCH; bufferCache.h: CACHING_PAGEBITS/CACHING_PAGESIZE).
++# KYTY_RENDERER_BATCH; bufferCache.h: CACHING_PAGEBITS/CACHING_PAGESIZE and BDA_STORE_LOG_ENTRIES).
+ #
+ # Inputs: SOURCE_ROOT (src), FILE_LIST (absolute paths, one per line), OUTPUT_FILE, COMPILER.
+ 
