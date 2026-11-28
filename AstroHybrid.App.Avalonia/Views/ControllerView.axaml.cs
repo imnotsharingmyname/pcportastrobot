@@ -43,6 +43,7 @@ public partial class ControllerView : UserControl, IPageRefresh
         _settings = settings;
 
         ControllerBox.ItemsSource = ControllerLabels;
+        SpeakerVolumeBox.ItemsSource = Enumerable.Range(0, 21).Select(i => $"{i * 5}%").ToArray();
         RumbleBox.ItemsSource = RumbleOptions.Select(option => option.Label).ToArray();
 
         Loaded += (_, _) => RefreshPage();
@@ -63,6 +64,7 @@ public partial class ControllerView : UserControl, IPageRefresh
         SwitchBoostBox.IsChecked = _settings.RumbleSwitchBoost;
         MotionBox.IsChecked = _settings.PadMotion;
         DsSpeakerBox.IsChecked = _settings.DsWirelessSpeaker;
+        SpeakerVolumeBox.SelectedIndex = (Math.Clamp(_settings.DsSpeakerVolume, 0, 100) + 2) / 5;
         DsHapticsBox.IsChecked = _settings.DsWirelessHaptics;
 
         _loading = false;
@@ -120,6 +122,7 @@ public partial class ControllerView : UserControl, IPageRefresh
         _settings.RumbleSwitchBoost = SwitchBoostBox.IsChecked == true;
         _settings.PadMotion = MotionBox.IsChecked == true;
         _settings.DsWirelessSpeaker = DsSpeakerBox.IsChecked == true;
+        if (SpeakerVolumeBox.SelectedIndex >= 0) _settings.DsSpeakerVolume = SpeakerVolumeBox.SelectedIndex * 5;
         _settings.DsWirelessHaptics = DsHapticsBox.IsChecked == true;
 
         _backend.SaveSettings(_settings);

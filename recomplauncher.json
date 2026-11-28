@@ -186,6 +186,14 @@
       "defaults": { "dsSpeaker": "true" }
     },
     {
+      "id": "dualsense-speaker-volume",
+      "label": "DualSense speaker volume",
+      "help": "Adjust controller speaker output without changing haptics (0 to 100 percent).",
+      "group": "Controls",
+      "slider": { "key": "dsSpeakerVolume", "min": 0, "max": 100, "step": 5, "format": "%.0f" },
+      "defaults": { "dsSpeakerVolume": "100" }
+    },
+    {
       "id": "trigger-strength",
       "label": "Adaptive trigger strength",
       "help": "DualSense adaptive trigger resistance and vibration in percent (0 = off, 100 = game default).",

@@ -65,6 +65,10 @@
                      Text="Adaptive trigger state is forwarded from the game when trigger state is on. The wireless options use the controller's Bluetooth HID channels." />
           <CheckBox x:Name="DsSpeakerBox" Content="DualSense Wireless Speaker over Bluetooth"
                     IsCheckedChanged="OnCheckCommitted" Margin="0,12,0,0" />
+          <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
+            <TextBlock Text="Speaker volume (%)" VerticalAlignment="Center"/>
+            <ComboBox x:Name="SpeakerVolumeBox" Width="120" SelectionChanged="OnCommitted"/>
+          </StackPanel>
           <CheckBox x:Name="DsHapticsBox" Content="DualSense Wireless HD Haptics over Bluetooth"
                     IsCheckedChanged="OnCheckCommitted" Margin="0,8,0,0" />
           <TextBlock Classes="muted" Margin="0,8,0,0"

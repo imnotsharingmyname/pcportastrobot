@@ -1,0 +1,23 @@
+From: AstroHybrid contributors
+Subject: [PATCH] Scale DualSense speaker independently from haptics
+
+diff --git a/src/hybrid/kytyGpuBridge.cpp b/src/hybrid/kytyGpuBridge.cpp
+--- a/src/hybrid/kytyGpuBridge.cpp
++++ b/src/hybrid/kytyGpuBridge.cpp
+@@ -950,7 +950,15 @@
+ 	const float setting_scale = Libs::Controller::GetSettingScale(
+ 	    is_speaker != 0 ? Libs::Controller::Setting::SpeakerVolume
+ 	                    : Libs::Controller::Setting::VibrationIntensity);
++	static const float speaker_scale = [] {
++		const char* value = std::getenv("ASTROHYBRID_DS_SPEAKER_VOLUME");
++		if (value == nullptr || *value == '\0') return 1.0f;
++		char* end = nullptr;
++		const long percent = std::strtol(value, &end, 10);
++		if (end == value || *end != '\0') return 1.0f;
++		return static_cast<float>(std::clamp(percent, 0L, 100L)) / 100.0f;
++	}();
+ 	static constexpr int kUnityVolume[8] = {32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768};
+ 	return Libs::Controller::DualSenseHaptics::Queue(
+ 	    stream_slot, controller, data, frames, channels, is_float != 0, kUnityVolume,
+-	    gain * setting_scale, nullptr);
++	    gain * setting_scale * (is_speaker != 0 ? speaker_scale : 1.0f), nullptr);

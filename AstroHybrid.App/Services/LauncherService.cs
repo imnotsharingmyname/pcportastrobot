@@ -538,6 +538,7 @@ namespace AstroHybrid.App.Services
             // DualSense adaptive triggers: resistance and vibration in percent, 0 = off (#160).
             env["ASTROHYBRID_TRIGGER_STRENGTH"] = Math.Max(0, Math.Min(100, settings.TriggerStrength)).ToString();
             // DualSense speaker off: the controller speaker's sounds are dropped, wired or Bluetooth (#143).
+            env["ASTROHYBRID_DS_SPEAKER_VOLUME"] = Math.Max(0, Math.Min(100, settings.DualSenseSpeakerVolume)).ToString(System.Globalization.CultureInfo.InvariantCulture);
             if (!settings.DualSenseSpeaker)
             {
                 env["ASTROHYBRID_DS_SPEAKER"] = "0";

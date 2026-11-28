@@ -132,6 +132,13 @@
                               IsChecked="{Binding DualSenseSpeaker}"
                               Style="{StaticResource ModernCheckBoxStyle}" Margin="0,10,0,0"/>
 
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Speaker volume (%)" Style="{StaticResource BodyTextStyle}" VerticalAlignment="Center" Width="150"/>
+                        <Slider Minimum="0" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True" Width="150"
+                                Value="{Binding DualSenseSpeakerVolume, Mode=TwoWay}"/>
+                        <TextBlock Text="{Binding DualSenseSpeakerVolume}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                    </StackPanel>
+
                     <TextBlock Text="Speaker audio and HD haptics automatically use the connected DualSense USB or Bluetooth path. Untick the speaker to keep the controller silent (for example at night with headphones); haptics stay on." Style="{StaticResource MutedTextStyle}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
             </Border>

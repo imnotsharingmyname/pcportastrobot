@@ -39,6 +39,7 @@ public sealed class AppSettings
     public int RumblePercent { get; set; } = 100;
     public bool RumbleSwitchBoost { get; set; }
     public bool DsWirelessSpeaker { get; set; }
+    public int DsSpeakerVolume { get; set; } = 100;
     public bool DsWirelessHaptics { get; set; }
     public bool TriggerState { get; set; } = true;
 
@@ -328,6 +329,9 @@ public sealed class Backend
         arguments.Add("--env");
         arguments.Add("ASTROHYBRID_DS_WIRELESS_SPEAKER");
         arguments.Add(settings.DsWirelessSpeaker ? "1" : "0");
+        arguments.Add("--env");
+        arguments.Add("ASTROHYBRID_DS_SPEAKER_VOLUME");
+        arguments.Add(Math.Clamp(settings.DsSpeakerVolume, 0, 100).ToString(System.Globalization.CultureInfo.InvariantCulture));
         arguments.Add("--env");
         arguments.Add("ASTROHYBRID_DS_WIRELESS_HAPTICS");
         arguments.Add(settings.DsWirelessHaptics ? "1" : "0");
