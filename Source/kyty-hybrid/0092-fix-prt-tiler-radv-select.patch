@@ -1,0 +1,55 @@
+From: AstroHybrid contributors <noreply@localhost>
+Subject: [PATCH] Backport PRT tiler scalar-control-flow fix
+
+Upstream d1729f49f7082bd62bdaf318bd78772d22517142 by DenizSAHIN570; standard64_3d.inc already uses scalar selectors on the pinned base.
+
+diff --git a/src/graphics/host_gpu/shaders/gpu_tiler_prt.comp b/src/graphics/host_gpu/shaders/gpu_tiler_prt.comp
+--- a/src/graphics/host_gpu/shaders/gpu_tiler_prt.comp
++++ b/src/graphics/host_gpu/shaders/gpu_tiler_prt.comp
+@@ -8,11 +8,17 @@ uvec3 block_extent() {
+ 	uint width = ELEMENT_BYTES <= 2 ? 256u : (ELEMENT_BYTES <= 8 ? 128u : 64u);
+ 	return uvec3(width, BLOCK_BYTES / (width * ELEMENT_BYTES), 1u);
+ }
++// Early returns rather than a ternary chain: a specialization-constant select between uvec4
++// values is miscompiled by some drivers (observed on RADV, Mesa 26.2), see GpuTilerCpuParity.
++uvec4 prt_shifts() {
++	if (ELEMENT_BYTES == 1) return uvec4(7, 7, 6, 6);
++	if (ELEMENT_BYTES == 2) return uvec4(7, 6, 6, 5);
++	if (ELEMENT_BYTES == 4) return uvec4(6, 6, 5, 5);
++	if (ELEMENT_BYTES == 8) return uvec4(6, 5, 5, 4);
++	return uvec4(5, 5, 4, 4);
++}
+ uint block_offset(uvec3 p) {
+-	uvec4 s = ELEMENT_BYTES == 1 ? uvec4(7, 7, 6, 6) :
+-	          ELEMENT_BYTES == 2 ? uvec4(7, 6, 6, 5) :
+-	          ELEMENT_BYTES == 4 ? uvec4(6, 6, 5, 5) :
+-	          ELEMENT_BYTES == 8 ? uvec4(6, 5, 5, 4) : uvec4(5, 5, 4, 4);
++	uvec4 s = prt_shifts();
+ 	uint delta = (((p.x >> s.x) & 1u) << 8) ^ (((p.y >> s.y) & 1u) << 9) ^
+ 	             (((p.x >> s.z) & 1u) << 10) ^ (((p.y >> s.w) & 1u) << 11);
+ 	return standard64_offset(p.xy) ^ delta;
+diff --git a/src/graphics/host_gpu/shaders/gpu_tiler_prt_3d.comp b/src/graphics/host_gpu/shaders/gpu_tiler_prt_3d.comp
+--- a/src/graphics/host_gpu/shaders/gpu_tiler_prt_3d.comp
++++ b/src/graphics/host_gpu/shaders/gpu_tiler_prt_3d.comp
+@@ -5,11 +5,17 @@ layout(constant_id = 1) const uint TILE = 0u;
+ const uint BLOCK_BYTES = 65536u;
+ #include "gpu_tiler_standard64_3d.inc"
+ uvec3 block_extent() { return standard64_3d_extent(); }
++// Early returns rather than a ternary chain: a specialization-constant select between uvec4
++// values is miscompiled by some drivers (observed on RADV, Mesa 26.2), see GpuTilerCpuParity.
++uvec4 prt_3d_shifts() {
++	if (ELEMENT_BYTES == 1) return uvec4(4, 5, 4, 4);
++	if (ELEMENT_BYTES == 2) return uvec4(4, 4, 3, 4);
++	if (ELEMENT_BYTES == 4) return uvec4(4, 4, 3, 3);
++	if (ELEMENT_BYTES == 8) return uvec4(3, 4, 3, 3);
++	return uvec4(3, 3, 2, 3);
++}
+ uint block_offset(uvec3 p) {
+-	uvec4 s = ELEMENT_BYTES == 1 ? uvec4(4, 5, 4, 4) :
+-	          ELEMENT_BYTES == 2 ? uvec4(4, 4, 3, 4) :
+-	          ELEMENT_BYTES == 4 ? uvec4(4, 4, 3, 3) :
+-	          ELEMENT_BYTES == 8 ? uvec4(3, 4, 3, 3) : uvec4(3, 3, 2, 3);
++	uvec4 s = prt_3d_shifts();
+ 	uint delta = (((p.y >> s.x) & 1u) << 10) ^ (((p.x >> s.y) & 1u) << 10) ^
+ 	             (((p.x >> s.z) & 1u) << 11) ^ (((p.z >> s.w) & 1u) << 11);
+ 	return standard64_3d_offset(p) ^ delta;
