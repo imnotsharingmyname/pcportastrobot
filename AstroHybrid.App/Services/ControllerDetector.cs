@@ -140,11 +140,14 @@ namespace AstroHybrid.App.Services
             uint capsSize = (uint)Marshal.SizeOf<JOYCAPSW>();
             for (uint id = 0; id < count && id < 16; id++)
             {
-                if (joyGetDevCapsW(id, out var caps, capsSize) != 0)
-                    continue;
-
+                // WinMM exposes empty joystick slots too. Do not ask their drivers for capabilities.
                 var info = new JOYINFOEX { dwSize = (uint)Marshal.SizeOf<JOYINFOEX>(), dwFlags = 0xFF };
                 if (joyGetPosEx(id, ref info) != 0)
+                    continue;
+
+                // JOYCAPSW is a native, fixed-size buffer, not a managed string-bearing out parameter.
+                // Keep the buffer alive across the call and decode it only on success.
+                if (!TryGetWinMmCapabilities(id, capsSize, out var caps))
                     continue;
 
                 string rawName = string.IsNullOrWhiteSpace(caps.szPname)
@@ -161,6 +164,25 @@ namespace AstroHybrid.App.Services
                     string.Equals(c.Name, classified.Name, StringComparison.OrdinalIgnoreCase));
                 if (!alreadyListed)
                     controllers.Add(classified);
+            }
+        }
+
+        private static bool TryGetWinMmCapabilities(uint id, uint capsSize, out JOYCAPSW caps)
+        {
+            caps = default;
+            IntPtr buffer = Marshal.AllocHGlobal((int)capsSize);
+            try
+            {
+                // Drivers may leave optional fields untouched. Initialize the entire native buffer.
+                Marshal.Copy(new byte[(int)capsSize], 0, buffer, (int)capsSize);
+                if (joyGetDevCapsW(new UIntPtr(id), buffer, capsSize) != 0)
+                    return false;
+                caps = Marshal.PtrToStructure<JOYCAPSW>(buffer);
+                return true;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
             }
         }
 
@@ -255,8 +277,8 @@ namespace AstroHybrid.App.Services
         [DllImport("winmm.dll")]
         private static extern uint joyGetNumDevs();
 
-        [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
-        private static extern uint joyGetDevCapsW(uint uJoyID, out JOYCAPSW pjc, uint cbjc);
+        [DllImport("winmm.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern uint joyGetDevCapsW(UIntPtr uJoyID, IntPtr pjc, uint cbjc);
 
         [DllImport("winmm.dll")]
         private static extern uint joyGetPosEx(uint uJoyID, ref JOYINFOEX pji);
