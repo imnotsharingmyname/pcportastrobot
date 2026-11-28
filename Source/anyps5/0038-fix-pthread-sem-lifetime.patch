@@ -1,0 +1,486 @@
+From 592ac3ddf1583677281c4b7c264cb1e47f149c54 Mon Sep 17 00:00:00 2001
+From: AnyPS5 contributors <noreply@localhost>
+Subject: [PATCH] Fix guest pthread semaphore lifetime races
+
+Backport AnyPS5 PR #6740 (fogydes). Adapt to pinned guest pointer behavior and test registered waiter destruction and post/destroy ordering.
+
+diff --git a/core/libs/prx/libkernel/Pthread/include/Pthread.hpp b/core/libs/prx/libkernel/Pthread/include/Pthread.hpp
+--- a/core/libs/prx/libkernel/Pthread/include/Pthread.hpp
++++ b/core/libs/prx/libkernel/Pthread/include/Pthread.hpp
+@@ -88,6 +88,8 @@
+     std::mutex _mutex;
+     TimedWait::Condition _cv;
+     int _count = 0;
++    int _waiters = 0;
++    bool _destroyed = false;
+ 
+     explicit PthreadSemPrivate(unsigned int value) : _count(static_cast<int>(value)) {}
+ };
+diff --git a/core/libs/prx/libkernel/Pthread/src/Sem.cpp b/core/libs/prx/libkernel/Pthread/src/Sem.cpp
+--- a/core/libs/prx/libkernel/Pthread/src/Sem.cpp
++++ b/core/libs/prx/libkernel/Pthread/src/Sem.cpp
+@@ -4,108 +4,207 @@
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libkernel/KernelErrors.hpp"
+ #include "prx/libkernel/Time/include/TimedWait.hpp"
+-#include <cstdint>
+-#include <memory>
+-#include <mutex>
+-#include <stdexcept>
+-
+-namespace {
+-
+-constexpr int sceBusy = static_cast<int>(0x80020010u);
+-constexpr int sceTimedOut = static_cast<int>(0x8002003cu);
+-constexpr int sceSemValueMax = 0x7fffffff;
+-std::mutex semInitializationMutex;
+-
+-PthreadSem destroyedSem() {
+-    return reinterpret_cast<PthreadSem>(std::uintptr_t{2});
+-}
+-
+-PthreadSemPrivate* resolveSem(PthreadSem* sem) {
+-    if (!sem)
+-        throw std::invalid_argument("Semaphore pointer is null");
+-    std::atomic_ref<PthreadSem> slot(*sem);
+-    const auto current = slot.load(std::memory_order_acquire);
+-    if (!current || current == destroyedSem())
+-        throw std::runtime_error("Semaphore is not initialized or has been destroyed");
+-    return current;
+-}
+-
+-}
+-
+-extern "C" {
+-
+-int APS5_VABI scePthreadSemInit(PthreadSem* sem, int flag, unsigned int value, const char* name) {
+-    if (!sem)
+-        throw std::invalid_argument("Semaphore pointer is null");
+-    if (value > static_cast<unsigned int>(sceSemValueMax))
+-        return SCE_KERNEL_ERROR_EINVAL;
+-    (void)flag;
+-    (void)name;
+-    auto replacement = std::make_unique<PthreadSemPrivate>(value);
+-    std::lock_guard lock(semInitializationMutex);
+-    std::atomic_ref<PthreadSem>(*sem).store(replacement.release(), std::memory_order_release);
+-    return 0;
+-}
+-
+-int APS5_VABI scePthreadSemDestroy(PthreadSem* sem) {
+-    if (!sem)
+-        throw std::invalid_argument("Semaphore pointer is null");
+-    std::lock_guard lock(semInitializationMutex);
+-    auto current = *sem;
+-    if (!current || current == destroyedSem())
+-        throw std::runtime_error("Semaphore is not initialized or has been destroyed");
+-    *sem = destroyedSem();
+-    delete current;
+-    return 0;
+-}
+-
+-int APS5_VABI scePthreadSemPost(PthreadSem* sem) {
+-    auto* current = resolveSem(sem);
+-    {
+-        std::lock_guard lock(current->_mutex);
+-        if (current->_count == sceSemValueMax)
+-            return SCE_KERNEL_ERROR_EOVERFLOW;
+-        ++current->_count;
+-    }
+-    current->_cv.NotifyOne();
+-    return 0;
+-}
+-
+-int APS5_VABI scePthreadSemWait(PthreadSem* sem) {
+-    auto* current = resolveSem(sem);
+-    ThreadCancel::Check();
+-    std::unique_lock lock(current->_mutex);
+-    ThreadCancel::WaitUntil(current->_cv, lock, std::nullopt, [&] { return current->_count > 0; });
+-    --current->_count;
+-    return 0;
+-}
+-
+-int APS5_VABI scePthreadSemTrywait(PthreadSem* sem) {
+-    auto* current = resolveSem(sem);
+-    std::lock_guard lock(current->_mutex);
+-    if (current->_count <= 0)
+-        return sceBusy;
+-    --current->_count;
+-    return 0;
+-}
+-
+-int APS5_VABI scePthreadSemTimedwait(PthreadSem* sem, KernelUseconds usec) {
+-    auto* current = resolveSem(sem);
+-    ThreadCancel::Check();
+-    std::unique_lock lock(current->_mutex);
+-    const auto acquired = ThreadCancel::WaitUntil(current->_cv, lock, TimedWait::DeadlineNanos(usec), [&] { return current->_count > 0; });
+-    if (!acquired)
+-        return sceTimedOut;
+-    --current->_count;
+-    return 0;
+-}
+-
+-int APS5_VABI scePthreadSemGetvalue(PthreadSem* sem, int* value) {
+-    auto* current = resolveSem(sem);
+-    if (!value)
+-        throw std::invalid_argument("Semaphore value pointer is null");
+-    std::lock_guard lock(current->_mutex);
+-    *value = current->_count;
++#include <atomic>
++#include <cstdint>
++#include <memory>
++#include <mutex>
++#include <shared_mutex>
++#include <stdexcept>
++#include <unordered_map>
++
++namespace {
++
++constexpr int sceBusy = static_cast<int>(0x80020010u);
++constexpr int sceTimedOut = static_cast<int>(0x8002003cu);
++constexpr int sceSemValueMax = 0x7fffffff;
++std::shared_mutex semRegistryMutex;
++std::unordered_map<PthreadSemPrivate*, std::shared_ptr<PthreadSemPrivate>> semRegistry;
++
++PthreadSem destroyedSem() {
++    return reinterpret_cast<PthreadSem>(std::uintptr_t{2});
++}
++
++std::shared_ptr<PthreadSemPrivate> resolveSem(PthreadSem* sem) {
++    if (!sem)
++        throw std::invalid_argument("Semaphore pointer is null");
++    std::shared_lock lock(semRegistryMutex);
++    const auto current = std::atomic_ref<PthreadSem>(*sem).load(std::memory_order_acquire);
++    if (!current || current == destroyedSem())
++        throw std::runtime_error("Semaphore is not initialized or has been destroyed");
++    const auto it = semRegistry.find(current);
++    if (it == semRegistry.end())
++        throw std::runtime_error("Semaphore is not initialized or has been destroyed");
++    return it->second;
++}
++
++struct SemaphoreWaitCleanupContext {
++    std::shared_ptr<PthreadSemPrivate> owner;
++    bool waiterRegistered = false;
++};
++
++static const auto CleanupSemaphoreWait = [](void* argument) APS5_VABI {
++    auto* context = static_cast<SemaphoreWaitCleanupContext*>(argument);
++    if (!context || !context->owner)
++        return;
++    auto* owner = context->owner.get();
++    if (context->waiterRegistered) {
++        std::lock_guard lock(owner->_mutex);
++        if (owner->_waiters > 0)
++            --owner->_waiters;
++        context->waiterRegistered = false;
++    }
++    context->owner.reset();
++};
++
++void finishSemaphoreWait(PthreadSemPrivate* sem, SemaphoreWaitCleanupContext& context, void* cleanupMark) {
++    if (context.waiterRegistered) {
++        --sem->_waiters;
++        context.waiterRegistered = false;
++    }
++    ThreadCancel::CleanupRestore(cleanupMark);
++}
++
++}
++
++extern "C" {
++
++int APS5_VABI scePthreadSemInit(PthreadSem* sem, int flag, unsigned int value, const char* name) {
++    if (!sem)
++        throw std::invalid_argument("Semaphore pointer is null");
++    if (value > static_cast<unsigned int>(sceSemValueMax))
++        return SCE_KERNEL_ERROR_EINVAL;
++    (void)flag;
++    (void)name;
++    auto replacement = std::make_shared<PthreadSemPrivate>(value);
++    PthreadSem handle = replacement.get();
++    std::unique_lock lock(semRegistryMutex);
++    semRegistry.emplace(handle, std::move(replacement));
++    std::atomic_ref<PthreadSem>(*sem).store(handle, std::memory_order_release);
++    return 0;
++}
++
++int APS5_VABI scePthreadSemDestroy(PthreadSem* sem) {
++    if (!sem)
++        throw std::invalid_argument("Semaphore pointer is null");
++    std::unique_lock registryLock(semRegistryMutex);
++    const auto current = std::atomic_ref<PthreadSem>(*sem).load(std::memory_order_acquire);
++    if (current == destroyedSem())
++        return SCE_KERNEL_ERROR_EINVAL;
++    if (!current)
++        throw std::runtime_error("Semaphore is not initialized");
++    const auto it = semRegistry.find(current);
++    if (it == semRegistry.end())
++        return SCE_KERNEL_ERROR_EINVAL;
++    const auto owner = it->second;
++    std::lock_guard semLock(owner->_mutex);
++    owner->_destroyed = true;
++    owner->_cv.NotifyAll();
++    std::atomic_ref<PthreadSem>(*sem).store(destroyedSem(), std::memory_order_release);
++    semRegistry.erase(it);
++    return 0;
++}
++
++int APS5_VABI scePthreadSemPost(PthreadSem* sem) {
++    const auto owner = resolveSem(sem);
++    std::lock_guard lock(owner->_mutex);
++    if (owner->_destroyed)
++        return SCE_KERNEL_ERROR_EINVAL;
++    if (owner->_count == sceSemValueMax)
++        return SCE_KERNEL_ERROR_EOVERFLOW;
++    ++owner->_count;
++    owner->_cv.NotifyOne();
++    return 0;
++}
++
++int APS5_VABI scePthreadSemWait(PthreadSem* sem) {
++    ThreadCancel::Check();
++    SemaphoreWaitCleanupContext cleanupContext{resolveSem(sem), false};
++    auto* current = cleanupContext.owner.get();
++    std::unique_lock lock(current->_mutex);
++    if (current->_destroyed)
++        return SCE_KERNEL_ERROR_EINVAL;
++    ++current->_waiters;
++    cleanupContext.waiterRegistered = true;
++    CleanupHandler cleanup{};
++    void* const cleanupMark = ThreadCancel::CleanupMark();
++    __pthread_cleanup_push_imp_nid_postfix(CleanupSemaphoreWait, &cleanupContext, &cleanup);
++    try {
++        ThreadCancel::WaitUntil(current->_cv, lock, std::nullopt, [&] { return current->_count > 0 || current->_destroyed; });
++        if (current->_destroyed) {
++            finishSemaphoreWait(current, cleanupContext, cleanupMark);
++            return SCE_KERNEL_ERROR_EINVAL;
++        }
++        --current->_count;
++        finishSemaphoreWait(current, cleanupContext, cleanupMark);
++        return 0;
++    } catch (...) {
++        if (cleanupContext.waiterRegistered) {
++            if (!lock.owns_lock())
++                lock.lock();
++            --current->_waiters;
++            cleanupContext.waiterRegistered = false;
++        }
++        ThreadCancel::CleanupRestore(cleanupMark);
++        throw;
++    }
++}
++
++int APS5_VABI scePthreadSemTrywait(PthreadSem* sem) {
++    const auto owner = resolveSem(sem);
++    std::lock_guard lock(owner->_mutex);
++    if (owner->_destroyed)
++        return SCE_KERNEL_ERROR_EINVAL;
++    if (owner->_count <= 0)
++        return sceBusy;
++    --owner->_count;
++    return 0;
++}
++
++int APS5_VABI scePthreadSemTimedwait(PthreadSem* sem, KernelUseconds usec) {
++    ThreadCancel::Check();
++    SemaphoreWaitCleanupContext cleanupContext{resolveSem(sem), false};
++    auto* current = cleanupContext.owner.get();
++    std::unique_lock lock(current->_mutex);
++    if (current->_destroyed)
++        return SCE_KERNEL_ERROR_EINVAL;
++    ++current->_waiters;
++    cleanupContext.waiterRegistered = true;
++    CleanupHandler cleanup{};
++    void* const cleanupMark = ThreadCancel::CleanupMark();
++    __pthread_cleanup_push_imp_nid_postfix(CleanupSemaphoreWait, &cleanupContext, &cleanup);
++    try {
++        const auto acquired = ThreadCancel::WaitUntil(current->_cv, lock, TimedWait::DeadlineNanos(usec), [&] { return current->_count > 0 || current->_destroyed; });
++        if (current->_destroyed) {
++            finishSemaphoreWait(current, cleanupContext, cleanupMark);
++            return SCE_KERNEL_ERROR_EINVAL;
++        }
++        if (!acquired) {
++            finishSemaphoreWait(current, cleanupContext, cleanupMark);
++            return sceTimedOut;
++        }
++        --current->_count;
++        finishSemaphoreWait(current, cleanupContext, cleanupMark);
++        return 0;
++    } catch (...) {
++        if (cleanupContext.waiterRegistered) {
++            if (!lock.owns_lock())
++                lock.lock();
++            --current->_waiters;
++            cleanupContext.waiterRegistered = false;
++        }
++        ThreadCancel::CleanupRestore(cleanupMark);
++        throw;
++    }
++}
++
++int APS5_VABI scePthreadSemGetvalue(PthreadSem* sem, int* value) {
++
++    const auto owner = resolveSem(sem);
++    if (!value)
++        throw std::invalid_argument("Semaphore value pointer is null");
++    std::lock_guard lock(owner->_mutex);
++    if (owner->_destroyed) return SCE_KERNEL_ERROR_EINVAL;
++    *value = owner->_count;
+     return 0;
+ }
+ 
+diff --git a/core/libs/tests/GuestPthreadSem.cpp b/core/libs/tests/GuestPthreadSem.cpp
+--- a/core/libs/tests/GuestPthreadSem.cpp
++++ b/core/libs/tests/GuestPthreadSem.cpp
+@@ -1,59 +1,98 @@
+ #include "prx/libkernel/KernelErrors.hpp"
+ #include "prx/libkernel/include/Api.hpp"
+ #include "SceTypes.hpp"
+-#include <atomic>
+-#include <chrono>
+-#include <cstdint>
+-#include <cstdlib>
+-#include <limits>
+-#include <stdexcept>
+-#include <thread>
+-
+-static constexpr int SCE_OK = 0;
+-
+-static void Require(bool value) { if (!value) std::abort(); }
+-
+-static void CheckValueLimit() {
+-    constexpr unsigned int maximum = 0x7fffffffu;
+-    PthreadSem sem = nullptr;
+-    Require(scePthreadSemInit(&sem, 0, 7, nullptr) == SCE_OK);
+-    const PthreadSem original = sem;
+-    const unsigned int invalidValues[] = {maximum + 1u, std::numeric_limits<unsigned int>::max()};
+-    int value = -1;
+-    for (const unsigned int initial : invalidValues) {
+-        Require(scePthreadSemInit(&sem, 0, initial, nullptr) == SCE_KERNEL_ERROR_EINVAL);
+-        Require(sem == original);
+-        Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == 7);
+-    }
+-    Require(scePthreadSemDestroy(&sem) == SCE_OK);
+-
+-    Require(scePthreadSemInit(&sem, 0, maximum, nullptr) == SCE_OK);
+-    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum));
+-    Require(scePthreadSemPost(&sem) == SCE_KERNEL_ERROR_EOVERFLOW);
+-    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum));
+-    Require(scePthreadSemTrywait(&sem) == SCE_OK);
+-    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum - 1));
+-    Require(scePthreadSemPost(&sem) == SCE_OK);
+-    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum));
+-    Require(scePthreadSemPost(&sem) == SCE_KERNEL_ERROR_EOVERFLOW);
+-    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum));
+-    Require(scePthreadSemDestroy(&sem) == SCE_OK);
+-}
+-
+-struct Context {
+-    PthreadSem sem = nullptr;
+-};
+-
+-static void* APS5_VABI Poster(void* arg) {
+-    auto& context = *static_cast<Context*>(arg);
+-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+-    Require(scePthreadSemPost(&context.sem) == SCE_OK);
+-    Require(scePthreadSemPost(&context.sem) == SCE_OK);
+-    return nullptr;
+-}
+-
+-int main() {
+-    CheckValueLimit();
++#include "prx/libkernel/Pthread/include/Pthread.hpp"
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <limits>
++#include <stdexcept>
++#include <thread>
++
++static constexpr int SCE_OK = 0;
++
++static void Require(bool value) { if (!value) std::abort(); }
++
++static void CheckValueLimit() {
++    constexpr unsigned int maximum = 0x7fffffffu;
++    PthreadSem sem = nullptr;
++    Require(scePthreadSemInit(&sem, 0, 7, nullptr) == SCE_OK);
++    const PthreadSem original = sem;
++    const unsigned int invalidValues[] = {maximum + 1u, std::numeric_limits<unsigned int>::max()};
++    int value = -1;
++    for (const unsigned int initial : invalidValues) {
++        Require(scePthreadSemInit(&sem, 0, initial, nullptr) == SCE_KERNEL_ERROR_EINVAL);
++        Require(sem == original);
++        Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == 7);
++    }
++    Require(scePthreadSemDestroy(&sem) == SCE_OK);
++
++    Require(scePthreadSemInit(&sem, 0, maximum, nullptr) == SCE_OK);
++    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum));
++    Require(scePthreadSemPost(&sem) == SCE_KERNEL_ERROR_EOVERFLOW);
++    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum));
++    Require(scePthreadSemTrywait(&sem) == SCE_OK);
++    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum - 1));
++    Require(scePthreadSemPost(&sem) == SCE_OK);
++    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum));
++    Require(scePthreadSemPost(&sem) == SCE_KERNEL_ERROR_EOVERFLOW);
++    Require(scePthreadSemGetvalue(&sem, &value) == SCE_OK && value == static_cast<int>(maximum));
++    Require(scePthreadSemDestroy(&sem) == SCE_OK);
++}
++
++struct Context {
++    PthreadSem sem = nullptr;
++};
++
++static void* APS5_VABI Poster(void* arg) {
++    auto& context = *static_cast<Context*>(arg);
++    std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    Require(scePthreadSemPost(&context.sem) == SCE_OK);
++    Require(scePthreadSemPost(&context.sem) == SCE_OK);
++    return nullptr;
++}
++
++
++// Wait until the guest is actually registered, not merely scheduled.
++static void WaitUntilRegistered(PthreadSem sem) {
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
++    for (;;) {
++        {
++            std::lock_guard lock(sem->_mutex);
++            if (sem->_waiters != 0) return;
++        }
++        Require(std::chrono::steady_clock::now() < deadline);
++        std::this_thread::yield();
++    }
++}
++static void CheckLifetimeRaces() {
++    PthreadSem sem = nullptr;
++    Require(scePthreadSemInit(&sem, 0, 0, nullptr) == SCE_OK);
++    std::atomic<int> result{-1};
++    std::thread waiter([&] { result = scePthreadSemWait(&sem); });
++    WaitUntilRegistered(sem);
++    Require(scePthreadSemDestroy(&sem) == SCE_OK);
++    waiter.join();
++    Require(result == SCE_KERNEL_ERROR_EINVAL);
++    Require(scePthreadSemDestroy(&sem) == SCE_KERNEL_ERROR_EINVAL);
++
++    for (int i = 0; i < 50; ++i) {
++        PthreadSem race = nullptr;
++        Require(scePthreadSemInit(&race, 0, 0, nullptr) == SCE_OK);
++        std::thread consumer([&] {
++            Require(scePthreadSemWait(&race) == SCE_OK);
++            Require(scePthreadSemDestroy(&race) == SCE_OK);
++        });
++        WaitUntilRegistered(race);
++        Require(scePthreadSemPost(&race) == SCE_OK);
++        consumer.join();
++    }
++}
++
++int main() {
++    CheckValueLimit();
++    CheckLifetimeRaces();
+ 
+     PthreadSem sem = nullptr;
+     Require(scePthreadSemInit(&sem, 0, 2, nullptr) == SCE_OK);
