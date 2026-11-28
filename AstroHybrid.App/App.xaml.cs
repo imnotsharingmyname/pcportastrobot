@@ -65,6 +65,9 @@ namespace AstroHybrid.App
             if (e.Args.Length == 1 && e.Args[0] == "--play")
             {
                 ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                // RecompLauncher tracks this process, not the cmd/game descendants.
+                if (!HeadlessProcessLifetime.TryAttach(out var error))
+                    LogDebug("Could not attach headless process lifetime job: " + error);
                 RunGameWithoutWindow();
                 return;
             }
