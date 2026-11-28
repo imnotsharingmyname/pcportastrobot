@@ -49,6 +49,7 @@
     <Compile Include="CrashLogTests.cs" />
     <Compile Include="GameSetupPatchTests.cs" />
     <Compile Include="ShaderPrepTests.cs" />
+    <Compile Include="AsyncStagingTests.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AstroHybrid.App\AstroHybrid.App.csproj">

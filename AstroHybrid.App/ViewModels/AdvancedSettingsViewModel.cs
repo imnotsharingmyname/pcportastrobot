@@ -195,6 +195,21 @@ namespace AstroHybrid.App.ViewModels
         // Experimental Features
         public bool IsExperimentalExpanded { get; set; } = false;
 
+        public string[] AsyncStagingOptions => new[] { "Automatic (AMD on, others off)", "Off (compatibility)", "On (experimental)" };
+        public int AsyncStagingIndex
+        {
+            get => _mainViewModel.Settings.AsyncVulkanStaging is bool enabled ? (enabled ? 2 : 1) : 0;
+            set
+            {
+                if (value < 0 || value > 2) return;
+                bool? next = value == 0 ? (bool?)null : value == 2;
+                if (_mainViewModel.Settings.AsyncVulkanStaging == next) return;
+                _mainViewModel.Settings.AsyncVulkanStaging = next;
+                OnPropertyChanged();
+                _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+            }
+        }
+
         // Info texts
         public string LightingNote => "Faster lighting uses the NonRT renderer (AstroBot-NonRT.exe) which disables GI probes and some lighting shaders for better performance.";
 
