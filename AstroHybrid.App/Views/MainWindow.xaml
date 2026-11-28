@@ -377,12 +377,13 @@
                                 Visibility="{Binding IsUpdateReady, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                         <Button Style="{StaticResource SecondaryButtonStyle}" Height="44" Margin="0,0,14,0"
                                 Command="{Binding NavigateCommand}" CommandParameter="Installation"
-                                ToolTip="Manage installation, repair, or game dump location">
+                                ToolTip="Install the game from your dump"
+                                Visibility="{Binding InstallationState.IsInstalled, Converter={StaticResource InverseBooleanToVisibilityConverter}, FallbackValue=Visible, TargetNullValue=Visible}">
                             <StackPanel Orientation="Horizontal">
                                 <Path Data="M12,3 L12,14 M8,10 L12,14 L16,10 M4,16 L4,20 L20,20 L20,16"
                                       Stroke="{StaticResource AccentBrush}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"
                                       Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,9,0"/>
-                                <TextBlock Text="Install / Manage" VerticalAlignment="Center"/>
+                                <TextBlock Text="Install" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
                         <Button Command="{Binding LaunchGameCommand}" Style="{StaticResource PlayButtonStyle}"

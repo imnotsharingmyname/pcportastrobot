@@ -34,35 +34,11 @@
             <WrapPanel Margin="0,20,0,0">
                 <Border Style="{StaticResource ProfileChipStyle}" Padding="12,7">
                     <StackPanel>
-                        <TextBlock Text="VERSION" Style="{StaticResource ChipLabel}"/>
-                        <TextBlock Text="{Binding GameVersion}" Style="{StaticResource ChipValue}"/>
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource ProfileChipStyle}" Padding="12,7">
-                    <StackPanel>
                         <TextBlock Text="STATUS" Style="{StaticResource ChipLabel}"/>
                         <TextBlock Text="{Binding GameStatus}" Style="{StaticResource ChipValue}"
                                    Foreground="{Binding GameStatus, Converter={StaticResource StatusToBrushConverter}}"/>
                     </StackPanel>
                 </Border>
-                <Button Command="{Binding ToggleRayTracingCommand}" Margin="0,0,8,8" Cursor="Hand"
-                        ToolTip="Switch between the ray-traced and non-ray-traced build">
-                    <Button.Template>
-                        <ControlTemplate TargetType="Button">
-                            <Border x:Name="B" Background="#14FFFFFF" BorderBrush="#22FFFFFF" BorderThickness="1" CornerRadius="12" Padding="12,7">
-                                <StackPanel>
-                                    <TextBlock Text="RAY TRACING" Style="{StaticResource ChipLabel}"/>
-                                    <TextBlock Text="{Binding RayTracingToggleText}" Style="{StaticResource ChipValue}" Foreground="{StaticResource AccentBrush}"/>
-                                </StackPanel>
-                            </Border>
-                            <ControlTemplate.Triggers>
-                                <Trigger Property="IsMouseOver" Value="True">
-                                    <Setter TargetName="B" Property="BorderBrush" Value="#FF3A86FF"/>
-                                </Trigger>
-                            </ControlTemplate.Triggers>
-                        </ControlTemplate>
-                    </Button.Template>
-                </Button>
                 <Border Style="{StaticResource ProfileChipStyle}" Padding="12,7" BorderBrush="#FF2F7BFF"
                         Visibility="{Binding UpdateState.UpdateAvailable, Converter={StaticResource BooleanToVisibilityConverter}}">
                     <StackPanel>
