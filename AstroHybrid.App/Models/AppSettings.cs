@@ -103,6 +103,9 @@ namespace AstroHybrid.App.Models
         [JsonPropertyName("dsSpeaker")]
         public bool DualSenseSpeaker { get; set; } = true;
 
+        [JsonPropertyName("dsSpeakerVolume")]
+        public int DualSenseSpeakerVolume { get; set; } = 100;
+
         // DualSense adaptive triggers: resistance and vibration in percent of what the game asks for
         // (0 = off, 100 = as the game asks; #160).
         [JsonPropertyName("triggerStrength")]
@@ -232,6 +235,7 @@ namespace AstroHybrid.App.Models
             if (FrameGenTarget < 0 || FrameGenTarget > 6) FrameGenTarget = 2;
             if (DlssQuality < 0 || DlssQuality > 3) DlssQuality = 0;
             if (Controller < 0 || Controller > 4) Controller = 0;
+            DualSenseSpeakerVolume = Math.Max(0, Math.Min(100, DualSenseSpeakerVolume));
             if (CpPriority < 0 || CpPriority > 2) CpPriority = 2;
             if (Priority != "normal" && Priority != "abovenormal" && Priority != "high")
                 Priority = "abovenormal";

@@ -172,6 +172,19 @@ namespace AstroHybrid.App.ViewModels
             }
         }
 
+        public int DualSenseSpeakerVolume
+        {
+            get => _mainViewModel.Settings.DualSenseSpeakerVolume;
+            set
+            {
+                int volume = Math.Max(0, Math.Min(100, value));
+                if (_mainViewModel.Settings.DualSenseSpeakerVolume == volume) return;
+                _mainViewModel.Settings.DualSenseSpeakerVolume = volume;
+                OnPropertyChanged();
+                _mainViewModel.OnPropertyChanged(nameof(MainWindowViewModel.Settings));
+            }
+        }
+
         public string MotionNote => _mainViewModel.Settings.TiltToggle
             ? "Motion sensors (shake/tilt) work on DualSense and Switch Pro controllers. Xbox and generic pads: press View/Back to tilt with the right stick, press it again to get the camera back."
             : "Motion sensors (shake/tilt) work on DualSense and Switch Pro controllers. Xbox and generic pads: hold View/Back and move the right stick to tilt; release it to get the camera back.";

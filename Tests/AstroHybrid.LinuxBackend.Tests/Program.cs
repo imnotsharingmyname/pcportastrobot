@@ -24,6 +24,8 @@ def emit(stream, prefix):
         print(f"{prefix}{n}", file=stream, flush=True)
 
 if sys.argv[1] == "run":
+    i = sys.argv.index("ASTROHYBRID_DS_SPEAKER_VOLUME")
+    assert sys.argv[i+1] == "35"
     print("final stdout", flush=True)
     print("final stderr", file=sys.stderr, flush=True)
     sys.exit(17)
@@ -44,7 +46,7 @@ b.join()
         states.Enqueue(running);
         if (!running) exited.TrySetResult(true);
     };
-    backend.StartGame(new AppSettings { GamePath = root, DirectAudio = false });
+    backend.StartGame(new AppSettings { GamePath = root, DirectAudio = false, DsSpeakerVolume = 35 });
     await exited.Task.WaitAsync(TimeSpan.FromSeconds(10));
     if (backend.GameRunning || backend.StatusMessage != "Game exited (code 17)")
         throw new Exception("Incorrect game exit state: " + backend.StatusMessage);
