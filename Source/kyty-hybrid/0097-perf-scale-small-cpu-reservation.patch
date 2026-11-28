@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AstroHybrid contributors <noreply@localhost>
+Subject: [PATCH] Scale CP reservation on small SMT CPUs
+
+Adapt Jetsku/KytyPS5 e8b27b2d38f5f7ff926e29cd55d0cdd281bc4cfd to the pinned pre-CoreBudget Windows layout. Opt-in via KYTY_CPU_RESERVE_SCALE=1, keep dual-CCD placement unchanged. Reserve one logical rather than a whole core below eight allowed physical cores, honor forced CPU, and keep existing minimum general capacity.
+
+diff --git a/src/common/cpuPlacement.cpp b/src/common/cpuPlacement.cpp
+--- a/src/common/cpuPlacement.cpp
++++ b/src/common/cpuPlacement.cpp
+@@ -56,7 +56,8 @@
+ } // namespace
+ 
+ CpuLayout ComputeCpuLayout(const std::vector<CpuSetInfo>& sets, CpuReserveMode mode,
+-                           int forced_cp_logical, uint32_t min_general, uint64_t preferred_mask) {
++                           int forced_cp_logical, uint32_t min_general, uint64_t preferred_mask,
++                           bool scale_small_cpu) {
+ 	CpuLayout layout;
+ 	if (mode == CpuReserveMode::Off) {
+ 		layout.description = "off";
+@@ -109,8 +110,61 @@
+ 			cache = index;
+ 		}
+ 	}
+-	std::vector<const Core*> candidates;
+-	for (const auto& [index, core]: cores) {
++	// Int22-inspired small-CPU reservation: preserve SMT capacity for native guest workers.
++	// The pinned hybrid predates CoreBudget; derive the same allowed-core count locally.
++	if (scale_small_cpu) {
++		uint32_t allowed_logical = 0;
++		uint32_t allowed_cores = 0;
++		for (const auto& [index, core]: cores) {
++			const auto count = std::count_if(core.processors.begin(), core.processors.end(),
++			    [](const CpuSetInfo* p) { return p->allowed; });
++			allowed_logical += static_cast<uint32_t>(count);
++			allowed_cores += count != 0;
++		}
++		if (allowed_cores < 8) {
++			if (allowed_logical < 8 || allowed_logical <= min_general) {
++				layout.description = "small CPU: no reservation (KYTY_CPU_RESERVE_SCALE)";
++				return layout;
++			}
++			const CpuSetInfo* chosen = nullptr;
++			for (const auto& set: sets) {
++				if (!set.allowed || set.group != 0 || set.logical >= 64) continue;
++				if (forced_cp_logical >= 0) {
++					if (set.logical == forced_cp_logical) chosen = &set;
++					continue;
++				}
++				if (set.cache != cache) continue;
++				if (!chosen || set.scheduling_class > chosen->scheduling_class ||
++				    (set.scheduling_class == chosen->scheduling_class &&
++				     ((chosen->core == 0 && set.core != 0) ||
++				      ((chosen->core == 0) == (set.core == 0) && set.logical < chosen->logical)))) {
++					chosen = &set;
++				}
++			}
++			if (!chosen) {
++				layout.description = "small CPU: requested CP processor is unavailable";
++				return layout;
++			}
++			for (const auto& set: sets) {
++				if (!set.allowed || set.group != 0 || set.logical >= 64) continue;
++				const auto bit = uint64_t {1} << set.logical;
++				if (&set == chosen) {
++					layout.cp_ids.push_back(set.id);
++					layout.cp_mask |= bit;
++				} else {
++					layout.general_ids.push_back(set.id);
++					layout.general_mask |= bit;
++				}
++			}
++			layout.reserved = true;
++			layout.cp_core = chosen->core;
++			layout.description = "small CPU: CP alone on logical " + MaskText(layout.cp_mask) +
++			    "; other threads on " + MaskText(layout.general_mask) + " (KYTY_CPU_RESERVE_SCALE)";
++			return layout;
++		}
++	}
++	std::vector<const Core*> candidates;
++	for (const auto& [index, core]: cores) {
+ 		if (core.whole && core.cache == cache) {
+ 			candidates.push_back(&core);
+ 		}
+@@ -830,7 +884,9 @@
+ 	} else {
+ 		// Ties between caches go to the V-cache CCD (measured, not by index).
+ 		state.layout = ComputeCpuLayout(state.sets, mode, ForcedCpLogical(), kMinGeneralProcessors,
+-		                                state.topology.dual ? state.topology.vcache_mask : 0);
++		                                state.topology.dual ? state.topology.vcache_mask : 0,
++		                                [] { const auto* v = EnvValue("KYTY_CPU_RESERVE_SCALE");
++		                                     return v != nullptr && std::strcmp(v, "1") == 0; }());
+ 	}
+ 	if (log) {
+ 		LogVCacheLocked(state, why, vcache_text);
+diff --git a/src/common/cpuPlacement.h b/src/common/cpuPlacement.h
+--- a/src/common/cpuPlacement.h
++++ b/src/common/cpuPlacement.h
+@@ -149,7 +149,8 @@
+ [[nodiscard]] CpuLayout ComputeCpuLayout(const std::vector<CpuSetInfo>& sets, CpuReserveMode mode,
+                                          int      forced_cp_logical,
+                                          uint32_t min_general    = kMinGeneralProcessors,
+-                                         uint64_t preferred_mask = 0);
++                                         uint64_t preferred_mask = 0,
++                                         bool scale_small_cpu = false);
+ // Pure (tested): the L3 groups as a V-cache topology (KYTY_VCACHE_PLACEMENT).
+ [[nodiscard]] VCacheTopology DetectVCache(const std::vector<L3Cache>& caches);
+ // Pure (tested): whether the V-cache placement applies. `external_rule`: an affinity or CPU-set
+diff --git a/tests/CpuPlacementTests.cpp b/tests/CpuPlacementTests.cpp
+--- a/tests/CpuPlacementTests.cpp
++++ b/tests/CpuPlacementTests.cpp
+@@ -184,7 +184,24 @@
+ 		}
+ 		Check(!ComputeCpuLayout(other_group, CpuReserveMode::Cp, -1).reserved, "group 0 only");
+ 	}
+-	std::puts("CpuPlacementTests: layouts ok");
++	{
++		const auto six = MachineTable(0x0FFF0000);
++		const auto scaled = ComputeCpuLayout(six, CpuReserveMode::Cp, -1, 6, 0, true);
++		Check(scaled.reserved && Count(scaled.cp_mask) == 1 && Count(scaled.general_mask) == 11,
++		      "scaled 6C/12T: one CP logical, eleven general");
++		const auto four = ComputeCpuLayout(MachineTable(0xFF), CpuReserveMode::CpRecorder, -1, 6, 0, true);
++		Check(four.reserved && Count(four.cp_mask) == 1 && four.recorder_mask == 0 &&
++		      Count(four.general_mask) == 7, "scaled 4C/8T: CP only, preserve seven logicals");
++		Check(!ComputeCpuLayout(MachineTable(0x3F), CpuReserveMode::Cp, -1, 6, 0, true).reserved,
++		      "scaled six logical: no reservation");
++		Check(ComputeCpuLayout(six, CpuReserveMode::Cp, 21, 6, 0, true).cp_mask == (1ull << 21),
++		      "scaled explicit allowed logical honored");
++		Check(!ComputeCpuLayout(six, CpuReserveMode::Cp, 1, 6, 0, true).reserved,
++		      "scaled disallowed explicit logical rejected");
++		Check(ComputeCpuLayout(lasso, CpuReserveMode::Cp, -1, 6, 0, true).cp_mask == 0xC,
++		      "eight cores retain existing whole-core policy");
++	}
++	std::puts("CpuPlacementTests: layouts ok");
+ }
+ 
+ constexpr uint64_t MiB = 1024ull * 1024ull;
