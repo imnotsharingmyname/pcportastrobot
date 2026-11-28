@@ -1,0 +1,234 @@
+From e8a95db399559e0e26f99c4971a09bb4bb2306ce Mon Sep 17 00:00:00 2001
+From: AnyPS5 contributors <noreply@localhost>
+Subject: [PATCH] Throttle short-sleep polling and preserve deadlines
+
+Backport upstream AnyPS5 e8a95db399559e0e26f99c4971a09bb4bb2306ce; preserve guest timing and add upstream regression coverage.
+
+diff --git a/core/libs/prx/libkernel/CMakeLists.txt b/core/libs/prx/libkernel/CMakeLists.txt
+--- a/core/libs/prx/libkernel/CMakeLists.txt
++++ b/core/libs/prx/libkernel/CMakeLists.txt
+@@ -1190,6 +1190,18 @@ if(BUILD_TESTING)
+         set_tests_properties(guest_timed_wait_cpu PROPERTIES ENVIRONMENT_MODIFICATION
+             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+     endif()
++    add_test_executable(guest_short_sleep_tests ${LIBS_INCLUDE_DIR}/tests/GuestShortSleep.cpp)
++    target_include_directories(guest_short_sleep_tests PRIVATE ${LIBS_INCLUDE_DIR})
++    target_link_libraries(guest_short_sleep_tests PRIVATE libkernel libc)
++    configure_windows_unwind(guest_short_sleep_tests)
++    add_test(NAME guest_short_sleep COMMAND guest_short_sleep_tests)
++    set_tests_properties(guest_short_sleep PROPERTIES TIMEOUT 30)
++    if(WIN32)
++        add_test(NAME guest_short_sleep_coarse COMMAND guest_short_sleep_tests)
++        set_tests_properties(guest_short_sleep_coarse PROPERTIES TIMEOUT 30 ENVIRONMENT "APS5_COARSE_TIMED_WAITS=1")
++        set_tests_properties(guest_short_sleep guest_short_sleep_coarse PROPERTIES RUN_SERIAL TRUE ENVIRONMENT_MODIFICATION
++            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
++    endif()
+     add_test_executable(guest_pthread_sem_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadSem.cpp)
+     target_include_directories(guest_pthread_sem_tests PRIVATE ${LIBS_INCLUDE_DIR})
+     target_link_libraries(guest_pthread_sem_tests PRIVATE libkernel libc)
+diff --git a/core/libs/prx/libkernel/Time/TimedWait.cpp b/core/libs/prx/libkernel/Time/TimedWait.cpp
+--- a/core/libs/prx/libkernel/Time/TimedWait.cpp
++++ b/core/libs/prx/libkernel/Time/TimedWait.cpp
+@@ -23,7 +23,9 @@ namespace TimedWait {
+ 
+ namespace {
+ 
+-constexpr std::uint64_t YIELD_BELOW_NANOS = 50000ULL;
++constexpr std::uint64_t SHORT_SLEEP_NANOS = 50000ULL;
++constexpr std::uint64_t SHORT_SLEEP_SPIN_RUN_NANOS = 1000000ULL;
++constexpr unsigned SHORT_SLEEP_PAUSES_PER_CLOCK_READ = 8;
+ constexpr std::uint64_t LEAD_NANOS = 20000ULL;
+ 
+ std::mutex& ChangeSleepersMutex() {
+@@ -135,10 +137,6 @@ DWORD WholeMilliseconds(std::uint64_t nanos) {
+ }
+ 
+ void SleepNanosCoarse(std::uint64_t nanos) {
+-    if (nanos < YIELD_BELOW_NANOS) {
+-        SwitchToThread();
+-        return;
+-    }
+     const HANDLE timer = ThreadTimer(0);
+     if (TimerWait(timer, nanos)) return;
+     AlertableSleep(static_cast<DWORD>((nanos + 999999ULL) / 1000000ULL));
+@@ -159,6 +157,8 @@ struct Waiter {
+     Waiter* nested = nullptr;
+     const void* key = nullptr;
+     HANDLE wake = nullptr;
++    std::uint64_t shortSleepRunStartNanos = 0;
++    std::uint64_t shortSleepEndNanos = 0;
+     bool queued = false;
+     bool busy = false;
+ 
+@@ -225,6 +225,26 @@ HANDLE ThreadTimer(unsigned kind) {
+     return timer;
+ }
+ 
++void SleepShort(std::uint64_t nanos) {
++    Waiter* waiter = ThisThreadWaiter();
++    std::uint64_t now = NowNanos();
++    const std::uint64_t deadlineNanos = now + nanos;
++    if (now - waiter->shortSleepEndNanos >= nanos) waiter->shortSleepRunStartNanos = now;
++    if (now - waiter->shortSleepRunStartNanos >= SHORT_SLEEP_SPIN_RUN_NANOS) {
++        if (!TimerWait(ThreadTimer(0), nanos)) AlertableSleep(1);
++        now = NowNanos();
++    }
++    {
++        DeliveryDeferral deferral;
++        while (now < deadlineNanos) {
++            for (unsigned pause = 0; pause < SHORT_SLEEP_PAUSES_PER_CLOCK_READ; ++pause) YieldProcessor();
++            now = NowNanos();
++        }
++    }
++    DrainApcs();
++    waiter->shortSleepEndNanos = NowNanos();
++}
++
+ Waiter* AcquireWaiter() {
+     Waiter* waiter = ThisThreadWaiter();
+     while (waiter->busy) {
+@@ -606,7 +626,7 @@ void SleepUntil(std::uint64_t deadlineNanos) {
+ bool SleepNanosUnlessChanged(std::uint64_t nanos, const std::atomic<std::uint64_t>& counter, std::uint64_t observed) {
+     const std::uint64_t deadlineNanos = NowNanos() + nanos;
+ #ifdef _WIN32
+-    if (Coarse() || nanos < YIELD_BELOW_NANOS) {
++    if (Coarse() || nanos < SHORT_SLEEP_NANOS) {
+         SleepNanos(nanos);
+         return false;
+     }
+@@ -680,12 +700,12 @@ void WakeChangeSleepers() {
+ void SleepNanos(std::uint64_t nanos) {
+     if (nanos == 0) return;
+ #ifdef _WIN32
+-    if (Coarse()) {
+-        SleepNanosCoarse(nanos);
++    if (nanos < SHORT_SLEEP_NANOS) {
++        SleepShort(nanos);
+         return;
+     }
+-    if (nanos < YIELD_BELOW_NANOS) {
+-        SwitchToThread();
++    if (Coarse()) {
++        SleepNanosCoarse(nanos);
+         return;
+     }
+     SleepUntil(NowNanos() + nanos);
+diff --git a/core/libs/tests/GuestShortSleep.cpp b/core/libs/tests/GuestShortSleep.cpp
+--- a/core/libs/tests/GuestShortSleep.cpp
++++ b/core/libs/tests/GuestShortSleep.cpp
+@@ -0,0 +1,115 @@
++#include "prx/libkernel/Time/include/Time.hpp"
++#include "SceTypes.hpp"
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <iomanip>
++#include <iostream>
++
++#ifdef _WIN32
++#include <windows.h>
++#endif
++
++using Clock = std::chrono::steady_clock;
++
++static constexpr KernelUseconds SHORT_MICROS = 20;
++static constexpr unsigned LOOP_SLEEPS = 2000;
++
++static void Require(bool value) {
++    if (!value) std::abort();
++}
++
++static std::chrono::nanoseconds Usleep(KernelUseconds microseconds) {
++    const auto start = Clock::now();
++    Require(sceKernelUsleep_nid_postfix(microseconds) == 0);
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start);
++}
++
++static void EveryShortSleepTakesTheRequest() {
++    for (const KernelUseconds microseconds : {1u, 5u, 20u, 49u}) {
++        for (unsigned i = 0; i < 200; ++i) Require(Usleep(microseconds) >= std::chrono::microseconds(microseconds));
++    }
++}
++
++static void ShortNanosleepTakesTheRequest() {
++    const KernelTimespec request{0, 20000};
++    for (unsigned i = 0; i < 200; ++i) {
++        const auto start = Clock::now();
++        Require(sceKernelNanosleep(&request, nullptr) == 0);
++        Require(Clock::now() - start >= std::chrono::nanoseconds(20000));
++    }
++}
++
++static void LoopOfShortSleepsTakesEveryRequest() {
++    const auto start = Clock::now();
++    for (unsigned i = 0; i < LOOP_SLEEPS; ++i) Require(sceKernelUsleep_nid_postfix(SHORT_MICROS) == 0);
++    Require(Clock::now() - start >= std::chrono::microseconds(SHORT_MICROS) * LOOP_SLEEPS);
++}
++
++#ifdef _WIN32
++static std::uint64_t CurrentThreadCpuNanos() {
++    FILETIME creation{}, exit{}, kernel{}, user{};
++    Require(GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user) != 0);
++    ULARGE_INTEGER k, u;
++    k.LowPart = kernel.dwLowDateTime;
++    k.HighPart = kernel.dwHighDateTime;
++    u.LowPart = user.dwLowDateTime;
++    u.HighPart = user.dwHighDateTime;
++    return (k.QuadPart + u.QuadPart) * 100ULL;
++}
++
++static bool BackToBackShortSleepsLeaveTheProcessor() {
++    const auto cpuStart = CurrentThreadCpuNanos();
++    const auto wallStart = Clock::now();
++    std::uint64_t sleeps = 0;
++    while (Clock::now() - wallStart < std::chrono::milliseconds(500)) {
++        Require(Usleep(SHORT_MICROS) >= std::chrono::microseconds(SHORT_MICROS));
++        ++sleeps;
++    }
++    const auto wallNanos = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - wallStart).count());
++    const auto cpuNanos = CurrentThreadCpuNanos() - cpuStart;
++    std::cout << "sceKernelUsleep(20 us) back to back: " << sleeps << " sleeps, calling-thread CPU " << std::fixed << std::setprecision(1)
++              << (100.0 * static_cast<double>(cpuNanos) / static_cast<double>(wallNanos)) << "% (limit <= 40%)" << std::defaultfloat << std::endl;
++    return cpuNanos <= (wallNanos * 40ULL) / 100ULL;
++}
++
++static void Work(std::chrono::microseconds length) {
++    const auto until = Clock::now() + length;
++    while (Clock::now() < until) YieldProcessor();
++}
++
++static bool ShortSleepAfterWorkStaysShort() {
++    for (unsigned i = 0; i < LOOP_SLEEPS; ++i) Require(sceKernelUsleep_nid_postfix(SHORT_MICROS) == 0);
++    std::array<std::int64_t, 101> samples{};
++    for (auto& sample : samples) {
++        Work(std::chrono::microseconds(200));
++        sample = Usleep(SHORT_MICROS).count();
++        Require(sample >= std::chrono::nanoseconds(std::chrono::microseconds(SHORT_MICROS)).count());
++    }
++    std::sort(samples.begin(), samples.end());
++    const std::int64_t median = samples[samples.size() / 2];
++    std::cout << "sceKernelUsleep(20 us) after 200 us of work: median " << median / 1000 << " us (limit < 100 us)" << std::endl;
++    return median < 100000;
++}
++
++static void RequireInOneOfAttempts(bool (*test)(), int attempts) {
++    for (int attempt = 0; attempt < attempts; ++attempt) {
++        if (test()) return;
++    }
++    std::abort();
++}
++#endif
++
++int main() {
++    EveryShortSleepTakesTheRequest();
++    ShortNanosleepTakesTheRequest();
++    LoopOfShortSleepsTakesEveryRequest();
++#ifdef _WIN32
++    constexpr int ATTEMPTS = 3;
++    RequireInOneOfAttempts(BackToBackShortSleepsLeaveTheProcessor, ATTEMPTS);
++    RequireInOneOfAttempts(ShortSleepAfterWorkStaysShort, ATTEMPTS);
++#endif
++    return 0;
++}
