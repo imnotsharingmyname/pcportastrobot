@@ -89,22 +89,9 @@
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Abstract emblem: blue orbit with a spark -->
-                    <Grid Grid.Row="0" Width="44" Height="44" Margin="0,18,0,26" HorizontalAlignment="Center"
-                          ToolTip="AstroHybrid">
-                        <Border CornerRadius="14" Background="{StaticResource NavActiveFillBrush}">
-                            <Border.Effect>
-                                <DropShadowEffect Color="#FF1F6FFF" BlurRadius="18" ShadowDepth="0" Opacity="0.55"/>
-                            </Border.Effect>
-                        </Border>
-                        <Ellipse Width="30" Height="11" Stroke="#CCFFFFFF" StrokeThickness="1.6" RenderTransformOrigin="0.5,0.5">
-                            <Ellipse.RenderTransform>
-                                <RotateTransform Angle="-24"/>
-                            </Ellipse.RenderTransform>
-                        </Ellipse>
-                        <Path Data="M 12,0 L 14.2,9.8 L 24,12 L 14.2,14.2 L 12,24 L 9.8,14.2 L 0,12 L 9.8,9.8 Z"
-                              Fill="White" Width="15" Height="15" Stretch="Uniform"/>
-                    </Grid>
+                    <!-- AstroHybrid logo -->
+                    <Image Grid.Row="0" Source="/Resources/astrohybrid.png" Width="48" Height="48" Margin="0,16,0,24"
+                           HorizontalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality" ToolTip="AstroHybrid"/>
 
                     <StackPanel Grid.Row="1" HorizontalAlignment="Center">
                         <RadioButton Style="{StaticResource NavButtonStyle}" ToolTip="Home"
