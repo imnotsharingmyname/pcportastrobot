@@ -10,7 +10,7 @@ on:
       version:
         description: "Package version string (e.g. 1.2.25)"
         required: false
-        default: "1.2.25"
+        default: "1.2.32"
 
 permissions:
   contents: write
@@ -128,6 +128,8 @@ jobs:
           dotnet-version: "8.0.x"
 
       - name: Publish self-contained Avalonia Linux GUI
+        env:
+          ASTROHYBRID_PACKAGE_VERSION: ${{ inputs.version }}
         run: |
           chmod +x Tools/linux/*.sh
           Tools/linux/publish-gui.sh

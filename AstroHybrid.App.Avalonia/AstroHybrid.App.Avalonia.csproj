@@ -2,6 +2,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <Version>1.2.32</Version>
     <RollForward>LatestMajor</RollForward>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
